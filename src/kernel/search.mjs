@@ -1,0 +1,87 @@
+// search.* tools — line-based regex grep and glob-ish file search, both jailed.
+import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { join, relative, extname } from 'node:path';
+import { ToolError } from './errors.mjs';
+import { inWorkspace } from './paths.mjs';
+
+const TEXT_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.txt', '.css', '.html', '.py', '.rs', '.go', '.java', '.yml', '.yaml', '.toml', '.sh', '.c', '.h', '.cpp', '.hpp', '.sql', '.env', '.gitignore', '.log', '']);
+
+function* walkFiles(dir, depth = 0) {
+  if (depth > 12) return;
+  for (const name of readdirSync(dir).sort()) {
+    if (name === '.git' || name === 'node_modules' || name === '.nc-tools') continue;
+    const full = join(dir, name);
+    let st;
+    try { st = statSync(full); } catch { continue; }
+    if (st.isDirectory()) yield* walkFiles(full, depth + 1);
+    else yield full;
+  }
+}
+
+export function makeSearchTools(root) {
+  const grep = ({ pattern, path = '.', glob, maxResults = 200 }) => {
+    let re;
+    try { re = new RegExp(pattern); } catch (e) {
+      throw new ToolError('ERR_BAD_REGEX', `Invalid regex: ${e.message}`, { pattern });
+    }
+    const base = inWorkspace(root, path);
+    if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
+    const matches = [];
+    let total = 0;
+    let truncated = false;
+    for (const file of walkFiles(base)) {
+      if (glob && !globMatch(glob, relative(base, file).replaceAll('\\', '/'))) continue;
+      if (!TEXT_EXT.has(extname(file).toLowerCase()) && extname(file) !== '') continue;
+      let content;
+      try { content = readFileSync(file, 'utf8'); } catch { continue; }
+      if (content.includes('\u0000')) continue; // binary
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (re.test(lines[i])) {
+          total += 1;
+          if (matches.length < maxResults) {
+            matches.push({
+              file: relative(root, file).replaceAll('\\', '/'),
+              line: i + 1,
+              text: lines[i].slice(0, 400),
+            });
+          } else {
+            truncated = true;
+          }
+        }
+      }
+    }
+    return { matches, total, truncated };
+  };
+
+  const files = ({ pattern, path = '.' }) => {
+    const base = inWorkspace(root, path);
+    if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
+    const out = [];
+    for (const file of walkFiles(base)) {
+      const rel = relative(base, file).replaceAll('\\', '/');
+      if (globMatch(pattern, rel)) out.push(relative(root, file).replaceAll('\\', '/'));
+    }
+    return { files: out, total: out.length };
+  };
+
+  return { 'search.grep': { handler: grep }, 'search.files': { handler: files } };
+}
+
+/** Minimal glob: ** crosses directories, * within a segment, ? one char. */
+export function globMatch(glob, str) {
+  const re = globEscape(glob);
+  return re.test(str);
+}
+function globEscape(glob) {
+  let rx = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*') {
+      if (glob[i + 1] === '*') { rx += '.*'; i++; if (glob[i + 1] === '/') i++; }
+      else rx += '[^/]*';
+    } else if (c === '?') rx += '[^/]';
+    else rx += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${rx}$`);
+}

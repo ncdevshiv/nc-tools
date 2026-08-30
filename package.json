@@ -1,0 +1,15 @@
+{
+  "name": "nc-tools",
+  "version": "0.1.0",
+  "description": "Typed machine API for coding agents — terminal-free kernel, MCP server, agent loop, benchmark.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test tests/",
+    "audit": "node tools/audit.mjs",
+    "bench": "node benchmark/harness.mjs"
+  },
+  "bin": {
+    "nc-tools-mcp": "src/mcp/server.mjs"
+  }
+}

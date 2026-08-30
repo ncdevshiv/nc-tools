@@ -1,0 +1,4 @@
+node_modules/
+.nc-tools/
+.env.bench
+benchmark/results/

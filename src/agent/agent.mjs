@@ -1,0 +1,101 @@
+// Reference terminal-free agent loop. Model gives tool calls; kernel executes.
+// No shell, no terminal. Works with any OpenAI-compatible chat endpoint.
+import { toolDescriptors } from '../kernel/descriptors.mjs';
+
+export function systemPrompt(workspaceRoot) {
+  return `You are a coding agent operating a machine through a typed tool API (nc-tools).
+There is NO shell and NO terminal. Do not attempt to run bash/sh commands except via proc.spawn
+for real programs (test runners, compilers, git is already provided as tools).
+
+Workspace root: ${workspaceRoot}
+
+Tool discipline:
+- Prefer patch.apply for edits: exact-match search/replace. Include enough context to be unique.
+- Use search.grep / search.files to locate code. Use fs.read to read files (paginated).
+- Structured errors carry hints (e.g. PATCH_NO_MATCH returns nearest candidate lines) — use them.
+- proc.spawn expects cmd + args array, never a shell string.
+- When the task is done, verify it (read the file back, run tests via proc.spawn), then reply with
+  a final summary message with NO tool calls.
+
+Reply format: think briefly, call tools as needed, then finish with a short plaintext summary.`;
+}
+
+/** Convert kernel tools to OpenAI tool schema format. */
+// Some providers require ^[a-zA-Z0-9_-]+$ for function names; kernel tools use
+// "fs.read" style. Map dotted names to underscored for the wire, and back on return.
+const WIRE = /^[a-zA-Z0-9_-]+$/;
+const toWire = (name) => WIRE.test(name) ? name : name.replaceAll('.', '__');
+const fromWire = (name) => name.includes('__') ? name.replaceAll('__', '.') : name;
+export { toWire, fromWire };
+
+export function openAiTools() {
+  return toolDescriptors().map((t) => ({
+    type: 'function',
+    function: { name: toWire(t.name), description: t.description, parameters: t.inputSchema },
+  }));
+}
+
+/**
+ * Run the agent loop until final answer, maxSteps cap, or API failure.
+ * @param {object} deps { chat(completionsBody) => responseJSON, kernel, log? }
+ * @returns {Promise<{finalText, steps, toolCalls, errors, usage, stopped: 'done'|'max_steps'|'api_error'}>}
+ */
+export async function runAgent({ chat, kernel, task, maxSteps = 30, log = () => {} }) {
+  const messages = [
+    { role: 'system', content: systemPrompt(kernel.root) },
+    { role: 'user', content: task },
+  ];
+  const tools = openAiTools();
+  let toolCalls = 0;
+  let errors = 0;
+  const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  let stopped = 'max_steps';
+  let finalText = null;
+
+  for (let step = 0; step < maxSteps; step++) {
+    let resp;
+    try {
+      resp = await chat({ model: undefined, messages, tools, tool_choice: 'auto' });
+    } catch (e) {
+      stopped = 'api_error';
+      finalText = `API error: ${e.message}`;
+      break;
+    }
+    const u = resp.usage;
+    if (u) { usage.prompt_tokens += u.prompt_tokens || 0; usage.completion_tokens += u.completion_tokens || 0; usage.total_tokens += u.total_tokens || 0; }
+
+    const choice = resp.choices?.[0];
+    const msg = choice?.message;
+    if (!msg) { stopped = 'api_error'; finalText = 'Malformed API response'; break; }
+
+    const assistantMsg = { role: 'assistant', content: msg.content ?? '' };
+    if (msg.tool_calls?.length) assistantMsg.tool_calls = msg.tool_calls;
+    messages.push(assistantMsg);
+
+    if (!msg.tool_calls?.length) {
+      stopped = choice.finish_reason === 'stop' ? 'done' : 'max_steps';
+      finalText = msg.content ?? '';
+      break;
+    }
+
+    for (const tc of msg.tool_calls) {
+      let args = {};
+      try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
+      const toolName = fromWire(tc.function.name);
+      log(`  step ${step + 1}: ${toolName} ${JSON.stringify(args).slice(0, 120)}`);
+      const out = await kernel.call(toolName, args);
+      if (!out.ok) errors += 1;
+      toolCalls += 1;
+      messages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: JSON.stringify(out.ok ? out.result : { error: out.error }).slice(0, 20_000),
+      });
+    }
+  }
+
+  if (stopped === 'max_steps' && finalText === null) {
+    finalText = 'Stopped at max steps without a final answer.';
+  }
+  return { finalText, steps: messages.length, toolCalls, errors, usage, stopped };
+}
