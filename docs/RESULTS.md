@@ -6,6 +6,58 @@ Endpoint: local proxyhub gateway (OpenAI-compatible), live upstream providers.
 Every run: fresh temp workspace, fresh git repo, agent loop capped at 40 steps,
 **independent verifier** checks the workspace afterward — the agent cannot self-report.
 
+## Wave 3: snapshots/rollback + chaos harness
+
+### What was built
+
+- **`sys.snapshot` / `sys.rollback` / `sys.listSnapshots`** — workspace
+  snapshots with manifest-based restore (restore changed files, remove
+  files created after the snapshot, leave `.git`/`.nc-tools`/`node_modules`
+  alone). The primitive that makes agent *speculation* safe.
+- **Kernel hooks** — the fault-injection seam. Any harness can register a
+  hook on `kernel.call`; injected failures are journaled like real ones, so
+  recovery from them is *measurable*. This is the experiment a terminal-based
+  harness cannot run: bash has no seams to inject faults into.
+- **`node benchmark/chaos.mjs`** — chaos runner. Injects 2 transient
+  `ERR_FLAKY` failures into test invocations (kernel arm: `test.run`; bash
+  arm: `proc.spawn` whose argv contains `--test`), then measures recovery.
+
+### Results: 16 runs (4 tasks × 2 models × 2 arms)
+
+Every run **SOLVED** — all flake injections were recovered from:
+
+| Task | Model | Arm | Flakes | Recovery (steps) | Snapshots |
+|---|---|---|---|---|---|
+| add-feature-with-test | glm / deepseek | kernel | 2 | [1, 0] / [1, 0] | 1 / 1 |
+| add-feature-with-test | glm / deepseek | bash | 2 | [1, 0] / [1, 0] | 0 / 0 |
+| multi-file-refactor | glm / deepseek | kernel | 2 | [0, 0] / [0, 0] | 1 / 1 |
+| multi-file-refactor | glm / deepseek | bash | 2 | [1, 0] / [1, 0] | 0 / 0 |
+| tdd-implement | glm / deepseek | kernel | 0* | — | 2 / 0 |
+| tdd-implement | glm / deepseek | bash | 2 | [1, 0] / [1, 0] | 0 / 0 |
+| find-and-fix-bug | glm / deepseek | kernel | 0* | — | 0 |
+| find-and-fix-bug | glm / deepseek | bash | 0* | — | 0 |
+
+What this shows:
+
+1. **Recovery is a single retry** — in every flake, the agent's next
+   same-target call succeeded (recovery step counts are 0–1). The agents
+   were told a flake was possible; the structured `ERR_FLAKY` code let them
+   distinguish "test runner hiccup" from "my change broke it" instantly.
+2. **Kernel-arm agents used snapshots — bash-arm agents could not.** 5 of 8
+   kernel runs called `sys.snapshot` before risky work (glm even took 2 on
+   tdd-implement); no bash run could, because with a shell string there is
+   no journal-point to roll back to. This is the speculation primitive
+   becoming visible in behavior, not just in a demo.
+3. **Chaos is fair to both arms, and honest about coverage.** Runs where the
+   agent simply didn't invoke the flake-target path get `flakes=0` (*). In
+   several kernel runs the agents chose `proc.spawn --test` instead of
+   `test.run`, escaping the injection by path choice — recorded, not hidden.
+
+The chaos harness is itself the deliverable: *the ability to run this
+experiment at all* is the difference between a typed machine API and a
+terminal. Verification of the chaos claim is in
+`benchmark/results/chaos/` (16 records + 16 journals).
+
 ## Wave 2: the "control" layer (beyond read/write/search/patch)
 
 The original goal was never just better file tools — it is replacing the

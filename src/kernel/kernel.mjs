@@ -13,6 +13,7 @@ import { makeTestTools } from './test.mjs';
 import { makePkgTools } from './pkg.mjs';
 import { makeNetTools } from './net.mjs';
 import { makeEnvTools } from './env.mjs';
+import { makeSnapshotTools } from './snapshot.mjs';
 import { ToolError } from './errors.mjs';
 
 export class Kernel {
@@ -32,12 +33,15 @@ export class Kernel {
       makePkgTools(root),
       makeNetTools(),
       makeEnvTools(this.sessionEnv),
+      makeSnapshotTools(root),
     ];
     /** @type {Map<string, {handler: Function, description?: string, inputSchema?: object}>} */
     this.tools = new Map();
     for (const fam of families) {
       for (const [name, def] of Object.entries(fam)) this.tools.set(name, def);
     }
+    /** Fault-injection hooks (chaos harness): hook(tool, args) => injected-error or null. */
+    this.hooks = [];
     // sys tools (need the kernel itself)
     this.tools.set('sys.journal', {
       handler: ({ lastN }) => ({ events: this.journal.lastN(lastN ?? 100), total: this.journal.seq }),
@@ -86,6 +90,15 @@ export class Kernel {
     if (!def) {
       const err = new ToolError('ERR_UNKNOWN_TOOL', `Unknown tool: ${tool}`, { available: this.listTools() });
       return this.#finish(callEvent, tool, false, null, err, started);
+    }
+    // Fault-injection hooks (chaos harness). An injected failure is journaled
+    // like any real one, so recovery from it is measurable.
+    for (const hook of this.hooks) {
+      const injected = hook(tool, args);
+      if (injected) {
+        const err = new ToolError(injected.code, injected.message, injected.hint);
+        return this.#finish(callEvent, tool, false, null, err, started);
+      }
     }
     try {
       const result = await def.handler(args);
