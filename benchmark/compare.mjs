@@ -15,7 +15,8 @@ const baseURL = process.env.NCTOOLS_LLM_BASEURL;
 const apiKey = process.env.NCTOOLS_LLM_APIKEY || '';
 const models = (process.env.NCTOOLS_LLM_MODELS || '').split(',').map((s) => s.trim()).filter(Boolean);
 const outDir = resolve(process.argv[2] || 'benchmark/results/compare');
-const onlyTask = process.env.NCTOOLS_TASK;
+const onlyTask = process.env.NCTOOLS_TASK || (process.env.NCTOOLS_TASKS ? null : null);
+const onlyTasks = (process.env.NCTOOLS_TASKS || '').split(',').map((s) => s.trim()).filter(Boolean);
 
 if (!baseURL || models.length === 0) {
   console.error('Usage: NCTOOLS_LLM_BASEURL=... NCTOOLS_LLM_APIKEY=... NCTOOLS_LLM_MODELS=a,b node benchmark/compare.mjs [outDir]');
@@ -43,6 +44,7 @@ for (const model of models) {
   const chat = makeChat({ baseURL, apiKey, model });
   for (const task of tasks) {
     if (onlyTask && task.id !== onlyTask) continue;
+    if (onlyTasks.length && !onlyTasks.includes(task.id)) continue;
     for (const mode of ['kernel', 'bash']) {
       const root = mkdtempSync(join(tmpdir(), `nccmp-${task.id}-${mode}-`));
       gitInit(root);
@@ -81,7 +83,14 @@ for (const model of models) {
       mkdirSync(runDir, { recursive: true });
       writeFileSync(join(runDir, `${task.id}.${mode}.json`), JSON.stringify(record, null, 2), 'utf8');
       writeFileSync(join(runDir, `${task.id}.${mode}.journal.jsonl`), journal.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
-      rmSync(root, { recursive: true, force: true });
+      // Windows: a fresh background server may still be starting when the run ends;
+      // let the OS finish releasing handles before we delete the workspace.
+      await new Promise((r) => setTimeout(r, 1200));
+      try {
+        rmSync(root, { recursive: true, force: true });
+      } catch (e) {
+        process.stderr.write(`warn: could not remove ${root}: ${e.message}\n`);
+      }
       summary.push(record);
       console.log(`[${model}/${mode}] ${task.id}: ${record.solved ? 'SOLVED' : 'FAILED'} (${result.toolCalls} calls, ${record.totalTokens ?? '?'} tok, ${(wallMs / 1000).toFixed(1)}s)`);
     }

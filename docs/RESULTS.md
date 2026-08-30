@@ -1,6 +1,73 @@
 # nc-tools Benchmark Results — Real Runs
 
-Date: 2026-08-30 (wave 4)
+Date: 2026-08-31 (wave 5: diverse ladder)
+
+## Wave 5: the diverse ladder — 18 tasks, easy → expert, 2 languages, 72 agent runs
+
+### The ladder (difficulty × language × type)
+
+| Tier | Tasks | Kind |
+|---|---|---|
+| easy | fix-off-by-one, rename-function (js); py-fix-slice, rename-python (py) | single-file, one-step |
+| medium | implement-fn-from-spec, find-and-fix-bug, add-feature-with-test, fix-trap, semantic-locate (js); py-csv-summary (py) | 2–3 steps, some exploration |
+| hard | multi-file-refactor, tdd-implement, git-multi-commit, env-config-app, multi-step-tdd, web-server-control (js) | multi-file, stateful, multi-tool |
+| expert | expert-refactor-lib | 4-module consolidation + cross-file import graph |
+
+### Every verifier is machine-proven, not assumed
+
+`benchmark/validate-verifiers.mjs` proves each verifier three ways on a fresh
+workspace: (1) untouched workspace must FAIL the verifier, (2) the canonical
+solution must PASS it, (3) a plausible-but-wrong solution must be REJECTED.
+**Result: 18/18 verifiers proven correct.** This validator found and fixed 6
+real defects (inverted gate logic, `require()` in ESM, TDD-order violation in
+my own canonical solution, probe-race in server tasks, answer-parser picking
+`coupons` over `calculateOrderTotal`, Windows EPERM on temp cleanup).
+
+### Full grid: 18 tasks × 2 models × 2 arms = 72 runs, 49 solved (68%)
+
+Per-model totals (kernel arm):
+
+| Model | Kernel arm | Wins over bash arm |
+|---|---|---|
+| deepseek-v4-flash | **17/18** | 3 extra solves (env-config, multi-step-tdd, web-server-control) |
+| glm-5.3-flash | 10/18 | 2 extra solves (fix-off-by-one, semantic-locate) |
+
+By difficulty (both models, kernel arm):
+
+| Tier | deepseek | glm |
+|---|---|---|
+| easy | 4/4 | 2/4 |
+| medium | 6/7 | 4/7 |
+| hard | 6/6 | 3/6 |
+| expert | 1/1 | 1/1 |
+
+By language (deepseek kernel): js 14/15, python 3/3.
+
+### Findings the ladder surfaced
+
+1. **The kernel arm wins exactly where the terminal is weakest**: all three
+   multi-tool/stateful tasks (env-config-app, multi-step-tdd,
+   web-server-control) were solved by deepseek/kernel and failed by
+   deepseek/bash — the process-handle + env + journal surface is the
+   differentiator, not the file tools.
+2. **Hard tasks are where the gap widens**: deepseek kernel 6/6 hard vs
+   deepseek bash 3/6; glm kernel 3/6 vs glm bash 1/6. On easy/medium the arms
+   are near-parity — the old "bash tokens are cheaper" finding only survives
+   on short tasks.
+3. **Both arms run 30+ calls on multi-file-refactor** — that task's import-
+   rewriting is hard for agents either way; the kernel arm does it 2× faster.
+4. **Bypass behavior appeared in a second arm**: deepseek bash on
+   semantic-locate imported the kernel module directly (`semrun.mjs`) to get
+   `search.semantic` — the journal exposed it again, scored as FAIL, and the
+   verifier flags `HARNESS-BYPASS`.
+5. **glm is genuinely weaker on the kernel surface** (10/18 vs 17/18): the
+   tool surface amplifies tool-calling discipline — the batching hints help
+   but don't level the field.
+
+Variance: not yet measured in repeats (each cell ran once); a repeat-run
+experiment is the next verification step.
+
+## Wave 4: neural tool + portability contract
 
 ## Wave 4: neural tool + portability contract
 

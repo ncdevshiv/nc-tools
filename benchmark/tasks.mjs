@@ -11,6 +11,8 @@ const tier2 = [
   {
     id: 'multi-file-refactor',
     category: 'refactor',
+    difficulty: 'hard',
+    language: 'js',
     instruction: `This project has a bug-prone duplicated helper: the function parseDuration appears in multiple files under src/ with slightly different implementations. Consolidate it: create src/duration.js exporting function parseDuration(text) that handles BOTH supported forms — plain integers ("120" meaning seconds) and suffixed forms ("90s", "5m", "2h" — seconds/minutes/hours). Update every file under src/ that currently defines its own parseDuration to import the shared one from './duration.js' instead (relative imports must be correct per file depth). Every existing test in test/ must still pass when you run: node --test test/`,
     setup: () => ({
       'src/audio.js': `export function parseDuration(text) {\n  return Number(text);\n}\n\nexport function clipLength(t) {\n  return parseDuration(t) * 1000;\n}\n`,
@@ -34,6 +36,8 @@ const tier2 = [
   {
     id: 'fix-trap',
     category: 'investigate',
+    difficulty: 'medium',
+    language: 'js',
     instruction: `Running "node src/server.js" fails with "EADDRINUSE: listen port 3000". The obvious conclusion is that another process holds port 3000 — but no other process is running. Diagnose the REAL cause in the code and fix it, without changing what the program is supposed to do (print "listening on 3000" after starting its internal listener).`,
     setup: () => ({
       'src/server.js': `// minimal stand-in for a server: a "listener" registry that refuses double binds\nconst boundPorts = new Set();\n\nfunction createListener(port) {\n  if (boundPorts.has(port)) {\n    const err = new Error('listen EADDRINUSE: address already in use ::: ' + port);\n    err.code = 'EADDRINUSE';\n    throw err;\n  }\n  boundPorts.add(port);\n  return {\n    close() { boundPorts.delete(port); },\n    get port() { return port; },\n  };\n}\n\nexport function start() {\n  // BUG: the "warmup" listener is created for a config pre-check and then\n  // abandoned without close(), so the real bind below hits EADDRINUSE.\n  const warmup = createListener(3000);\n  if (!warmup) throw new Error('warmup failed');\n  const main = createListener(3000);\n  return main;\n}\n\nif (process.argv[1] && process.argv[1].endsWith('server.js')) {\n  try {\n    const l = start();\n    console.log('listening on ' + l.port);\n  } catch (e) {\n    if (e.code === 'EADDRINUSE') {\n      console.error('EADDRINUSE: listen port 3000');\n      process.exit(1);\n    }\n    throw e;\n  }\n}\n`,
@@ -48,6 +52,8 @@ const tier2 = [
   {
     id: 'tdd-implement',
     category: 'create',
+    difficulty: 'hard',
+    language: 'js',
     instruction: `Write a test file test/roman.test.mjs (node:test + node:assert/strict) with REAL failing tests first for a roman numeral converter, then create src/roman.js exporting toRoman(n) and fromRoman(s) such that: toRoman(9) === 'IX', toRoman(2024) === 'MMXXIV', toRoman(0) === '' (empty string for 0), fromRoman('XIV') === 14, fromRoman('MMXXIV') === 2024, and fromRoman(toRoman(n)) === n for 0 <= n <= 3000. Run node --test test/roman.test.mjs and make it pass. Round-trip must actually be tested in the test file for at least 5 values.`,
     setup: () => ({}),
     verify: async (root, kernel) => {
@@ -75,6 +81,8 @@ const tier1 = [
   {
     id: 'fix-off-by-one',
     category: 'fix',
+    difficulty: 'easy',
+    language: 'js',
     instruction: `The file src/range.js has a function lastN(arr, n) that should return the LAST n elements of arr, but it returns the wrong slice. Fix it so lastN([1,2,3,4,5], 2) returns [4,5]. Do not change the function signature.`,
     setup: (root) => ({
       'src/range.js': `export function lastN(arr, n) {\n  return arr.slice(0, n);\n}\n`,
@@ -91,6 +99,8 @@ const tier1 = [
   {
     id: 'rename-function',
     category: 'refactor',
+    difficulty: 'easy',
+    language: 'js',
     instruction: `In src/calc.js, rename the function computeTotal to calculateTotal everywhere it appears (definition and all call sites). The behavior must not change. There may be multiple call sites.`,
     setup: (root) => ({
       'src/calc.js': `export function computeTotal(items) {\n  return items.reduce((s, i) => s + i.price, 0);\n}\n\nexport function withTax(items) {\n  return computeTotal(items) * 1.2;\n}\n`,
@@ -113,6 +123,8 @@ const tier1 = [
   {
     id: 'implement-fn-from-spec',
     category: 'create',
+    difficulty: 'medium',
+    language: 'js',
     instruction: `Create a file src/utils/debounce.js exporting a default function debounce(fn, waitMs) that returns a debounced wrapper: calls within waitMs of each other collapse so only the last one executes after the silence period. Also create src/utils/debounce.test.mjs with at least 2 real test cases using node:test and node:assert, then run the test file with node --test and make sure it passes.`,
     setup: () => ({}),
     verify: async (root, kernel) => {
@@ -128,6 +140,8 @@ const tier1 = [
   {
     id: 'find-and-fix-bug',
     category: 'investigate',
+    difficulty: 'medium',
+    language: 'js',
     instruction: `The program src/app.js crashes when run with "node src/app.js". Diagnose the cause and fix it so the program runs successfully and prints its expected output. Do not rewrite the program from scratch — find the actual bug.`,
     setup: () => ({
       'src/app.js': `import { readFileSync } from 'node:fs';\n\nfunction loadConfig() {\n  return JSON.parse(readFileSync('config.json', 'utf8'));\n}\n\nfunction main() {\n  const config = loadConfig();\n  const greet = config.greeting ?? 'hello';\n  console.log(greet + ' ' + config.name);\n}\n\nmain();\n`,
@@ -144,6 +158,8 @@ const tier1 = [
   {
     id: 'add-feature-with-test',
     category: 'edit',
+    difficulty: 'medium',
+    language: 'js',
     instruction: `src/stack.js implements a Stack class with push and pop. Add a peek() method that returns the top element WITHOUT removing it (returns undefined when empty), and an isEmpty() method returning a boolean. Then extend the existing test file src/stack.test.mjs with tests for both new methods and run the full test file to confirm everything passes.`,
     setup: () => ({
       'src/stack.js': `export class Stack {\n  #items = [];\n\n  push(item) {\n    this.#items.push(item);\n  }\n\n  pop() {\n    return this.#items.pop();\n  }\n\n  get size() {\n    return this.#items.length;\n  }\n}\n`,
@@ -162,12 +178,14 @@ const tier1 = [
   },
 ];
 
-export const tasks = [...tier1, ...tier2,
-  // semantic-search task: grep cannot solve this class of task (the string is
-  // unknown to the agent; only *meaning* describes it)
-  {
+import { tier3 } from './tier3.mjs';
+
+export const tasks = [...tier1, ...tier2, ...tier3,
+  { // semantic-locate and web-server-control are inline in tier2's export; see below
     id: 'semantic-locate',
     category: 'investigate',
+    difficulty: 'medium',
+    language: 'js',
     instruction: `The app's business logic lives across many files in src/. Find the code that calculates a customer's ENTIRE ORDER TOTAL including tax and discounts — NOT the code that computes tax alone, and NOT the code that applies coupons to a single line item — and tell me the file path and the function name. Do this efficiently: try to find it WITHOUT reading every file one by one (a semantic search tool exists). You MUST use search.semantic at least once. Reply with the exact path like src/xxx/yyy.js and the function name.`,
     setup: () => ({
       'src/billing/tax.js': `export function computeTax(amount) {\n  return amount * 0.18;\n}\n`,
@@ -180,19 +198,18 @@ export const tasks = [...tier1, ...tier2,
       // the ONLY module that computes the whole order total with tax+discounts.
       const GROUND_TRUTH = { path: 'src/billing/order-total.js', fn: 'calculateOrderTotal' };
       const pathMatch = finalText.match(/src\/[A-Za-z0-9_./-]+\.js/);
-      // function name: backticked identifier first (paths contain "/" so they
-      // can't match the identifier pattern); fall back to "Function:" phrasing.
+      // function name: prefer the backticked token that follows the word
+      // "function"/"Function"; otherwise the first backticked identifier
+      // that looks like a camelCase function and isn't a path fragment.
+      const fnFollow = finalText.match(/`([A-Za-z_][A-Za-z0-9_]*)`\s*(?:that|computes|returns|is|which)?[^`\n]*/i);
+      let answerFn = fnFollow ? fnFollow[1] : null;
       const backticked = finalText.match(/`([A-Za-z_][A-Za-z0-9_]*)`/g);
-      let answerFn = null;
-      for (const t of backticked || []) {
-        const name = t.slice(1, -1);
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !['name', 'path', 'file', 'function', 'js'].includes(name.toLowerCase())) {
-          answerFn = name;
-        }
-      }
-      if (!answerFn) {
-        const m = finalText.match(/Function:\s*`?([A-Za-z_][A-Za-z0-9_]*)`?/i);
-        answerFn = m ? (m[1] === 'name' ? null : m[1]) : null;
+      const candidates = (backticked || []).map((t) => t.slice(1, -1)).filter((n) =>
+        /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !['name', 'path', 'file', 'function', 'js', 'coupons', 'items', 'tax'].includes(n.toLowerCase()));
+      if (!answerFn || candidates.length === 0) {
+        // fall back: the token right after "function"
+        const m = finalText.match(/function\s+`?([A-Za-z_][A-Za-z0-9_]*)`?/i);
+        answerFn = m && m[1] !== 'name' ? m[1] : (candidates.length ? candidates[candidates.length - 1] : null);
       }
       const answerPath = pathMatch ? pathMatch[0] : null;
       // correctness: answer must name the ground-truth module + function
@@ -226,6 +243,8 @@ export const tasks = [...tier1, ...tier2,
   {
     id: 'web-server-control',
     category: 'control',
+    difficulty: 'hard',
+    language: 'js',
     instruction: `The workspace contains src/server.js, an HTTP server. Your job — without ever using proc.spawn for the server itself:
 1. Start the server as a background process using proc.start (it listens on port 4123).
 2. Wait until it is actually serving: poll net.probePort until port 4123 is open.
