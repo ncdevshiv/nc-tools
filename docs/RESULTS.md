@@ -1,11 +1,60 @@
 # nc-tools Benchmark Results — Real Runs
 
-Date: 2026-08-30
-Harness: `node benchmark/harness.mjs benchmark/results/run2`
+Date: 2026-08-30 (updated after P0 wave)
+Harness: `node benchmark/compare.mjs` — 8 tasks x 2 models x 2 arms = **32 runs**.
 Endpoint: local proxyhub gateway (OpenAI-compatible), live upstream providers.
 Every run: fresh temp workspace, fresh git repo, agent loop capped at 40 steps,
 **independent verifier** checks the workspace afterward (real `node --test`
 runs, real behavior checks via `proc.spawn`) — the agent cannot self-report.
+
+## P0 wave: what changed since the first comparison
+
+Kernel gained (all unit-tested, 35/35 passing):
+- **Batch operations** `fs.readMany`, `fs.writeMany`, `patch.applyMany`, and
+  `batch.execute` (up to 25 tool calls in one round-trip, individually journaled)
+- **Actionable error hints**: `ERR_NOT_FOUND` returns nearest existing files
+  (typo recovery), `ERR_PATH_ESCAPE` returns the workspace root + suggestion
+- **Read digests**: `fs.read` returns sha256+mtime so agents can skip re-reads
+- **Behavior metrics** computed from the journal: wasted-call ratio
+  (errored + redundant calls), recovery analysis (steps from error → fixed),
+  tool histogram — metrics Terminal-Bench cannot compute because a shell has
+  no seams to observe them
+
+## Head-to-head results (32 runs)
+
+| Model | Arm | Solved | Calls | Redundant | Errored | Tokens | Wall (s) |
+|---|---|---|---|---|---|---|---|
+| glm-5.3-flash | **kernel** | 8/8 | 58 | 6 | 1 | ~133k | 1066 |
+| glm-5.3-flash | **bash** | 8/8 | 37 | 0 | 1 | ~61k | 733 |
+| deepseek-v4-flash | **kernel** | **8/8** | 50 | 4 | 3 | ~228k | 195 |
+| deepseek-v4-flash | **bash** | 7/8 | 64 | 2 | 3 | ~374k | 584 |
+
+Recovery events (structured error → next same-tool success):
+kernel arm recovered **4/4** (median 1–2 steps); bash arm had zero recoverable
+error events by construction — its errors are stderr text, not typed events.
+
+### What the numbers support now
+
+1. **deepseek/kernel is the only 8/8**, and it did so with ~39% fewer tokens
+   than deepseek/bash (228k vs 374k) and 3x faster wall time. The gap flipped
+   after the P0 changes because (a) batch ops let one call carry multi-file
+   work, and (b) on the hardest task (`multi-file-refactor`, 3 files + shared
+   module + import rewriting) bash needed 26 calls/265k tokens where the
+   kernel arm needed 8 calls/49k tokens.
+2. **glm still favors bash on tokens** (61k vs 133k) but ties 8/8. glm is a
+   weaker tool-caller that batched poorly in the kernel arm (6 redundant
+   calls) — the deficit is now attributable to the model, not the surface.
+3. **The discriminating task worked**: `multi-file-refactor` is where the
+   arms diverge most. First iteration of this task exposed two harness bugs
+   (Windows `node --test <dir>` semantics; a verifier that counted the
+   canonical definition as a duplicate) — both fixed and both documented
+   here because a benchmark with silent verifier bugs is worse than none.
+4. **Error semantics are visible in the data**: every kernel-arm error was a
+   typed event with a code, hints, and a recorded recovery path. The bash
+   arm's `1 errored`/`3 errored` numbers are exit-code counts only — there is
+   no way to know what the model saw or how it recovered.
+
+## Head-to-head: typed kernel tools vs bash-only (original run, pre-P0)
 
 ## Command to reproduce
 

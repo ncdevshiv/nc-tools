@@ -1,6 +1,7 @@
 // Workspace path jail: resolve any tool path against the workspace root and
 // refuse escapes. This is the safety boundary of the whole kernel.
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep, dirname, basename, relative } from 'node:path';
+import { readdirSync, existsSync } from 'node:fs';
 import { ToolError } from './errors.mjs';
 
 /**
@@ -15,10 +16,18 @@ export function inWorkspace(root, p) {
   const abs = isAbsolute(p) ? resolve(p) : resolve(join(root, p));
   const normRoot = resolve(root);
   if (abs !== normRoot && !abs.startsWith(normRoot + sep)) {
+    // Actionable hint: what DOES exist near where the agent probably wanted to be?
+    const hint = { workspaceRoot: normRoot, attempted: abs };
+    try {
+      const dir = dirname(abs);
+      const names = existsSync(dir) ? readdirSync(dir).filter((n) => !n.startsWith('.')).sort().slice(0, 8) : [];
+      if (names.length) hint.existingEntries = names.map((n) => relative(normRoot, join(dir, n)).replaceAll('\\', '/'));
+      hint.suggestion = 'Paths must stay inside the workspace root. Use fs.list {path:"."} to orient.';
+    } catch { /* best-effort hint */ }
     throw new ToolError(
       'ERR_PATH_ESCAPE',
       `Path escapes workspace: ${p} resolves outside ${normRoot}`,
-      { workspaceRoot: normRoot, attempted: abs }
+      hint
     );
   }
   return abs;

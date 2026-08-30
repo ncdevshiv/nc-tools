@@ -1,8 +1,10 @@
 // patch.apply — exact-match search/replace editing with occurrence semantics.
 // This replaces sed/regex line surgery with a deliberate, verifiable edit.
-import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { dirname, basename, relative, join } from 'node:path';
 import { ToolError } from './errors.mjs';
 import { inWorkspace } from './paths.mjs';
+import { nearestSiblings } from './fs.mjs';
 
 /**
  * Apply edits [{oldText, newText, expectedCount?}] to a file.
@@ -13,7 +15,7 @@ export function makePatchTools(root) {
   const apply = ({ path, edits }) => {
     const abs = inWorkspace(root, path);
     if (!existsSync(abs) || statSync(abs).isDirectory()) {
-      throw new ToolError('ERR_NOT_FOUND', `No such file: ${path}`, { path });
+      throw new ToolError('ERR_NOT_FOUND', `No such file: ${path}`, { path, nearestExisting: nearestSiblings(root, abs) });
     }
     const src = readFileSync(abs, 'utf8');
     const lines = src.split('\n');
@@ -49,7 +51,26 @@ export function makePatchTools(root) {
     return { path, applied, bytes: Buffer.byteLength(out, 'utf8') };
   };
 
-  return { 'patch.apply': { handler: apply } };
+  /** Apply patch edits to many files in one call. Stops collecting on first per-file error. */
+  const applyMany = ({ edits: fileEdits }) => {
+    if (!Array.isArray(fileEdits) || fileEdits.length === 0) {
+      throw new ToolError('ERR_BAD_INPUT', 'edits must be a non-empty array of {path, edits}');
+    }
+    if (fileEdits.length > 20) throw new ToolError('ERR_BAD_INPUT', 'max 20 files per patch.applyMany call');
+    const results = [];
+    for (const fe of fileEdits) {
+      try {
+        const r = apply({ path: fe.path, edits: fe.edits });
+        results.push({ path: fe.path, ok: true, applied: r.applied });
+      } catch (e) {
+        results.push({ path: fe.path, ok: false, error: e instanceof ToolError ? e.toJSON() : { code: 'ERR_INTERNAL', message: e.message } });
+      }
+    }
+    const failed = results.filter((r) => !r.ok);
+    return { results, patched: results.length - failed.length, failed: failed.length };
+  };
+
+  return { 'patch.apply': { handler: apply }, 'patch.applyMany': { handler: applyMany } };
 }
 
 /** Find line numbers of lines that share the most tokens with oldText. */

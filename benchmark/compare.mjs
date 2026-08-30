@@ -9,6 +9,7 @@ import { Kernel } from '../src/kernel/kernel.mjs';
 import { runAgent } from '../src/agent/agent.mjs';
 import { makeChat } from '../src/agent/llm.mjs';
 import { tasks } from './tasks.mjs';
+import { behaviorMetrics } from './metrics.mjs';
 
 const baseURL = process.env.NCTOOLS_LLM_BASEURL;
 const apiKey = process.env.NCTOOLS_LLM_APIKEY || '';
@@ -61,6 +62,7 @@ for (const model of models) {
       } catch (e) {
         verdict = { pass: false, evidence: `verifier error: ${e.message}` };
       }
+      const journal = kernel.journal.readAll();
       const record = {
         task: task.id, category: task.category, model, mode,
         solved: verdict.pass === true,
@@ -71,10 +73,10 @@ for (const model of models) {
         completionTokens: result.usage.completion_tokens ?? null,
         totalTokens: result.usage.total_tokens ?? null,
         wallMs,
+        behavior: behaviorMetrics(journal),
         finalText: String(result.finalText || '').slice(0, 300),
         ts: new Date().toISOString(),
       };
-      const journal = kernel.journal.readAll();
       const runDir = join(outDir, `${model.replaceAll(/[/:]/g, '_')}`);
       mkdirSync(runDir, { recursive: true });
       writeFileSync(join(runDir, `${task.id}.${mode}.json`), JSON.stringify(record, null, 2), 'utf8');

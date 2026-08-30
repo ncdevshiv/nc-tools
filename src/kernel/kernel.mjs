@@ -35,6 +35,30 @@ export class Kernel {
     this.tools.set('sys.workspace', {
       handler: () => ({ root: this.root, platform: process.platform, node: process.version }),
     });
+    // batch.execute — run a list of kernel calls in one round-trip.
+    // Each sub-call is executed and journaled individually; one bad item does not abort the rest.
+    this.tools.set('batch.execute', {
+      handler: async ({ calls }) => {
+        if (!Array.isArray(calls) || calls.length === 0) {
+          throw new ToolError('ERR_BAD_INPUT', 'calls must be a non-empty array of {tool, args}');
+        }
+        if (calls.length > 25) throw new ToolError('ERR_BAD_INPUT', 'max 25 calls per batch.execute');
+        const results = [];
+        for (const c of calls) {
+          if (!c || typeof c.tool !== 'string') {
+            results.push({ ok: false, error: { code: 'ERR_BAD_INPUT', message: 'each call needs a string tool' } });
+            continue;
+          }
+          if (c.tool === 'batch.execute') {
+            results.push({ ok: false, error: { code: 'ERR_REFUSED', message: 'batch.execute cannot nest itself' } });
+            continue;
+          }
+          results.push(await this.call(c.tool, c.args ?? {}));
+        }
+        const okCount = results.filter((r) => r.ok).length;
+        return { results, ok: okCount, failed: results.length - okCount };
+      },
+    });
   }
 
   listTools() {

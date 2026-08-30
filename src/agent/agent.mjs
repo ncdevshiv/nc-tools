@@ -10,9 +10,14 @@ for real programs (test runners, compilers, git is already provided as tools).
 Workspace root: ${workspaceRoot}
 
 Tool discipline:
+- BATCH independent work: fs.readMany / fs.writeMany / patch.applyMany / batch.execute exist
+  so you do not pay one round-trip per tiny operation. Use them.
 - Prefer patch.apply for edits: exact-match search/replace. Include enough context to be unique.
-- Use search.grep / search.files to locate code. Use fs.read to read files (paginated).
-- Structured errors carry hints (e.g. PATCH_NO_MATCH returns nearest candidate lines) — use them.
+- fs.read returns a digest (hash+mtime). If the digest matches what you already saw, the file
+  is unchanged — do not re-read it.
+- Use search.grep / search.files to locate code. Structured errors carry actionable hints
+  (e.g. PATCH_NO_MATCH returns nearest candidate lines, ERR_NOT_FOUND returns nearest existing
+  files) — use them instead of re-orienting with more calls.
 - proc.spawn expects cmd + args array, never a shell string.
 - When the task is done, verify it (read the file back, run tests via proc.spawn), then reply with
   a final summary message with NO tool calls.

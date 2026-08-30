@@ -2,7 +2,76 @@
 // fresh workspace), verify (async (root, kernel) => {pass, evidence}).
 // Verifiers use the real filesystem — no self-reporting.
 
-export const tasks = [
+// ============ Tier 2: discriminating tasks (multi-file, trap, TDD) ============
+// These are harder on purpose: they test recovery, multi-file coordination,
+// and instruction following — the dimensions where typed tools are expected
+// to differentiate. Verifiers stay independent and behavioral.
+
+const tier2 = [
+  {
+    id: 'multi-file-refactor',
+    category: 'refactor',
+    instruction: `This project has a bug-prone duplicated helper: the function parseDuration appears in multiple files under src/ with slightly different implementations. Consolidate it: create src/duration.js exporting function parseDuration(text) that handles BOTH supported forms — plain integers ("120" meaning seconds) and suffixed forms ("90s", "5m", "2h" — seconds/minutes/hours). Update every file under src/ that currently defines its own parseDuration to import the shared one from './duration.js' instead (relative imports must be correct per file depth). Every existing test in test/ must still pass when you run: node --test test/`,
+    setup: () => ({
+      'src/audio.js': `export function parseDuration(text) {\n  return Number(text);\n}\n\nexport function clipLength(t) {\n  return parseDuration(t) * 1000;\n}\n`,
+      'src/scheduler.js': `export function parseDuration(text) {\n  const m = text.match(/^(\\d+)([smh]?)$/);\n  if (!m) return NaN;\n  const n = Number(m[1]);\n  return m[2] === 'm' ? n * 60 : m[2] === 'h' ? n * 3600 : n;\n}\n\nexport function scheduleAt(text, start) {\n  return start + parseDuration(text) * 1000;\n}\n`,
+      'test/duration.test.mjs': `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { parseDuration } from '../src/duration.js';\nimport { clipLength } from '../src/audio.js';\nimport { scheduleAt } from '../src/scheduler.js';\n\ntest('plain seconds via shared module', () => {\n  assert.equal(parseDuration('120'), 120);\n  assert.equal(clipLength('2'), 2000);\n});\n\ntest('suffixed forms via shared module', () => {\n  assert.equal(scheduleAt('90s', 0), 90000);\n  assert.equal(scheduleAt('5m', 0), 300000);\n  assert.equal(scheduleAt('2h', 0), 7200000);\n});\n`,
+    }),
+    verify: async (root, kernel) => {
+      // 1. only the canonical definition in src/duration.js may exist; every
+      //    OTHER file under src/ must no longer define parseDuration
+      const defs = await kernel.call('search.grep', { pattern: 'function parseDuration', path: 'src' });
+      const dupes = defs.result.matches.filter((m) => m.file !== 'src/duration.js').length;
+      // 2. duration.js exists and handles both forms
+      const run = await kernel.call('proc.spawn', {
+        cmd: 'node', args: ['--test', 'test/*.test.mjs'], cwd: '.', timeoutMs: 60_000,
+      });
+      const dur = await kernel.call('fs.stat', { path: 'src/duration.js' });
+      const pass = dupes === 0 && dur.result?.exists && run.ok && run.result.exitCode === 0;
+      return { pass, evidence: `non-canonical parseDuration defs left in src/: ${dupes}; duration.js exists: ${!!dur.result?.exists}; tests: ${(run.result?.stdout || run.result?.stderr || '').slice(-200)}` };
+    },
+  },
+  {
+    id: 'fix-trap',
+    category: 'investigate',
+    instruction: `Running "node src/server.js" fails with "EADDRINUSE: listen port 3000". The obvious conclusion is that another process holds port 3000 — but no other process is running. Diagnose the REAL cause in the code and fix it, without changing what the program is supposed to do (print "listening on 3000" after starting its internal listener).`,
+    setup: () => ({
+      'src/server.js': `// minimal stand-in for a server: a "listener" registry that refuses double binds\nconst boundPorts = new Set();\n\nfunction createListener(port) {\n  if (boundPorts.has(port)) {\n    const err = new Error('listen EADDRINUSE: address already in use ::: ' + port);\n    err.code = 'EADDRINUSE';\n    throw err;\n  }\n  boundPorts.add(port);\n  return {\n    close() { boundPorts.delete(port); },\n    get port() { return port; },\n  };\n}\n\nexport function start() {\n  // BUG: the "warmup" listener is created for a config pre-check and then\n  // abandoned without close(), so the real bind below hits EADDRINUSE.\n  const warmup = createListener(3000);\n  if (!warmup) throw new Error('warmup failed');\n  const main = createListener(3000);\n  return main;\n}\n\nif (process.argv[1] && process.argv[1].endsWith('server.js')) {\n  try {\n    const l = start();\n    console.log('listening on ' + l.port);\n  } catch (e) {\n    if (e.code === 'EADDRINUSE') {\n      console.error('EADDRINUSE: listen port 3000');\n      process.exit(1);\n    }\n    throw e;\n  }\n}\n`,
+    }),
+    verify: async (root, kernel) => {
+      const run = await kernel.call('proc.spawn', { cmd: 'node', args: ['src/server.js'], cwd: '.', timeoutMs: 30_000 });
+      const out = (run.result?.stdout || '').trim();
+      const pass = run.ok && run.result.exitCode === 0 && out === 'listening on 3000';
+      return { pass, evidence: `exit=${run.result?.exitCode} stdout=${JSON.stringify(out)} stderr=${(run.result?.stderr || '').slice(0, 150)}` };
+    },
+  },
+  {
+    id: 'tdd-implement',
+    category: 'create',
+    instruction: `Write a test file test/roman.test.mjs (node:test + node:assert/strict) with REAL failing tests first for a roman numeral converter, then create src/roman.js exporting toRoman(n) and fromRoman(s) such that: toRoman(9) === 'IX', toRoman(2024) === 'MMXXIV', toRoman(0) === '' (empty string for 0), fromRoman('XIV') === 14, fromRoman('MMXXIV') === 2024, and fromRoman(toRoman(n)) === n for 0 <= n <= 3000. Run node --test test/roman.test.mjs and make it pass. Round-trip must actually be tested in the test file for at least 5 values.`,
+    setup: () => ({}),
+    verify: async (root, kernel) => {
+      const run = await kernel.call('proc.spawn', {
+        cmd: 'node', args: ['--test', 'test/roman.test.mjs'], cwd: '.', timeoutMs: 60_000,
+      });
+      const testSrc = await kernel.call('fs.read', { path: 'test/roman.test.mjs' }).catch(() => null);
+      const src = testSrc?.result?.content || '';
+      const hasRoundTrip = /fromRoman\s*\(\s*toRoman/.test(src);
+      const impl = await kernel.call('fs.stat', { path: 'src/roman.js' });
+      // independent behavior probe (not trusting the agent's tests alone)
+      const probe = await kernel.call('proc.spawn', {
+        cmd: 'node', args: ['--input-type=module', '-e',
+          `import { toRoman, fromRoman } from './src/roman.js';\nconst checks = [[9,'IX'],[2024,'MMXXIV'],[0,'']];\nfor (const [n, r] of checks) if (toRoman(n) !== r) { console.error('toRoman(' + n + ')=' + toRoman(n)); process.exit(1); }\nif (fromRoman('XIV') !== 14) { console.error('fromRoman XIV=' + fromRoman('XIV')); process.exit(1); }\nif (fromRoman('MMXXIV') !== 2024) process.exit(1);\nfor (const n of [0, 1, 42, 999, 3000]) if (fromRoman(toRoman(n)) !== n) { console.error('roundtrip ' + n); process.exit(1); }\nconsole.log('PROBE-PASS');`],
+        cwd: '.', timeoutMs: 30_000,
+      });
+      const pass = run.ok && run.result.exitCode === 0 && hasRoundTrip && impl.result?.exists && probe.result?.exitCode === 0;
+      return { pass, evidence: `agent tests exit=${run.result?.exitCode}; roundtrip-in-tests=${hasRoundTrip}; independent probe: ${probe.result?.stdout || probe.result?.stderr || probe.error?.message || 'n/a'}` };
+    },
+  },
+];
+
+// Tier 1 tasks (single-file, short-horizon)
+const tier1 = [
   {
     id: 'fix-off-by-one',
     category: 'fix',
@@ -92,3 +161,5 @@ export const tasks = [
     },
   },
 ];
+
+export const tasks = [...tier1, ...tier2];
