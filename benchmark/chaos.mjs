@@ -84,7 +84,7 @@ for (const model of models) {
       }
       const wallMs = Date.now() - started;
       let verdict;
-      try { verdict = await task.verify(root, kernel); } catch (e) { verdict = { pass: false, evidence: `verifier error: ${e.message}` }; }
+      try { verdict = await task.verify(root, kernel, result.finalText, mode); } catch (e) { verdict = { pass: false, evidence: `verifier error: ${e.message}` }; }
       const journal = kernel.journal.readAll();
       const flakeEvents = journal.filter((e) => e.kind === 'tool.result' && e.error?.code === 'ERR_FLAKY');
       // recovery: after each flake, steps until next successful same-target call

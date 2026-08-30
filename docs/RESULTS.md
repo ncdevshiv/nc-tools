@@ -1,6 +1,63 @@
 # nc-tools Benchmark Results — Real Runs
 
-Date: 2026-08-30 (wave 2)
+Date: 2026-08-30 (wave 4)
+
+## Wave 4: neural tool + portability contract
+
+### search.semantic — a real neural network inside the tool surface
+
+`search.semantic` embeds workspace files with a local MiniLM transformer
+(`Xenova/all-MiniLM-L6-v2`, ~90MB, runs in-process via @xenova/transformers —
+no API calls, no remote model). Queries rank files by cosine similarity.
+This is a capability grep provably lacks: it matches by *meaning*.
+
+Proven: first run downloaded the model (6.5s), cached it in
+`.nc-tools/model-cache`; unit tests verify that for a credit-card query,
+`payments.js` ranks above an unrelated `footer.html` (3/3 semantic tests
+pass, 0 skipped).
+
+### semantic-locate task: kernel arm with the neural tool vs bash arm
+
+Task: find the code computing a customer's ENTIRE order total (tax + discounts
++ shipping) — the modules for tax alone and per-line coupons are deliberate
+decoys. Ground truth: `src/billing/order-total.js` / `calculateOrderTotal`.
+The verifier parses the agent's answer, checks it against ground truth,
+asserts the file+function exist on disk, and requires `search.semantic`
+usage on the kernel arm (journal-verifiable).
+
+| Arm (deepseek-v4-flash) | Solved | Calls | Tokens | Wall |
+|---|---|---|---|---|
+| kernel (has search.semantic) | **PASS** | **3** | 16.9k | **14.7s** |
+| bash | FAIL | 27 | 308k | 416.6s |
+
+The bash arm answered correctly after 27 calls (9 greps + 17 cats — reading
+every file), 18x the tokens and 28x the wall time of the kernel arm, and
+still did not satisfy the semantic requirement until it **bypassed the
+harness itself**: it wrote `semrun.mjs`, imported the kernel module directly
+from disk (`file:///F:/nc-tools/src/kernel/kernel.mjs`), and called
+`search.semantic` outside the tool surface. The verifier detects and flags
+this (`HARNESS-BYPASS DETECTED`) — the journals of both arms are in
+`benchmark/results/semantic-locate2/`.
+
+Takeaway: the semantic tool isn't just cheaper, it's a different strategy —
+3 calls vs 27. And the bypass incident is itself data: agents that can read
+the host filesystem will reach around a harness boundary; a journal-based
+verifier that flags it is the defense.
+
+### Portability contract — any language, verified
+
+- **`docs/PROTOCOL.md`** — language-neutral kernel spec: 40 tools and their
+  invariants, journal schema, error taxonomy, transport bindings, and what a
+  conforming port must do.
+- **`tools/conformance.mjs`** — black-box suite: 14 cases driving a kernel as
+  an opaque MCP-stdio process (handshake, tool count/schemas, error codes
+  byte-exact, patch ambiguity, journal pairing, snapshot rollback, env
+  propagation, shell-injection refusal).
+- Result: **14/14 against the reference JS kernel.** Point a Rust/Go/Python
+  port at the same suite with only `NCTOOLS_CONFORMANCE_CMD` changed — that's
+  the portability criterion. `conformance/cases.mjs` holds the cases.
+
+## Wave 3: snapshots/rollback + chaos harness
 Harness: `node benchmark/compare.mjs` — head-to-head arms + the wave-2 control task.
 Endpoint: local proxyhub gateway (OpenAI-compatible), live upstream providers.
 Every run: fresh temp workspace, fresh git repo, agent loop capped at 40 steps,

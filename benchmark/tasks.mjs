@@ -163,6 +163,65 @@ const tier1 = [
 ];
 
 export const tasks = [...tier1, ...tier2,
+  // semantic-search task: grep cannot solve this class of task (the string is
+  // unknown to the agent; only *meaning* describes it)
+  {
+    id: 'semantic-locate',
+    category: 'investigate',
+    instruction: `The app's business logic lives across many files in src/. Find the code that calculates a customer's ENTIRE ORDER TOTAL including tax and discounts — NOT the code that computes tax alone, and NOT the code that applies coupons to a single line item — and tell me the file path and the function name. Do this efficiently: try to find it WITHOUT reading every file one by one (a semantic search tool exists). You MUST use search.semantic at least once. Reply with the exact path like src/xxx/yyy.js and the function name.`,
+    setup: () => ({
+      'src/billing/tax.js': `export function computeTax(amount) {\n  return amount * 0.18;\n}\n`,
+      'src/billing/lineitem.js': `export function applyCoupon(price, coupon) {\n  return coupon.valid ? price * (1 - coupon.percent / 100) : price;\n}\n`,
+      'src/billing/shipping.js': `export function shippingCost(items) {\n  return items.length === 0 ? 0 : 5.5;\n}\n`,
+      'src/billing/order-total.js': `import { computeTax } from './tax.js';\nimport { shippingCost } from './shipping.js';\n\n// The whole order: subtotal, coupons per line, tax, shipping\nexport function calculateOrderTotal(items, coupons) {\n  const subtotal = items.reduce((sum, it) => sum + it.price, 0);\n  const discounted = items.reduce((sum, it, i) => sum + applyCoupon(it.price, coupons[i] ?? {}), 0);\n  const tax = computeTax(discounted);\n  return discounted + tax + shippingCost(items);\n}\n`,
+    }),
+    verify: async (root, kernel, finalText = '', mode = 'kernel') => {
+      // Ground truth for this task (deterministic — the task is fixed):
+      // the ONLY module that computes the whole order total with tax+discounts.
+      const GROUND_TRUTH = { path: 'src/billing/order-total.js', fn: 'calculateOrderTotal' };
+      const pathMatch = finalText.match(/src\/[A-Za-z0-9_./-]+\.js/);
+      // function name: backticked identifier first (paths contain "/" so they
+      // can't match the identifier pattern); fall back to "Function:" phrasing.
+      const backticked = finalText.match(/`([A-Za-z_][A-Za-z0-9_]*)`/g);
+      let answerFn = null;
+      for (const t of backticked || []) {
+        const name = t.slice(1, -1);
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !['name', 'path', 'file', 'function', 'js'].includes(name.toLowerCase())) {
+          answerFn = name;
+        }
+      }
+      if (!answerFn) {
+        const m = finalText.match(/Function:\s*`?([A-Za-z_][A-Za-z0-9_]*)`?/i);
+        answerFn = m ? (m[1] === 'name' ? null : m[1]) : null;
+      }
+      const answerPath = pathMatch ? pathMatch[0] : null;
+      // correctness: answer must name the ground-truth module + function
+      const correct = answerPath === GROUND_TRUTH.path && answerFn === GROUND_TRUTH.fn;
+      // disk proof: the named file exists AND contains the named function
+      let onDisk = false;
+      if (answerPath && answerFn) {
+        const st = await kernel.call('fs.stat', { path: answerPath });
+        if (st.result?.exists) {
+          const read = await kernel.call('fs.read', { path: answerPath });
+          onDisk = new RegExp(`function\\s+${answerFn}|export\\s+function\\s+${answerFn}|const\\s+${answerFn}\\s*=`).test(read.result?.content || '');
+        }
+      }
+      const journal = kernel.journal.readAll();
+      // usedSemantic is only a hard requirement when the agent actually has
+      // the tool (kernel arm). The bash arm has no search.semantic tool — if
+      // the journal shows one anyway, the model bypassed the harness by
+      // importing the kernel module directly: report it, don't count it.
+      const semanticViaAgent = journal.some((e) => e.kind === 'tool.call' && e.tool === 'search.semantic');
+      const bypass = mode === 'bash' && semanticViaAgent;
+      const pass = correct && onDisk && (mode === 'bash' ? true : semanticViaAgent);
+      const reason = !correct ? 'wrong target (must be the order-total module)'
+        : !onDisk ? 'answer not on disk'
+        : mode === 'kernel' && !semanticViaAgent ? 'kernel arm never used search.semantic'
+        : bypass ? 'bash arm bypassed the harness (kernel module import)'
+        : 'verified';
+      return { pass, evidence: `answer=${answerPath}/${answerFn}; correct=${correct}; onDisk=${onDisk}; semanticInJournal=${semanticViaAgent}${bypass ? '; HARNESS-BYPASS DETECTED' : ''} (${reason})` };
+    },
+  },
   // Wave-2 demo: the workflow that historically required terminal tabs and curl.
   {
     id: 'web-server-control',

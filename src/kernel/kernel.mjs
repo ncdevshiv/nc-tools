@@ -14,6 +14,7 @@ import { makePkgTools } from './pkg.mjs';
 import { makeNetTools } from './net.mjs';
 import { makeEnvTools } from './env.mjs';
 import { makeSnapshotTools } from './snapshot.mjs';
+import { makeSemanticTools } from './semantic.mjs';
 import { ToolError } from './errors.mjs';
 
 export class Kernel {
@@ -34,6 +35,7 @@ export class Kernel {
       makeNetTools(),
       makeEnvTools(this.sessionEnv),
       makeSnapshotTools(root),
+      makeSemanticTools(root),
     ];
     /** @type {Map<string, {handler: Function, description?: string, inputSchema?: object}>} */
     this.tools = new Map();

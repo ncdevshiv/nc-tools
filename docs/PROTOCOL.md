@@ -1,0 +1,159 @@
+# nc-tools Kernel Protocol v1 — language-neutral portability spec
+
+This document is the contract for *any* reimplementation of the nc-tools
+kernel — Rust, Go, Python, Java, or a different JS runtime — that claims to
+be a compatible nc-tools implementation. The reference implementation is
+`src/` (JS/Node); a port must pass the conformance suite
+(`tools/conformance.mjs`) without modification.
+
+## 1. Scope
+
+`docs/PROTOCOL.md` defines: (a) the machine API surface (tools + schemas),
+(b) the session (workspace, env, process handles), (c) the journal format,
+(d) the error taxonomy, (e) the transport bindings, and (f) conformance
+requirements. It deliberately does NOT define implementation language,
+internal architecture, or data structures beyond the observable contract.
+
+## 2. Terms
+
+- **kernel** — the runtime that owns a workspace and executes tool calls.
+- **tool** — a named operation `category.action` with JSON input and output.
+- **session** — one kernel instance bound to one workspace root, with
+  session state: environment overrides, process handles, snapshots.
+- **journal** — the append-only event log (`<workspace>/.nc-tools/journal.jsonl`).
+- **call/result pairs** — every tool call produces exactly one `tool.call`
+  event and one `tool.result` event. The result's `callSeq` references the
+  call's `seq`. (See schema below.)
+
+## 3. Tool surface (must be 39 tools; schema in `src/kernel/descriptors.mjs`)
+
+- `fs.read`, `fs.readMany`, `fs.write`, `fs.writeMany`, `fs.list`, `fs.stat`,
+  `fs.mkdir`, `fs.delete`, `fs.move`
+- `patch.apply`, `patch.applyMany`
+- `search.grep`, `search.files`
+- `git.status`, `git.diff`, `git.add`, `git.commit`, `git.log`
+- `proc.spawn`, `proc.start`, `proc.status`, `proc.readOutput`, `proc.stop`
+- `test.run` (frameworks: `node`, `pytest`)
+- `pkg.add`, `pkg.list`, `pkg.scripts`, `pkg.runScript`
+- `net.http`, `net.probePort`
+- `env.get`, `env.set`, `env.list`
+- `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.journal`,
+  `sys.workspace`
+- `batch.execute`
+
+Behavioral invariants every implementation MUST honor:
+
+1. **Workspace jail.** All relative paths resolve against the workspace
+   root; any resolved path escaping the root errors `ERR_PATH_ESCAPE` with a
+   hint containing `workspaceRoot`. Absolute paths are tolerated only if
+   inside the root.
+2. **No silent overwrite semantics.** `fs.write` returns `created`/`overwrote`
+   flags; a write over an existing file is recorded (journal) — allowed.
+3. **patch.apply exactness.** Each edit's `oldText` must match exactly
+   `expectedCount ?? 1` times; 0 matches errors `PATCH_NO_MATCH` with
+   `nearestCandidateLines`; > hoped errors `PATCH_AMBIGUOUS` with both
+   `occurrences` and `expected`. No partial application on failure.
+4. **proc.spawn is argv-typed.** No shell. `cmd` + `args` array, explicit
+   `cwd`, hard `timeoutMs`, captured stdout/stderr, structured result with
+   `exitCode`, `timedOut`, `error` (for ENOENT-style failures).
+5. **proc.start handles.** Long-running processes get a `handleId`; output is
+   buffered (bounded) and readable via `proc.readOutput`; `proc.status`
+   reports `running`/`exitCode`/`outputBytes`; `proc.stop` kills it.
+6. **test.run structured.** Returns `framework`, `passed`, `failed`,
+   `total`, `failures: [{name, file, message}]`. Node uses its junit
+   reporter; pytest uses `--junitxml`. No output-text-only results.
+7. **snapshot/rollback manifest.** Snapshot captures all workspace files
+   excluding `.git`, `node_modules`, `.nc-tools`; rollback restores manifest
+   files and removes files created after the snapshot. Unknown id errors
+   `ERR_UNKNOWN_SNAPSHOT` with available list.
+8. **batch.execute.** Runs up to 25 sub-calls; each is executed and journaled
+   individually; one failure does not abort the rest; nesting itself errors
+   `ERR_REFUSED`.
+9. **Deterministic ordering.** `fs.list` and `search.*` results are
+   sorted; journal `seq` is monotonically increasing.
+10. **Session env.** `env.set` overrides are inherited by every subsequent
+    proc.* call; `env.get` resolves session → host → `unset`.
+
+## 4. Journal schema (JSONL, one object per line)
+
+tool call event:
+```json
+{"ts": "ISO-8601", "seq": 12, "kind": "tool.call", "tool": "fs.read",
+ "args": {"path": "x.txt"}}
+```
+
+tool result event:
+```json
+{"ts": "ISO-8601", "seq": 13, "kind": "tool.result", "tool": "fs.read",
+ "callSeq": 12, "ok": true, "result": {...},
+ "error": null, "durationMs": 4}
+```
+
+On error, `ok` is `false`, `error` is `{code, message, hint?}` and
+`result` is `null`. Journal `seq` is shared across call and result events.
+
+## 5. Error taxonomy
+
+| Code | Meaning |
+|---|---|
+| `ERR_NOT_FOUND` | path or file missing (hint: `nearestExisting` files) |
+| `ERR_PATH_ESCAPE` | path resolves outside workspace root |
+| `ERR_BAD_PATH` | empty / non-path value |
+| `ERR_BAD_INPUT` | argument validation failure |
+| `ERR_IS_DIRECTORY` | used a directory where a file is required |
+| `ERR_REFUSED` | explicitly refused operation (e.g. root delete, batch nesting) |
+| `ERR_UNKNOWN_TOOL` | tool not in surface (hint: `available` list) |
+| `PATCH_NO_MATCH` | edit oldText not found (hint: nearest candidate lines) |
+| `PATCH_AMBIGUOUS` | edit matches more than expected |
+| `ERR_GIT` | git command failed (hint: stderr) |
+| `ERR_NOT_A_REPO` | workspace has no .git |
+| `ERR_SPAWN` / `ERR_CMD_NOT_FOUND` | process spawn issues |
+| `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
+| `ERR_TEST_PARSE` | runner produced no structured report |
+| `ERR_NET` / `ERR_TIMEOUT` | network request failures |
+| `ERR_UNKNOWN_SNAPSHOT` | snapshot id unknown (hint: available) |
+| `ERR_BAD_REGEX` | invalid search pattern |
+| `ERR_NETWORK` / `ERR_PKG` | package manager failures |
+
+Every error must have exactly these fields: `code`, `message`, optional
+`hint` (JSON object). Codes must match byte-for-byte.
+
+## 6. Transport bindings
+
+### 6.1 MCP stdio (required for conformance)
+
+- JSON-RPC 2.0 over stdio, newline-delimited JSON (one message per line).
+- Supported methods: `initialize` (protocolVersion `2024-11-05`,
+  serverInfo `{name: "nc-tools", version: <semver>}`), `notifications/initialized`
+  (no response), `tools/list` (each tool has `name`, `description`,
+  `inputSchema` — a JSON Schema object), `tools/call`
+  (`{name, arguments}` → `{content: [{type:"text", text}], isError}`).
+
+### 6.2 Direct binding (any language)
+
+A direct binding calls `kernel.call(tool, args)` and receives
+`{ok, result, error, durationMs, seq}`. `error` is `null` when `ok` is true.
+
+## 7. Conformance requirements
+
+`tools/conformance.mjs` spawns a kernel as **an opaque process** (command +
+args from env `NCTOOLS_CONFORMANCE_CMD`, cwd = a fresh temp workspace),
+drives it over MCP stdio, and checks:
+
+1. exact tool count (39) and all tool names present;
+2. every tool has a JSON-Schema `inputSchema` and non-empty `description`;
+3. initialization handshake shape;
+4. required error codes, byte-exact, on the failure cases listed in
+   `conformance/cases.mjs` (path escape, patch ambiguity/miss, missing file,
+   unknown tool/handle/snapshot);
+5. journal pairing (equal call/result counts, `callSeq` references);
+6. snapshot/rollback round-trip through the opaque protocol.
+
+A port passes iff the same cases pass against it with only
+`NCTOOLS_CONFORMANCE_CMD` changed. This is what "portable to any language"
+means operationally: the suite never inspects the implementation.
+
+## 8. Out of scope for v1
+
+Hooks (chaos) and batch nesting depth>1 are implementation-level features;
+the protocol requires only that they do not break the specified invariants.

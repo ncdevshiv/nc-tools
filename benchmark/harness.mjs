@@ -57,7 +57,7 @@ for (const model of models) {
     const wallMs = Date.now() - started;
     let verdict;
     try {
-      verdict = await task.verify(root, kernel);
+      verdict = await task.verify(root, kernel, result.finalText, 'kernel');
     } catch (e) {
       verdict = { pass: false, evidence: `verifier error: ${e.message}` };
     }

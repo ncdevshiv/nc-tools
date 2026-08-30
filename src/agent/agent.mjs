@@ -20,7 +20,9 @@ Tool discipline:
 - Prefer patch.apply for edits: exact-match search/replace. Include enough context to be unique.
 - fs.read returns a digest (hash+mtime). If the digest matches what you already saw, the file
   is unchanged — do not re-read it.
-- Use search.grep / search.files to locate code. Structured errors carry actionable hints
+- Use search.grep / search.files to locate code. search.semantic ranks files by MEANING
+  (local neural embeddings) — use it when you only know what the code does, not what strings
+  it contains. Structured errors carry actionable hints
   (e.g. PATCH_NO_MATCH returns nearest candidate lines, ERR_NOT_FOUND returns nearest existing
   files) — use them instead of re-orienting with more calls.
 - proc.spawn expects cmd + args array, never a shell string.
