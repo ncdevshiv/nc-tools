@@ -28,6 +28,41 @@ const toWire = (name) => WIRE.test(name) ? name : name.replaceAll('.', '__');
 const fromWire = (name) => name.includes('__') ? name.replaceAll('__', '.') : name;
 export { toWire, fromWire };
 
+// ---- bash comparison arm ------------------------------------------------
+// The same agent loop, but with a single `bash` tool instead of the kernel.
+// Used by benchmark/compare.mjs to measure typed-tools-vs-shell on identical
+// tasks with the same models and the same verifier.
+export function bashSystemPrompt(workspaceRoot) {
+  return `You are a coding agent operating a machine through a single bash tool.
+Every machine interaction — reading, writing, searching, editing files, running programs, git —
+must go through the bash tool with a shell script string. It returns stdout, stderr, and the
+exit code.
+
+Workspace root: ${workspaceRoot}
+
+When the task is done, verify it (read the file back, run the tests), then reply with a final
+summary message with NO tool calls.`;
+}
+
+export function bashToolDescriptor() {
+  return {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description: 'Run a bash shell script in the workspace root. Returns stdout, stderr, exit code.',
+      parameters: {
+        type: 'object',
+        properties: {
+          script: { type: 'string', description: 'The bash script to execute' },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 600000 },
+        },
+        required: ['script'],
+        additionalProperties: false,
+      },
+    },
+  };
+}
+
 export function openAiTools() {
   return toolDescriptors().map((t) => ({
     type: 'function',
@@ -40,12 +75,13 @@ export function openAiTools() {
  * @param {object} deps { chat(completionsBody) => responseJSON, kernel, log? }
  * @returns {Promise<{finalText, steps, toolCalls, errors, usage, stopped: 'done'|'max_steps'|'api_error'}>}
  */
-export async function runAgent({ chat, kernel, task, maxSteps = 30, log = () => {} }) {
+export async function runAgent({ chat, kernel, task, maxSteps = 30, log = () => {}, mode = 'kernel' }) {
+  const isBash = mode === 'bash';
   const messages = [
-    { role: 'system', content: systemPrompt(kernel.root) },
+    { role: 'system', content: isBash ? bashSystemPrompt(kernel.root) : systemPrompt(kernel.root) },
     { role: 'user', content: task },
   ];
-  const tools = openAiTools();
+  const tools = isBash ? [bashToolDescriptor()] : openAiTools();
   let toolCalls = 0;
   let errors = 0;
   const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -83,8 +119,10 @@ export async function runAgent({ chat, kernel, task, maxSteps = 30, log = () => 
       try { args = JSON.parse(tc.function.arguments || '{}'); } catch { args = {}; }
       const toolName = fromWire(tc.function.name);
       log(`  step ${step + 1}: ${toolName} ${JSON.stringify(args).slice(0, 120)}`);
-      const out = await kernel.call(toolName, args);
+      const out = isBash ? await kernel.call('proc.spawn', { cmd: 'bash', args: ['-c', args.script ?? ''], timeoutMs: args.timeoutMs ?? 120_000 })
+                         : await kernel.call(toolName, args);
       if (!out.ok) errors += 1;
+      else if (isBash && (out.result.exitCode !== 0 || out.result.error)) errors += 1;
       toolCalls += 1;
       messages.push({
         role: 'tool',

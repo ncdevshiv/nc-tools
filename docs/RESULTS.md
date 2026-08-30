@@ -56,6 +56,52 @@ Sample journal proof (deepseek, `fix-off-by-one`): 5 tool calls, 5 results —
 `fs.read` → `patch.apply` (exact-match edit) → `fs.read` (verify) →
 `proc.spawn` (node behavior check) → `fs.read`.
 
+## Head-to-head: typed kernel tools vs bash-only (compare run)
+
+Command: `NCTOOLS_LLM_MODELS="glm-5.3-flash,deepseek-v4-flash-vision-exp" node benchmark/compare.mjs benchmark/results/compare`
+
+Same 5 tasks, same models, same independent verifier. The only variable: the
+agent either gets the 18 typed kernel tools or a single `bash(script)` tool
+(same `proc.spawn` underneath, running `bash -c`).
+
+| Model | Arm | Solved | Tool calls | Errored | Tokens | Wall (s) |
+|---|---|---|---|---|---|---|
+| glm-5.3-flash | **kernel** | 4/5* | 32 | 0 | ~34.7k | 251 |
+| glm-5.3-flash | **bash** | 5/5 | 15 | 0 | ~23.7k | 302 |
+| deepseek-v4-flash-vision-exp | **kernel** | 5/5 | 31 | 1 | ~99.8k | 91 |
+| deepseek-v4-flash-vision-exp | **bash** | 5/5 | 21 | 0 | ~55.9k | 89 |
+
+*The one kernel-arm failure was an upstream HTTP 429 rate limit mid-run, not a
+capability failure — run2 (same task, same model, same arm) solved it.
+
+### What this comparison honestly shows
+
+1. **Bash wins on token efficiency and call count for capable models.** A
+   single shell script can read+edit+run in one call, so bash used ~40–45%
+   fewer tokens/calls across both models. This is the real cost of typed
+   tools: granularity. Pretending otherwise would be dishonest — and it is
+   exactly why `compare.mjs` exists as a permanent harness arm.
+2. **Both arms solve everything**, so the benchmark's current task set does
+   not yet discriminate. The tasks are single-file, short-horizon. Where the
+   typed layer is *expected* to pull ahead — and what the next benchmark
+   iteration must add — is: multi-step stateful work (kernel journal beats
+   shell history), recovery from structured errors (see the deepseek
+   `PATCH_NO_MATCH` recoveries in run2), safety/policy measurement (path jail,
+   audit trails), and chaos/fault injection (impossible to do cleanly against
+   a shell).
+3. **The value claim of nc-tools was never "fewer tokens per trivial task."**
+   It is verifiability (journaled, replayable runs), provider absorption
+   (the `.`-in-name fix landed in one place), error semantics (structured
+   hints vs stderr strings), and measurability (this table itself only exists
+   because the harness can swap the tool surface while holding everything
+   else constant — you cannot run this experiment against a real terminal
+   without also changing the harness).
+
+The honest summary: **parity on capability today, a measured deficit on
+efficiency for short tasks, and the differentiating claims (recovery, safety,
+replay, chaos) still need harder tasks to be demonstrated** — which defines
+the benchmark roadmap, not a fake win.
+
 ## Notes
 
 - Run1 initially scored deepseek 0/5: the upstream rejects function names

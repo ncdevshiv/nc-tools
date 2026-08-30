@@ -25,6 +25,13 @@ See `benchmark/results/` for real agent runs (JSON transcripts with per-run
 verdicts) and `docs/RESULTS.md` for the summary. Every claim in the docs is
 reproducible with the listed commands.
 
+Benchmark arms:
+- `node benchmark/harness.mjs` — terminal-free runs (typed kernel tools only)
+- `node benchmark/compare.mjs` — head-to-head: same tasks/models/verifier with
+  typed tools vs a single bash tool. Current result: capability parity,
+  bash ~40% cheaper on short tasks; the differentiators (recovery, safety,
+  replay, chaos injection) need harder tasks — that is the benchmark roadmap.
+
 ## Principles
 
 1. **Typed in, typed out.** Tools return structured results and structured
