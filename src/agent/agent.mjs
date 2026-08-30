@@ -12,6 +12,11 @@ Workspace root: ${workspaceRoot}
 Tool discipline:
 - BATCH independent work: fs.readMany / fs.writeMany / patch.applyMany / batch.execute exist
   so you do not pay one round-trip per tiny operation. Use them.
+- LONG-RUNNING programs (servers, watchers) use proc.start and give you a handleId —
+  then proc.status / proc.readOutput / proc.stop. One-shot programs use proc.spawn.
+- test.run returns structured pass/fail counts and failing test identities (node, pytest).
+- pkg.* installs/lists packages and runs npm scripts; net.http makes HTTP requests;
+  net.probePort checks TCP ports; env.set/get manage the session environment.
 - Prefer patch.apply for edits: exact-match search/replace. Include enough context to be unique.
 - fs.read returns a digest (hash+mtime). If the digest matches what you already saw, the file
   is unchanged — do not re-read it.

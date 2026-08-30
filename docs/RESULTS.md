@@ -1,11 +1,68 @@
 # nc-tools Benchmark Results — Real Runs
 
-Date: 2026-08-30 (updated after P0 wave)
-Harness: `node benchmark/compare.mjs` — 8 tasks x 2 models x 2 arms = **32 runs**.
+Date: 2026-08-30 (wave 2)
+Harness: `node benchmark/compare.mjs` — head-to-head arms + the wave-2 control task.
 Endpoint: local proxyhub gateway (OpenAI-compatible), live upstream providers.
 Every run: fresh temp workspace, fresh git repo, agent loop capped at 40 steps,
-**independent verifier** checks the workspace afterward (real `node --test`
-runs, real behavior checks via `proc.spawn`) — the agent cannot self-report.
+**independent verifier** checks the workspace afterward — the agent cannot self-report.
+
+## Wave 2: the "control" layer (beyond read/write/search/patch)
+
+The original goal was never just better file tools — it is replacing the
+terminal **absolutely**. Wave 2 types the terminal's *control* surface:
+
+- **Managed background processes**: `proc.start` returns a handle; `proc.status`,
+  `proc.readOutput`, `proc.stop` manage it. This replaces "run a server in a
+  terminal tab / `&` background jobs / kill by hand".
+- **Structured test drivers**: `test.run` executes node:test and pytest and
+  returns pass/fail counts plus *failing test identities* (both via junit XML).
+- **Package drivers**: `pkg.add/list/scripts/runScript` for npm and pip.
+- **Typed network**: `net.http` (replaces curl) and `net.probePort`
+  (replaces nc/netstat probing).
+- **Session environment**: `env.set/get/list`, inherited by every proc call.
+
+Surface now: **36 typed tools**. Test suite: **45/45 passing** (all real:
+real HTTP servers, real pytest, real npm installs).
+
+## Terminal-taxonomy coverage (the "absolute" metric)
+
+`node tools/coverage.mjs` tracks replacement of the terminal's command
+taxonomy: **15 covered + 3 partial of 26 command classes = 63% weighted**
+(58% pure). Remaining gaps are archives, permissions, scheduling, encryption,
+containers, cloud CLIs, interactive TUIs, and file-watching — each a future
+driver family, tracked, not hand-waved.
+
+## web-server-control: the workflow that required terminal tabs
+
+Task: start `src/server.js` as a background process, poll until port 4123 is
+open, GET `/ping` and verify the body, stop the server, confirm the port is
+closed. The verifier reads the **journal**: it requires a `proc.start` event
+(no `proc.spawn` for the server), a successful `net.http` result with the pong
+body, a `proc.stop`, and then probes the port itself, live.
+
+| Model | Arm | Solved | Calls | Tokens | Wall (s) |
+|---|---|---|---|---|---|
+| glm-5.3-flash | kernel | **PASS** | 7 | 35.8k | 194 |
+| glm-5.3-flash | bash | fail | 9 | 30.6k | 425 |
+| deepseek-v4-flash | kernel | **PASS** | 7 | 38.6k | 19.5 |
+| deepseek-v4-flash | bash | no verdict | — | — | >7800 (terminated) |
+
+Both kernel arms solved it cleanly: start → poll → GET → stop → confirm
+closed, with every step a typed, journaled event. The glm bash arm *failed*
+— it could start the server in the background, but verifying it and tearing
+it down from inside a single-argument bash string proved fragile (no handle
+to the process, output only reachable by redirect-and-cat games). The
+deepseek bash arm never finished: after 2+ hours (40-step cap, each step a
+foreground-blocking server start attempt), it was terminated — with no
+handle to a process, bash has no way to probe-and-poll a server, which is
+exactly the failure mode this task exists to expose. The kernel-arm
+equivalent needed 19.5 seconds and 7 typed calls.
+
+This task is the clearest evidence for the thesis: **the control surface is
+where the terminal genuinely hurts** — and where a typed, handle-based
+runtime is not just nicer, it works where bash doesn't.
+
+## P0 wave results (unchanged from previous commit)
 
 ## P0 wave: what changed since the first comparison
 

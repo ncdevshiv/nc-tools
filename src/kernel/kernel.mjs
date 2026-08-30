@@ -9,6 +9,10 @@ import { makePatchTools } from './patch.mjs';
 import { makeSearchTools } from './search.mjs';
 import { makeGitTools } from './git.mjs';
 import { makeProcTools } from './proc.mjs';
+import { makeTestTools } from './test.mjs';
+import { makePkgTools } from './pkg.mjs';
+import { makeNetTools } from './net.mjs';
+import { makeEnvTools } from './env.mjs';
 import { ToolError } from './errors.mjs';
 
 export class Kernel {
@@ -16,12 +20,18 @@ export class Kernel {
   constructor(root, { journalPath } = {}) {
     this.root = root;
     this.journal = new Journal(journalPath ?? join(root, '.nc-tools', 'journal.jsonl'));
+    /** Session environment: env.set writes here; every proc spawn inherits it. */
+    this.sessionEnv = new Map();
     const families = [
       makeFsTools(root),
       makePatchTools(root),
       makeSearchTools(root),
       makeGitTools(root),
-      makeProcTools(root),
+      makeProcTools(root, this.sessionEnv),
+      makeTestTools(root),
+      makePkgTools(root),
+      makeNetTools(),
+      makeEnvTools(this.sessionEnv),
     ];
     /** @type {Map<string, {handler: Function, description?: string, inputSchema?: object}>} */
     this.tools = new Map();

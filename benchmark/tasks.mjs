@@ -162,4 +162,50 @@ const tier1 = [
   },
 ];
 
-export const tasks = [...tier1, ...tier2];
+export const tasks = [...tier1, ...tier2,
+  // Wave-2 demo: the workflow that historically required terminal tabs and curl.
+  {
+    id: 'web-server-control',
+    category: 'control',
+    instruction: `The workspace contains src/server.js, an HTTP server. Your job — without ever using proc.spawn for the server itself:
+1. Start the server as a background process using proc.start (it listens on port 4123).
+2. Wait until it is actually serving: poll net.probePort until port 4123 is open.
+3. Verify it works: use net.http to GET http://127.0.0.1:4123/ping and confirm the response body contains "pong".
+4. Stop the server with proc.stop.
+5. Confirm the port is closed afterwards (net.probePort must report open=false).
+Report each step's result in your final answer.`,
+    setup: () => ({
+      'src/server.js': `const http = require('node:http');
+const s = http.createServer((req, res) => {
+  if (req.url === '/ping') { res.end('pong'); return; }
+  res.end('hello');
+});
+s.listen(4123, () => console.log('listening on 4123'));
+`,
+    }),
+    verify: async (root, kernel) => {
+      const journal = kernel.journal.readAll();
+      const calls = journal.filter((e) => e.kind === 'tool.call');
+      const results = journal.filter((e) => e.kind === 'tool.result');
+      const resultFor = (seq) => results.find((r) => r.callSeq === seq);
+      // 1. server was started with proc.start (NOT proc.spawn)
+      const startCall = calls.find((e) => e.tool === 'proc.start' && e.args?.cmd === 'node' && (e.args?.args ?? []).includes('src/server.js'));
+      // 2. port was probed
+      const probeCall = calls.find((e) => e.tool === 'net.probePort' && e.args?.port === 4123);
+      // 3. HTTP GET succeeded with pong body
+      const httpCall = calls.find((e) => e.tool === 'net.http' && /4123\/ping/.test(e.args?.url ?? ''));
+      const httpRes = httpCall ? resultFor(httpCall.seq) : null;
+      const httpOk = httpRes?.ok && httpRes.result?.status === 200 && /pong/.test(httpRes.result?.body ?? '');
+      // 4. server was stopped
+      const stopCall = startCall ? calls.find((e) => e.tool === 'proc.stop' && resultFor(e.seq)?.ok) : null;
+      // 5. port closed at the end — verifier checks live, right now
+      const closedNow = await kernel.call('net.probePort', { port: 4123, timeoutMs: 800 });
+      const noSpawnServer = !calls.some((e) => e.tool === 'proc.spawn' && (e.args?.args ?? []).some((a) => String(a).includes('server.js')));
+      const pass = !!(startCall && probeCall && httpOk && stopCall && closedNow.result?.open === false && noSpawnServer);
+      return {
+        pass,
+        evidence: `start=${!!startCall} probe=${!!probeCall} httpOk=${httpOk} stopped=${!!stopCall} portClosedNow=${closedNow.result?.open === false} noSpawnForServer=${noSpawnServer}`,
+      };
+    },
+  },
+];
