@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Kernel } from '../src/kernel/kernel.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const serverPath = join(here, '..', 'src', 'mcp', 'server.mjs');
+const serverPath = join(here, '..', 'oracle', 'mcp', 'server.mjs');
 
 /** Spawn a kernel as a child process and give it an rpc() helper. */
 function spawnKernel(root) {

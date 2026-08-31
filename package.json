@@ -1,6 +1,6 @@
 {
   "name": "nc-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Typed machine API for coding agents — terminal-free kernel, MCP server, agent loop, benchmark.",
   "type": "module",
   "engines": {
@@ -8,11 +8,15 @@
   },
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\"",
+    "test:rust": "cargo test --manifest-path rust/Cargo.toml",
     "audit": "node tools/audit.mjs",
+    "build:rust": "cargo build --release --manifest-path rust/Cargo.toml -p nct-mcp",
+    "conform": "node tools/conformance.mjs",
+    "golden": "node tools/golden.mjs",
     "bench": "node benchmark/harness.mjs"
   },
   "bin": {
-    "nc-tools-mcp": "src/mcp/server.mjs"
+    "nc-tools-mcp": "oracle/mcp/server.mjs"
   },
   "dependencies": {
     "@xenova/transformers": "^2.17.2"

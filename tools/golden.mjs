@@ -6,7 +6,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { toolDescriptors } from '../src/kernel/descriptors.mjs';
+import { toolDescriptors } from '../oracle/kernel/descriptors.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, '..', 'conformance', 'golden');

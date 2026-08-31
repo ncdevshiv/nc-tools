@@ -1,9 +1,14 @@
 # Connecting any MCP agent to nc-tools
 
-The kernel is a standard MCP **stdio** server (`src/mcp/server.mjs`). Any
-MCP-capable agent — ZCode, Claude Desktop/Cli Code, Zed, Cursor-style MCP
-hosts, custom loops — can mount it with the config below. No code changes
-needed on the agent side; the protocol is MCP `2024-11-05`.
+The kernel ships as a standard MCP **stdio** server in two byte-compatible
+implementations. **Use the Rust binary — it is the primary artifact**: one
+static executable, no Node, no npx, no PATH shims, instant cold start.
+
+Build it once: `cargo build --release --manifest-path rust/Cargo.toml -p nct-mcp`
+→ `rust/target/release/nc-tools-mcp.exe` (the JS oracle server
+`oracle/mcp/server.mjs` remains available as a fallback and is the conformance
+oracle). Any MCP-capable agent — ZCode, Claude Desktop/Cli Code, Zed,
+Cursor-style MCP hosts, custom loops — can mount it with the config below.
 
 ## Ready-to-paste config
 
@@ -15,8 +20,8 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
     "servers": {
       "nc-tools": {
         "type": "stdio",
-        "command": "node",
-        "args": ["F:/nc-tools/src/mcp/server.mjs", "F:/nc-tools"],
+        "command": "F:/nc-tools/rust/target/release/nc-tools-mcp.exe",
+        "args": ["F:/nc-tools"],
         "env": {
           "NCTOOLS_MCP_IDLE_MS": "1800000"
         },
@@ -27,7 +32,7 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
 }
 ```
 
-- `args[1]` = the base dir the kernel anchors relative paths, journal and
+- `args[0]` = the base dir the kernel anchors relative paths, journal and
   snapshots to. Paths are NOT restricted to it: absolute paths work anywhere
   on the machine (global tool system).
 - `NCTOOLS_MCP_IDLE_MS` = idle auto-sleep (default 30 min): after that long
@@ -42,8 +47,8 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
 {
   "mcpServers": {
     "nc-tools": {
-      "command": "node",
-      "args": ["F:/nc-tools/src/mcp/server.mjs", "F:/nc-tools"],
+      "command": "F:/nc-tools/rust/target/release/nc-tools-mcp.exe",
+      "args": ["F:/nc-tools"],
       "env": { "NCTOOLS_MCP_IDLE_MS": "1800000" }
     }
   }
@@ -56,8 +61,8 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
 {
   "mcpServers": {
     "nc-tools": {
-      "command": "npx",
-      "args": ["--no-install", "nc-tools-mcp", "F:/nc-cli"],
+      "command": "F:/nc-tools/rust/target/release/nc-tools-mcp.exe",
+      "args": ["F:/nc-cli"],
       "env": { "NCTOOLS_MCP_IDLE_MS": "1800000" }
     }
   }
@@ -66,19 +71,19 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
 
 - Qwen Code selects the stdio transport by the presence of `command` (no
   `type` field needed); the last `args` element is the workspace root the
-  kernel is jailed to (the server reads `argv[2] || NCTOOLS_WORKSPACE || cwd`).
-- The npx form works because the repo ships `bin.nc-tools-mcp`
-  (`src/mcp/server.mjs`) and `npm link` was run inside `F:/nc-tools` — npx
-  resolves the global shim. Keep `--no-install`: the package is not published
-  to npm, so npx must never fall back to the registry (it would 404).
+  kernel anchors (the server reads `argv[1] || NCTOOLS_WORKSPACE || cwd`).
+- The old `npx --no-install nc-tools-mcp` form still works through the
+  archived JS oracle (`bin.nc-tools-mcp` → `oracle/mcp/server.mjs`), but the
+  static binary is preferred: it removes the Node/PATH dependency class
+  entirely.
 - Per-project pinning: drop a `.qwen/settings.json` in a repo with its own
   `<workspaceRoot>` in `args`.
 
 ### Generic MCP host (any tool that takes command+args)
 
 ```
-command: node
-args:    F:/nc-tools/src/mcp/server.mjs F:/nc-tools
+command: F:/nc-tools/rust/target/release/nc-tools-mcp.exe
+args:    F:/nc-tools
 env:     NCTOOLS_MCP_IDLE_MS=1800000
 ```
 
@@ -93,10 +98,11 @@ env:     NCTOOLS_MCP_IDLE_MS=1800000
   `{error: {code, message, hint}}` — the agent never scrapes stdout.
 - `sys.journal` lets the agent read its own trail; `sys.snapshot`/`rollback`
   make risky edits reversible.
-- `search.semantic` needs `@xenova/transformers` installed (it is, in
-  `F:/nc-tools/node_modules`); first use downloads the local MiniLM model.
-  Set `NCTOOLS_MODEL_CACHE` to a shared dir to avoid re-downloads across
-  servers.
+- `search.semantic` is fully self-contained in the Rust binary (candle +
+  all-MiniLM-L6-v2, pure Rust, local); the first use downloads the model into
+  the cache dir. Set `NCTOOLS_MODEL_CACHE` to a shared dir to avoid
+  re-downloads across servers. (The archived JS oracle needs
+  `@xenova/transformers` — it is installed in `F:/nc-tools/node_modules`.)
 
 ## Parallel agents: yes, and here's what must be true
 

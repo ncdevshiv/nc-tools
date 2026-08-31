@@ -6,9 +6,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { Kernel } from '../src/kernel/kernel.mjs';
-import { runAgent } from '../src/agent/agent.mjs';
-import { makeChat } from '../src/agent/llm.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { runAgent } from '../oracle/agent/agent.mjs';
+import { makeChat } from '../oracle/agent/llm.mjs';
 import { tasks } from './tasks.mjs';
 import { behaviorMetrics } from './metrics.mjs';
 

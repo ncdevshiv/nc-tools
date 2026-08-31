@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync
 import { tmpdir } from 'node:os';
 import { join, basename, parse } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { Kernel } from '../src/kernel/kernel.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
 
 let root;
 function freshRoot() {

@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = join(here, '..');
-const serverPath = join(REPO, 'src', 'mcp', 'server.mjs');
+const serverPath = join(REPO, 'oracle', 'mcp', 'server.mjs');
 const workspace = process.argv[2] || REPO;
 
 const findings = []; // {check, status: 'PASS'|'FAIL'|'INFO', evidence}

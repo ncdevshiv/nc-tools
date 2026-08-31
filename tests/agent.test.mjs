@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Kernel } from '../src/kernel/kernel.mjs';
-import { runAgent, fromWire, toWire } from '../src/agent/agent.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { runAgent, fromWire, toWire } from '../oracle/agent/agent.mjs';
 
 let root;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'nc-agent-')); });

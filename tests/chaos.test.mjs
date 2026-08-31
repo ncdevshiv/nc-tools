@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Kernel } from '../src/kernel/kernel.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
 
 let root;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'nc-w3-')); });

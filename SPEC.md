@@ -108,15 +108,19 @@ Rules:
 
 ## 6. MCP binding
 
-`src/mcp/server.mjs` speaks MCP stdio (JSON-RPC 2.0, protocol
-revision `2024-11-05`): `initialize`, `tools/list`, `tools/call`. Every kernel
-tool is exposed with its JSON schema; results are returned as structured JSON
-content. Any MCP client (Claude Code, Zed, custom loops) can mount it with no
-code changes.
+The MCP binding is implemented twice, byte-compatible on the wire. The
+**primary server is the Rust binary** (`cargo build --release -p nct-mcp` →
+`rust/target/release/nc-tools-mcp.exe`); the **archived JS server**
+(`oracle/mcp/server.mjs`) remains the conformance oracle. Both speak MCP stdio
+(JSON-RPC 2.0, protocol revision `2024-11-05`): `initialize`, `tools/list`,
+`tools/call`. Every kernel tool is exposed with its JSON schema; results are
+returned as structured JSON content. Any MCP client (Claude Code, Zed, custom
+loops) can mount either with no code changes.
 
 ## 7. Agent loop (reference implementation)
 
-`src/agent/agent.mjs`: a minimal, harness-agnostic agent that receives a
+`oracle/agent/agent.mjs` (archived JS oracle; also ported in
+`rust/crates/nct-agent`): a minimal, harness-agnostic agent that receives a
 system prompt, a task, and the tool surface, and loops model tool-calls to
 tool execution until it emits a final answer. No terminal. Model access is an
 OpenAI-compatible chat-completions endpoint (works with any provider).

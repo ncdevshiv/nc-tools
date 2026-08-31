@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { Kernel } from '../src/kernel/kernel.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
 import { tasks } from './tasks.mjs';
 import { solutions, wrongSolutions, canonicalAnswers } from './solutions.mjs';
 

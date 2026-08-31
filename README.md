@@ -11,13 +11,18 @@ changing their model or harness.
 
 ## Components
 
+The **primary implementation is Rust**: `cargo build --release -p nct-mcp`
+produces one static `nc-tools-mcp` binary — no Node, no npx, no PATH shims.
+The JS implementation is the **frozen conformance oracle** under `oracle/`:
+the golden spec and the black-box conformance suite grade every other
+implementation against it.
+
 | Path | What it is |
 |---|---|
-| `src/kernel/` | The typed tool surface (fs, git, patch, search, process) + journal + snapshots |
-| `src/agent/` | A terminal-free agent loop that operates the kernel via tool calls |
-| `src/mcp/` | MCP stdio server exposing the kernel to any MCP-capable agent |
+| `rust/` | **Primary implementation**: 8 crates; `cargo build --release -p nct-mcp` → single static `nc-tools-mcp` binary, same 48-tool protocol |
+| `oracle/` | JS reference implementation, archived: kernel, MCP stdio server, agent loop. Frozen oracle for conformance; runs via `node oracle/mcp/server.mjs` |
+| `conformance/golden/` | Frozen 48-tool descriptor export (`tools/golden.mjs` regenerates; changes must be deliberate) |
 | `benchmark/` | Harness, task suite, verifier, and results for terminal-free runs |
-| `rust/` | Full Rust port: `cargo build --release -p nct-mcp` → single static `nc-tools-mcp` binary, same 48-tool protocol |
 | `tools/audit.mjs` | Repository audit: scans for stubs/TODOs/mocks/fakes/placeholders (JS **and** Rust source) |
 
 ## Verified outcomes

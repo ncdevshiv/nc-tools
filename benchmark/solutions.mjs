@@ -67,7 +67,7 @@ export const solutions = {
     });
     await k.call('fs.write', {
       path: 'test/roman.test.mjs',
-      content: `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { toRoman, fromRoman } from '../src/roman.js';\n\ntest('basic conversions', () => {\n  assert.equal(toRoman(9), 'IX');\n  assert.equal(toRoman(2024), 'MMXXIV');\n  assert.equal(toRoman(0), '');\n  assert.equal(fromRoman('XIV'), 14);\n  assert.equal(fromRoman('MMXXIV'), 2024);\n});\n\ntest('round-trip for several values', () => {\n  for (const n of [0, 1, 42, 999, 3000, 1987]) {\n    assert.equal(fromRoman(toRoman(n)), n);\n  }\n});\n`,
+      content: `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { toRoman, fromRoman } from '../oracle/roman.js';\n\ntest('basic conversions', () => {\n  assert.equal(toRoman(9), 'IX');\n  assert.equal(toRoman(2024), 'MMXXIV');\n  assert.equal(toRoman(0), '');\n  assert.equal(fromRoman('XIV'), 14);\n  assert.equal(fromRoman('MMXXIV'), 2024);\n});\n\ntest('round-trip for several values', () => {\n  for (const n of [0, 1, 42, 999, 3000, 1987]) {\n    assert.equal(fromRoman(toRoman(n)), n);\n  }\n});\n`,
     });
   },
   'web-server-control': async (root, k) => {
@@ -123,7 +123,7 @@ export const solutions = {
       path: 'tests/fizz.test.mjs',
       content: `import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fizzBuzz } from '../src/fizz.js';
+import { fizzBuzz } from '../oracle/fizz.js';
 
 test('classic fizzbuzz rules', () => {
   assert.equal(fizzBuzz(3), 'Fizz');

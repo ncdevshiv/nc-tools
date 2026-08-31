@@ -9,10 +9,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Kernel } from '../src/kernel/kernel.mjs';
+import { Kernel } from '../oracle/kernel/kernel.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const serverPath = join(here, '..', 'src', 'mcp', 'server.mjs');
+const serverPath = join(here, '..', 'oracle', 'mcp', 'server.mjs');
 const isWin = process.platform === 'win32';
 
 let root;
