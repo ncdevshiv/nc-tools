@@ -1,7 +1,7 @@
 // Kernel error type: structured, machine-readable, with remediation hints.
 export class ToolError extends Error {
   /**
-   * @param {string} code stable machine-readable code, e.g. ERR_PATH_ESCAPE
+   * @param {string} code stable machine-readable code, e.g. ERR_NOT_FOUND
    * @param {string} message human-readable
    * @param {object} [hint] structured remediation data for the agent
    */

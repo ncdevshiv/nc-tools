@@ -18,8 +18,9 @@ internal architecture, or data structures beyond the observable contract.
 
 - **kernel** — the runtime that owns a workspace and executes tool calls.
 - **tool** — a named operation `category.action` with JSON input and output.
-- **session** — one kernel instance bound to one workspace root, with
-  session state: environment overrides, process handles, snapshots.
+- **session** — one kernel instance bound to one base directory (anchor
+  for relative paths, journal, snapshots), with session state: environment
+  overrides, process handles, snapshots.
 - **journal** — the append-only event log (`<workspace>/.nc-tools/journal.jsonl`).
 - **call/result pairs** — every tool call produces exactly one `tool.call`
   event and one `tool.result` event. The result's `callSeq` references the
@@ -45,10 +46,11 @@ internal architecture, or data structures beyond the observable contract.
 
 Behavioral invariants every implementation MUST honor:
 
-1. **Workspace jail.** All relative paths resolve against the workspace
-   root; any resolved path escaping the root errors `ERR_PATH_ESCAPE` with a
-   hint containing `workspaceRoot`. Absolute paths are tolerated only if
-   inside the root.
+1. **Path model (no jail).** Relative paths resolve against the base
+   directory; absolute paths are accepted for ANY location on the machine
+   (global tool system — remote agents may work in different projects in
+   parallel, and `git.*`/`pkg.*` take `repo`/`dir` for that). Recursive
+   walks skip symlinks/junctions (cycle safety).
 2. **No silent overwrite semantics.** `fs.write` returns `created`/`overwrote`
    flags; a write over an existing file is recorded (journal) — allowed.
 3. **patch.apply exactness.** Each edit's `oldText` must match exactly
@@ -106,7 +108,6 @@ On error, `ok` is `false`, `error` is `{code, message, hint?}` and
 | Code | Meaning |
 |---|---|
 | `ERR_NOT_FOUND` | path or file missing (hint: `nearestExisting` files) |
-| `ERR_PATH_ESCAPE` | path resolves outside workspace root |
 | `ERR_BAD_PATH` | empty / non-path value |
 | `ERR_BAD_INPUT` | argument validation failure |
 | `ERR_IS_DIRECTORY` | used a directory where a file is required |
@@ -155,7 +156,7 @@ drives it over MCP stdio, and checks:
 2. every tool has a JSON-Schema `inputSchema` and non-empty `description`;
 3. initialization handshake shape;
 4. required error codes, byte-exact, on the failure cases listed in
-   `conformance/cases.mjs` (path escape, patch ambiguity/miss, missing file,
+   `conformance/cases.mjs` (no-jail path model, patch ambiguity/miss, missing file,
    unknown tool/handle/snapshot);
 5. journal pairing (equal call/result counts, `callSeq` references);
 6. snapshot/rollback round-trip through the opaque protocol.

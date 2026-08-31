@@ -1,9 +1,9 @@
-// fs.* tools — typed file operations, jailed to the workspace.
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, rmSync, renameSync, existsSync, realpathSync, cpSync } from 'node:fs';
-import { join, relative, dirname, basename, resolve, isAbsolute } from 'node:path';
+// fs.* tools — typed file operations, machine-wide (no workspace jail).
+import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, rmSync, renameSync, existsSync, cpSync } from 'node:fs';
+import { join, relative, dirname, basename, resolve, isAbsolute, parse } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ToolError } from './errors.mjs';
-import { inWorkspace, isInsidePath } from './paths.mjs';
+import { resolvePath, isReparsePoint } from './paths.mjs';
 
 function digestOf(abs) {
   const st = statSync(abs);
@@ -40,7 +40,7 @@ export function nearestSiblings(root, absMissing) {
 
 export function makeFsTools(root) {
   const read = ({ path, offset, limit }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     if (!existsSync(abs)) throw new ToolError('ERR_NOT_FOUND', `No such file: ${path}`, { path, nearestExisting: nearestSiblings(root, abs) });
     const st = statSync(abs);
     if (st.isDirectory()) throw new ToolError('ERR_IS_DIRECTORY', `${path} is a directory; use fs.list`, { path });
@@ -98,7 +98,7 @@ export function makeFsTools(root) {
   };
 
   const write = ({ path, content }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     const existed = existsSync(abs);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, 'utf8');
@@ -107,7 +107,7 @@ export function makeFsTools(root) {
   };
 
   const append = ({ path, content }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     const existed = existsSync(abs);
     mkdirSync(dirname(abs), { recursive: true });
     writeFileSync(abs, content, { encoding: 'utf8', flag: 'a' });
@@ -116,8 +116,8 @@ export function makeFsTools(root) {
   };
 
   const copy = ({ from, to, recursive = true }) => {
-    const fromAbs = inWorkspace(root, from);
-    const toAbs = inWorkspace(root, to);
+    const fromAbs = resolvePath(root, from);
+    const toAbs = resolvePath(root, to);
     if (!existsSync(fromAbs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${from}`, { path: from, nearestExisting: nearestSiblings(root, fromAbs) });
     const st = statSync(fromAbs);
     if (st.isDirectory() && !recursive) throw new ToolError('ERR_IS_DIRECTORY', `${from} is a directory; pass recursive=true to copy it`, { path: from });
@@ -127,7 +127,7 @@ export function makeFsTools(root) {
   };
 
   const list = ({ path = '.', recursive = false }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     if (!existsSync(abs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
     const entries = [];
     const walk = (dir, depth) => {
@@ -139,8 +139,8 @@ export function makeFsTools(root) {
         const isDir = st.isDirectory();
         entries.push({ name, path: rel, type: isDir ? 'dir' : 'file', size: isDir ? null : st.size });
         if (isDir && recursive && depth < 8) {
-          // a junction may point outside the workspace; list it but never recurse into it
-          try { if (!isInsidePath(root, realpathSync(full))) continue; } catch { continue; }
+          // reparse points may loop back into the tree; list it but never recurse
+          if (isReparsePoint(full)) continue;
           walk(full, depth + 1);
         }
       }
@@ -150,7 +150,7 @@ export function makeFsTools(root) {
   };
 
   const stat = ({ path }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     if (!existsSync(abs)) return { exists: false, path };
     const st = statSync(abs);
     return {
@@ -161,15 +161,17 @@ export function makeFsTools(root) {
   };
 
   const mkdir = ({ path, recursive = true }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     const existed = existsSync(abs);
     mkdirSync(abs, { recursive });
     return { path, created: !existed };
   };
 
   const del = ({ path, recursive = false }) => {
-    const abs = inWorkspace(root, path);
-    if (abs === resolve(root)) throw new ToolError('ERR_REFUSED', 'Refusing to delete the workspace root');
+    const abs = resolvePath(root, path);
+    if (abs === resolve(root) || abs === parse(abs).root) {
+      throw new ToolError('ERR_REFUSED', 'Refusing to delete the base workspace dir or a filesystem root');
+    }
     if (!existsSync(abs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path, nearestExisting: nearestSiblings(root, abs) });
     const st = statSync(abs);
     if (st.isDirectory() && !recursive) {
@@ -180,8 +182,8 @@ export function makeFsTools(root) {
   };
 
   const move = ({ from, to }) => {
-    const fromAbs = inWorkspace(root, from);
-    const toAbs = inWorkspace(root, to);
+    const fromAbs = resolvePath(root, from);
+    const toAbs = resolvePath(root, to);
     if (!existsSync(fromAbs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${from}`, { path: from });
     mkdirSync(dirname(toAbs), { recursive: true });
     renameSync(fromAbs, toAbs);

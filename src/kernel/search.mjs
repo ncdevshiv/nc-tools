@@ -1,8 +1,8 @@
-// search.* tools — line-based regex grep and glob-ish file search, both jailed.
-import { readdirSync, readFileSync, lstatSync, statSync, existsSync, realpathSync } from 'node:fs';
+// search.* tools — line-based regex grep and glob-ish file search, machine-wide.
+import { readdirSync, readFileSync, lstatSync, statSync, existsSync } from 'node:fs';
 import { join, relative, extname, dirname, basename } from 'node:path';
 import { ToolError } from './errors.mjs';
-import { inWorkspace, isInsidePath } from './paths.mjs';
+import { resolvePath, isReparsePoint } from './paths.mjs';
 import { nearestSiblings } from './fs.mjs';
 
 const TEXT_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.txt', '.css', '.html', '.py', '.rs', '.go', '.java', '.yml', '.yaml', '.toml', '.sh', '.c', '.h', '.cpp', '.hpp', '.sql', '.env', '.gitignore', '.log', '']);
@@ -14,10 +14,9 @@ function* walkFiles(root, dir, depth = 0) {
     const full = join(dir, name);
     let st;
     try { st = lstatSync(full); } catch { continue; }
-    if (st.isSymbolicLink()) continue; // never follow links (they may leave the workspace)
+    if (st.isSymbolicLink()) continue; // never follow links (cycles)
     if (st.isDirectory()) {
-      // a junction may point outside the workspace; skip it
-      try { if (!isInsidePath(root, realpathSync(full))) continue; } catch { continue; }
+      if (isReparsePoint(full)) continue; // junction: skip (cycle safety)
       yield* walkFiles(root, full, depth + 1);
     } else yield full;
   }
@@ -29,7 +28,7 @@ export function makeSearchTools(root) {
     try { re = new RegExp(pattern); } catch (e) {
       throw new ToolError('ERR_BAD_REGEX', `Invalid regex: ${e.message}`, { pattern });
     }
-    const base = inWorkspace(root, path);
+    const base = resolvePath(root, path);
     if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { nearestExisting: nearestSiblings(root, base) });
     // path may name a single file (e.g. docs/PROTOCOL.md); only walk if a dir
     const files = [];
@@ -64,7 +63,7 @@ export function makeSearchTools(root) {
   };
 
   const files = ({ pattern, path = '.' }) => {
-    const base = inWorkspace(root, path);
+    const base = resolvePath(root, path);
     if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
     const out = [];
     if (statSync(base).isDirectory()) {

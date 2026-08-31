@@ -86,8 +86,10 @@ function connect(root) {
     report('fs.write+fs.read round-trip', !w.isError && !r.isError && r.data.content.includes('hello audit') ? 'PASS' : 'FAIL', '');
     const miss = await sc('fs.read', { path: 'missing-xyz.txt' });
     report('ERR_NOT_FOUND + nearestExisting hint', miss.isError && miss.data.error.code === 'ERR_NOT_FOUND' && Array.isArray(miss.data.error.hint.nearestExisting) ? 'PASS' : 'FAIL', JSON.stringify(miss.data.error?.code));
-    const esc = await sc('fs.write', { path: '../escape.txt', content: 'x' });
-    report('ERR_PATH_ESCAPE', esc.isError && esc.data.error.code === 'ERR_PATH_ESCAPE' ? 'PASS' : 'FAIL', JSON.stringify(esc.data.error?.code));
+    const escPath = join(tmpdir(), `nc-audit-out-${Date.now()}.txt`);
+    const esc = await sc('fs.write', { path: escPath, content: 'x' });
+    report('absolute path outside base dir is writable (global tool system)', !esc.isError ? 'PASS' : 'FAIL', JSON.stringify(esc.data.error?.code));
+    rmSync(escPath, { force: true });
     await sc('fs.write', { path: 'patch.js', content: 'const x = 1;\nconst y = 2;\n' });
     const p1 = await sc('patch.apply', { path: 'patch.js', edits: [{ oldText: 'const x = 1;', newText: 'const x = 10;' }] });
     const p2 = await sc('patch.apply', { path: 'patch.js', edits: [{ oldText: 'nope', newText: 'x' }] });

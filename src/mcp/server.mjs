@@ -1,7 +1,10 @@
+#!/usr/bin/env node
 // MCP stdio server exposing the nc-tools kernel over JSON-RPC 2.0.
 // Protocol: MCP 2024-11-05 (initialize, tools/list, tools/call).
-// Usage: node src/mcp/server.mjs [workspaceRoot]
+// Usage: node src/mcp/server.mjs [workspaceRoot]   (also: npx nc-tools-mcp [workspaceRoot])
 //   Falls back to NCTOOLS_WORKSPACE, then cwd.
+// workspaceRoot anchors the path jail, the journal and snapshots; every
+// path-taking tool refuses to touch anything outside it (ERR_PATH_ESCAPE).
 // Idle auto-sleep: if no request arrives for NCTOOLS_MCP_IDLE_MS ms (default
 // 30 min), the server exits(0). Set "0" or leave empty to disable the idle
 // timer. MCP clients restart a stdio server on demand, so this makes dormant

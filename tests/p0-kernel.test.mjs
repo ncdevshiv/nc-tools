@@ -30,14 +30,14 @@ test('fs.writeMany writes many files; per-item failure does not abort the batch'
   const k = new Kernel(root);
   const out = await k.call('fs.writeMany', { files: [
     { path: 'ok1.txt', content: '1' },
-    { path: '../escape.txt', content: 'bad' },
+    { path: '', content: 'bad' },
     { path: 'deep/nested/ok2.txt', content: '2' },
   ] });
   assert.equal(out.ok, true);
   assert.equal(out.result.written, 2);
   assert.equal(out.result.failed, 1);
   assert.equal(out.result.results[1].ok, false);
-  assert.equal(out.result.results[1].error.code, 'ERR_PATH_ESCAPE');
+  assert.equal(out.result.results[1].error.code, 'ERR_BAD_PATH');
   assert.equal(readFileSync(join(root, 'ok1.txt'), 'utf8'), '1');
   assert.equal(readFileSync(join(root, 'deep/nested/ok2.txt'), 'utf8'), '2');
 });
@@ -118,12 +118,16 @@ test('ERR_NOT_FOUND carries nearestExisting hints', async () => {
     `hint should include src/config.js, got ${JSON.stringify(out.error.hint)}`);
 });
 
-test('ERR_PATH_ESCAPE hint includes suggestion and workspace root', async () => {
+test('writes to absolute paths outside the base dir succeed', async () => {
   const k = new Kernel(root);
-  const out = await k.call('fs.write', { path: 'C:/Windows/evil.txt', content: 'x' });
-  assert.equal(out.error.code, 'ERR_PATH_ESCAPE');
-  assert.equal(out.error.hint.workspaceRoot, root);
-  assert.match(out.error.hint.suggestion, /fs\.list/);
+  const p = join(tmpdir(), `nc-p0-out-${Date.now()}.txt`);
+  try {
+    const out = await k.call('fs.write', { path: p, content: 'x' });
+    assert.equal(out.ok, true, JSON.stringify(out.error || ''));
+    assert.equal(readFileSync(p, 'utf8'), 'x');
+  } finally {
+    rmSync(p, { force: true });
+  }
 });
 
 test('search.grep accepts a FILE path (regression: ENOTDIR bug)', async () => {

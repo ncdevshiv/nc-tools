@@ -1,10 +1,10 @@
 // sys.snapshot / sys.rollback — workspace snapshots with manifest-based
 // restore. This is the primitive that makes agent *speculation* safe:
 // snapshot before a risky edit, roll back if verification fails.
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, lstatSync, realpathSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, lstatSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { ToolError } from './errors.mjs';
-import { inWorkspace, isInsidePath } from './paths.mjs';
+import { isReparsePoint } from './paths.mjs';
 
 const EXCLUDED = new Set(['.git', 'node_modules', '.nc-tools']);
 
@@ -18,8 +18,7 @@ function walkFiles(root, dir, rel = '') {
     try { st = lstatSync(abs); } catch { continue; }
     if (st.isSymbolicLink()) continue; // never follow links into the snapshot
     if (st.isDirectory()) {
-      // a junction may point outside the workspace; skip it
-      try { if (!isInsidePath(root, realpathSync(abs))) continue; } catch { continue; }
+      if (isReparsePoint(abs)) continue; // junction: skip (cycle safety)
       out.push(...walkFiles(root, abs, relPath));
     } else out.push(relPath);
   }

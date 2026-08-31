@@ -1,5 +1,5 @@
 // Regression tests for the post-wave-8 audit fixes:
-// path jail (case-insensitivity + junction/symlink escape), search.files on
+// path resolution (case-insensitivity, junction walk safety), search.files on
 // single files, test.run zero-test honesty, underscore->dot name translation,
 // proc bounds, git.status dot-dir filter, MCP idle-0 semantics.
 import { test, beforeEach, afterEach } from 'node:test';
@@ -41,22 +41,20 @@ test('absolute paths with different case are accepted on Windows', { skip: !isWi
   assert.equal(lower.result.exists, true);
 });
 
-test('junction to outside the workspace is refused (jail bypass closed)', { skip: !isWin }, async () => {
+test('junction: explicit reads through it work; recursive walks never follow it', { skip: !isWin }, async () => {
   const k = new Kernel(root);
   const secret = join(tmpdir(), `nc-secret-${Date.now()}.txt`);
   writeFileSync(secret, 'OUTSIDE-SECRET', 'utf8');
   try {
     const mk = spawnSync('cmd', ['/c', 'mklink', '/J', 'escapedir', tmpdir()], { cwd: root });
     assert.equal(mk.status, 0, `mklink failed: ${mk.stderr}`);
-    // direct read through the junction is refused with a reparse-point error
+    // no jail: an explicit path THROUGH the junction reads outside the base
     const read = await k.call('fs.read', { path: `escapedir/${basename(secret)}` });
-    assert.equal(read.ok, false);
-    assert.equal(read.error.code, 'ERR_PATH_ESCAPE');
-    assert.match(read.error.message, /symlink\/junction/);
-    // search does not leak through it either
+    assert.equal(read.ok, true, JSON.stringify(read.error || ''));
+    assert.match(read.result.content, /OUTSIDE-SECRET/);
+    // recursive walks still skip reparse points (cycle safety, not a jail)
     const grep = await k.call('search.grep', { pattern: 'OUTSIDE-SECRET' });
     assert.equal(grep.result.total, 0);
-    // recursive list shows the junction but never its contents
     const list = await k.call('fs.list', { path: '.', recursive: true });
     assert.ok(list.result.entries.some((e) => e.path === 'escapedir'));
     assert.equal(list.result.entries.some((e) => e.path.startsWith('escapedir/')), false);
@@ -129,11 +127,13 @@ test('git.status hides only the .nc-tools directory', async () => {
   assert.ok(!paths.some((p) => p === '.nc-tools' || p.startsWith('.nc-tools/')));
 });
 
-test('search.semantic refuses paths outside the workspace before loading the model', async () => {
+test('search.semantic accepts paths outside the base dir; missing paths fail fast', async () => {
   const k = new Kernel(root);
-  const out = await k.call('search.semantic', { query: 'x', path: '..' });
+  const missing = join(tmpdir(), `nctools-missing-${Date.now()}`);
+  // outside the base but nonexistent: the path RESOLVES (no jail), then ERR_NOT_FOUND before the model loads
+  const out = await k.call('search.semantic', { query: 'x', path: missing });
   assert.equal(out.ok, false);
-  assert.equal(out.error.code, 'ERR_PATH_ESCAPE');
+  assert.equal(out.error.code, 'ERR_NOT_FOUND');
 });
 
 test('MCP server with NCTOOLS_MCP_IDLE_MS=0 stays alive across requests', async () => {

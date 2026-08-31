@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { ToolError } from './errors.mjs';
+import { resolvePath } from './paths.mjs';
 
 // Windows: npm is a .CMD shim; spawnSync rejects .cmd without a shell (EINVAL)
 // and nc-tools never uses shells. Run npm-cli.js under the current node instead.
@@ -38,13 +39,14 @@ function run(root, cmd, args, timeoutMs = 300_000) {
 const NETWORK_HINTS = ['ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'network', 'ECONNRESET'];
 
 export function makePkgTools(root) {
-  const add = ({ manager = 'npm', names, dev = false, timeoutMs = 300_000 }) => {
+  const add = ({ manager = 'npm', names, dev = false, timeoutMs = 300_000, dir }) => {
     if (!Array.isArray(names) || names.length === 0 || names.some((n) => typeof n !== 'string')) {
       throw new ToolError('ERR_BAD_INPUT', 'names must be a non-empty array of strings');
     }
+    const d = resolvePath(root, dir ?? '.');
     if (manager === 'npm') {
       const args = ['install', '--no-audit', '--no-fund', '--loglevel=error', ...(dev ? ['--save-dev'] : []), ...names];
-      const r = run(root, 'npm', args, timeoutMs);
+      const r = run(d, 'npm', args, timeoutMs);
       if (r.status !== 0) {
         const errTail = (r.stderr || r.stdout || '').slice(-400);
         const isNet = NETWORK_HINTS.some((h) => errTail.toLowerCase().includes(h.toLowerCase()));
@@ -54,7 +56,7 @@ export function makePkgTools(root) {
       return { manager, installed: names, dev };
     }
     if (manager === 'pip') {
-      const r = run(root, 'python', ['-m', 'pip', 'install', ...names], timeoutMs);
+      const r = run(d, 'python', ['-m', 'pip', 'install', ...names], timeoutMs);
       if (r.status !== 0) {
         const errTail = (r.stderr || r.stdout || '').slice(-400);
         const isNet = NETWORK_HINTS.some((h) => errTail.toLowerCase().includes(h.toLowerCase()));
@@ -66,12 +68,13 @@ export function makePkgTools(root) {
     throw new ToolError('ERR_BAD_INPUT', `unsupported manager: ${manager} (supported: npm, pip)`);
   };
 
-  const list = ({ manager = 'npm' } = {}) => {
+  const list = ({ manager = 'npm', dir } = {}) => {
+    const d = resolvePath(root, dir ?? '.');
     if (manager === 'npm') {
-      if (!existsSync(join(root, 'package.json'))) {
+      if (!existsSync(join(d, 'package.json'))) {
         return { manager, packages: [], note: 'no package.json in workspace' };
       }
-      const r = run(root, 'npm', ['ls', '--json', '--depth=0']);
+      const r = run(d, 'npm', ['ls', '--json', '--depth=0']);
       let parsed;
       try { parsed = JSON.parse(r.stdout || '{}'); } catch {
         throw new ToolError('ERR_PKG', 'npm ls produced unparseable output');
@@ -82,7 +85,7 @@ export function makePkgTools(root) {
       return { manager, packages, total: packages.length };
     }
     if (manager === 'pip') {
-      const r = run(root, 'python', ['-m', 'pip', 'list', '--format', 'json']);
+      const r = run(d, 'python', ['-m', 'pip', 'list', '--format', 'json']);
       let parsed;
       try { parsed = JSON.parse(r.stdout || '[]'); } catch {
         throw new ToolError('ERR_PKG', 'pip list produced unparseable output');
@@ -92,8 +95,9 @@ export function makePkgTools(root) {
     throw new ToolError('ERR_BAD_INPUT', `unsupported manager: ${manager}`);
   };
 
-  const scripts = () => {
-    const pj = join(root, 'package.json');
+  const scripts = ({ dir } = {}) => {
+    const d = resolvePath(root, dir ?? '.');
+    const pj = join(d, 'package.json');
     if (!existsSync(pj)) throw new ToolError('ERR_NOT_FOUND', 'no package.json in workspace', { path: 'package.json' });
     let parsed;
     try { parsed = JSON.parse(readFileSync(pj, 'utf8')); } catch (e) {
@@ -102,12 +106,13 @@ export function makePkgTools(root) {
     return { scripts: parsed.scripts ?? {} };
   };
 
-  const runScript = ({ name, args = [], timeoutMs = 300_000 }) => {
+  const runScript = ({ name, args = [], timeoutMs = 300_000, dir }) => {
     if (typeof name !== 'string' || !name) throw new ToolError('ERR_BAD_INPUT', 'script name required');
     if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
       throw new ToolError('ERR_BAD_INPUT', 'args must be an array of strings');
     }
-    const r = run(root, 'npm', ['run', name, '--', ...args], timeoutMs);
+    const d = resolvePath(root, dir ?? '.');
+    const r = run(d, 'npm', ['run', name, '--', ...args], timeoutMs);
     return {
       script: name, exitCode: r.status,
       stdout: (r.stdout || '').slice(-100_000),

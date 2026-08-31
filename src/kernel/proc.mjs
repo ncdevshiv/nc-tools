@@ -4,7 +4,7 @@
 // and proc.kill cover the OS process table (tasklist/ps + pid kill).
 import { spawn, spawnSync } from 'node:child_process';
 import { ToolError } from './errors.mjs';
-import { inWorkspace } from './paths.mjs';
+import { resolvePath } from './paths.mjs';
 
 const MAX_BUFFER = 2_000_000;
 
@@ -43,8 +43,6 @@ export function makeProcTools(root, sessionEnv) {
 
   const childEnv = () => ({ ...process.env, ...Object.fromEntries(sessionEnv) });
 
-  const resolveCmd = (cmd) => (cmd.includes('/') || cmd.includes('\\') ? inWorkspace(root, cmd) : cmd);
-
   const spawnTool = async ({ cmd, args = [], cwd = '.', timeoutMs = 120_000, maxOutputBytes = MAX_BUFFER }) => {
     if (typeof cmd !== 'string' || cmd.length === 0) throw new ToolError('ERR_BAD_INPUT', 'cmd must be a non-empty string');
     if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
@@ -53,7 +51,7 @@ export function makeProcTools(root, sessionEnv) {
     if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 600_000) {
       throw new ToolError('ERR_BAD_INPUT', 'timeoutMs must be an integer between 100 and 600000', { got: timeoutMs });
     }
-    const cwdAbs = inWorkspace(root, cwd);
+    const cwdAbs = resolvePath(root, cwd);
 
     return await new Promise((resolvePromise) => {
       let stdout = '';
@@ -62,7 +60,7 @@ export function makeProcTools(root, sessionEnv) {
       let settled = false;
       let child;
       try {
-        child = spawn(resolveCmd(cmd), args, { cwd: cwdAbs, shell: false, windowsHide: true, env: childEnv() });
+        child = spawn(cmd, args, { cwd: cwdAbs, shell: false, windowsHide: true, env: childEnv() });
       } catch (e) {
         throw new ToolError('ERR_SPAWN', `failed to spawn ${cmd}: ${e.message}`);
       }
@@ -109,10 +107,10 @@ export function makeProcTools(root, sessionEnv) {
     if (!Number.isInteger(maxDurationMs) || maxDurationMs < 1000 || maxDurationMs > 3_600_000) {
       throw new ToolError('ERR_BAD_INPUT', 'maxDurationMs must be an integer between 1000 and 3600000', { got: maxDurationMs });
     }
-    const cwdAbs = inWorkspace(root, cwd);
+    const cwdAbs = resolvePath(root, cwd);
     let child;
     try {
-      child = spawn(resolveCmd(cmd), args, { cwd: cwdAbs, shell: false, windowsHide: true, env: childEnv() });
+      child = spawn(cmd, args, { cwd: cwdAbs, shell: false, windowsHide: true, env: childEnv() });
     } catch (e) {
       throw new ToolError('ERR_SPAWN', `failed to start ${cmd}: ${e.message}`);
     }

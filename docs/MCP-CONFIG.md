@@ -27,8 +27,9 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
 }
 ```
 
-- `args[1]` = the workspace root the kernel is jailed to (the only files it
-  can read/write plus everything else scoped there).
+- `args[1]` = the base dir the kernel anchors relative paths, journal and
+  snapshots to. Paths are NOT restricted to it: absolute paths work anywhere
+  on the machine (global tool system).
 - `NCTOOLS_MCP_IDLE_MS` = idle auto-sleep (default 30 min): after that long
   with no requests, the server exits. Standard MCP clients restart a stdio
   server when the next call arrives, so the agent effectively "sleeps"
@@ -48,6 +49,30 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
   }
 }
 ```
+
+### Qwen Code (`~/.qwen/settings.json` — user scope)
+
+```json
+{
+  "mcpServers": {
+    "nc-tools": {
+      "command": "npx",
+      "args": ["--no-install", "nc-tools-mcp", "F:/nc-cli"],
+      "env": { "NCTOOLS_MCP_IDLE_MS": "1800000" }
+    }
+  }
+}
+```
+
+- Qwen Code selects the stdio transport by the presence of `command` (no
+  `type` field needed); the last `args` element is the workspace root the
+  kernel is jailed to (the server reads `argv[2] || NCTOOLS_WORKSPACE || cwd`).
+- The npx form works because the repo ships `bin.nc-tools-mcp`
+  (`src/mcp/server.mjs`) and `npm link` was run inside `F:/nc-tools` — npx
+  resolves the global shim. Keep `--no-install`: the package is not published
+  to npm, so npx must never fall back to the registry (it would 404).
+- Per-project pinning: drop a `.qwen/settings.json` in a repo with its own
+  `<workspaceRoot>` in `args`.
 
 ### Generic MCP host (any tool that takes command+args)
 

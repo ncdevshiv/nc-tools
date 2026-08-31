@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, rmSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { ToolError } from './errors.mjs';
-import { inWorkspace } from './paths.mjs';
+import { resolvePath } from './paths.mjs';
 
 // Node's test runner expands glob patterns itself (v21+); a bare directory is
 // NOT descended into (Node 24 treats it as a module path and fails), so
@@ -19,7 +19,7 @@ const DEFAULT_PATTERNS = [
 ];
 
 function patternsFor(root, path) {
-  const abs = inWorkspace(root, path);
+  const abs = resolvePath(root, path);
   if (!existsSync(abs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
   if (statSync(abs).isDirectory()) return TEST_EXT_PATTERNS.map((g) => `${abs.replaceAll('\\', '/')}/**/${g}`);
   return [abs];

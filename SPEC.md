@@ -32,7 +32,7 @@ All tools live under the `nc` server. Names are `category.action`.
 - `fs.list` `{path, recursive?}` → `{entries:[{name,path,type,size}]}`
 - `fs.stat` `{path}` → `{exists, type, size, mtimeMs}`
 - `fs.mkdir` `{path, recursive?}` → `{path, created}`
-- `fs.delete` `{path, recursive?}` → `{path, deleted}` (safe: refuses outside workspace root)
+- `fs.delete` `{path, recursive?}` → `{path, deleted}` (safe: refuses deleting the base dir or a filesystem root)
 - `fs.move` `{from, to}` → `{from, to}`
 
 ### patch.*
@@ -96,8 +96,11 @@ Rules:
 
 ## 5. Safety model
 
-- **Workspace jail.** All path-taking tools resolve the target against the
-  workspace root and refuse anything that escapes it (`ERR_PATH_ESCAPE`).
+- **No path jail — global tool system.** The kernel is a machine-wide tool
+  surface for remote agents working in parallel: absolute paths are accepted
+  for ANY location, and relative paths resolve against the base dir given at
+  startup (`argv[2] / NCTOOLS_WORKSPACE / cwd`). Recursive walks never follow
+  symlinks/junctions, so cycles cannot loop.
 - **No silent overwrite of unknown files** without a write event; the journal
   is the audit trail.
 - **proc.spawn is allowlist-free but typed**: argv array, explicit cwd, hard

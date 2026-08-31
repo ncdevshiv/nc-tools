@@ -40,12 +40,11 @@ export const conformanceCases = [
         return err.error.code === 'ERR_NOT_FOUND' && Array.isArray(err.error.hint.nearestExisting);
       } },
   ]),
-  caseTemplate('ERR_PATH_ESCAPE for traversal', [
+  caseTemplate('paths outside the base dir are writable (no jail)', [
     { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: '../escape.txt', content: 'x' } },
-      expect: (r) => {
-        const err = JSON.parse(r.result.content[0].text);
-        return err.error.code === 'ERR_PATH_ESCAPE' && typeof err.error.hint.workspaceRoot === 'string';
-      } },
+      expect: (r) => !r.result.isError && r.result.content[0].text.includes('created') },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.delete', arguments: { path: '../escape.txt' } },
+      expect: (r) => !r.result.isError },
   ]),
   caseTemplate('patch.apply exact match + PATCH_NO_MATCH hints', [
     { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'app.js', content: 'function add(a, b) {\n  return a + b;\n}\n' } },

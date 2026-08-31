@@ -92,6 +92,19 @@ the live MCP, all fixed + regression-tested (`tests/auditfixes.test.mjs`):
    (schema caps are bypassable via `batch.execute`); `git.status` hides only
    the `.nc-tools` directory; `ERR_NO_TESTS` added to the taxonomy.
 
+## Wave 11 (2026-08-31): jail removed — global tool system
+
+By design decision — the kernel is a machine-wide tool surface for remote
+agents working in parallel across many projects — the workspace jail was
+removed: absolute paths are accepted for any location, relative paths resolve
+against the base dir given at startup (`argv[2] / NCTOOLS_WORKSPACE / cwd`),
+and `ERR_PATH_ESCAPE` no longer exists as an observable error. `git.*` gained a
+`repo` param and `pkg.*` a `dir` param so they operate outside the base;
+recursive walks keep skipping symlinks/junctions, and `fs.delete` still
+refuses the base dir and filesystem roots. The wave-9 hardening
+(case-folding, reparse-point detection) was not wasted — it is now the
+cycle-safety mechanism.
+
 ## How to re-run
 
 ```bash

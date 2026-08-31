@@ -18,7 +18,7 @@ import { makeSemanticTools } from './semantic.mjs';
 import { ToolError } from './errors.mjs';
 
 export class Kernel {
-  /** @param {string} root absolute workspace root */
+  /** @param {string} root absolute base dir (anchors relative paths, journal, snapshots) */
   constructor(root, { journalPath } = {}) {
     this.root = root;
     this.journal = new Journal(journalPath ?? join(root, '.nc-tools', 'journal.jsonl'));

@@ -3,7 +3,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename, parse } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Kernel } from '../src/kernel/kernel.mjs';
 
@@ -50,14 +50,21 @@ test('fs.list skips .nc-tools and .git', async () => {
   assert.equal(out.result.entries[0].path, 'keep.txt');
 });
 
-test('path jail refuses escape', async () => {
+test('paths outside the base dir are allowed (global tool system)', async () => {
   const k = new Kernel(root);
-  const out = await k.call('fs.write', { path: '../evil.txt', content: 'x' });
-  assert.equal(out.ok, false);
-  assert.equal(out.error.code, 'ERR_PATH_ESCAPE');
-  const out2 = await k.call('fs.read', { path: join(tmpdir(), 'outside.txt') });
-  assert.equal(out2.ok, false);
-  assert.equal(out2.error.code, 'ERR_PATH_ESCAPE');
+  const outside = mkdtempSync(join(tmpdir(), 'nctools-out-'));
+  try {
+    const w = await k.call('fs.write', { path: join(outside, 'x.txt'), content: 'out' });
+    assert.equal(w.ok, true, JSON.stringify(w.error || ''));
+    const r = await k.call('fs.read', { path: join(outside, 'x.txt') });
+    assert.equal(r.ok, true);
+    assert.match(r.result.content, /out/);
+    // relative climbs through the parent of the base dir are allowed too
+    const climb = await k.call('fs.read', { path: `../${basename(outside)}/x.txt` });
+    assert.equal(climb.ok, true, JSON.stringify(climb.error || ''));
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test('patch.apply applies unique replace; reports PATCH_NO_MATCH with hints', async () => {
@@ -205,9 +212,12 @@ test('fs.move and fs.delete work', async () => {
   assert.equal(missing.error.code, 'ERR_NOT_FOUND');
 });
 
-test('workspace root deletion is refused', async () => {
+test('base dir and filesystem root deletion are refused', async () => {
   const k = new Kernel(root);
   const out = await k.call('fs.delete', { path: '.', recursive: true });
   assert.equal(out.ok, false);
   assert.equal(out.error.code, 'ERR_REFUSED');
+  const drive = await k.call('fs.delete', { path: parse(root).root, recursive: true });
+  assert.equal(drive.ok, false);
+  assert.equal(drive.error.code, 'ERR_REFUSED');
 });

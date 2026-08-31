@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { dirname, basename, relative, join } from 'node:path';
 import { ToolError } from './errors.mjs';
-import { inWorkspace } from './paths.mjs';
+import { resolvePath } from './paths.mjs';
 import { nearestSiblings } from './fs.mjs';
 
 /**
@@ -13,7 +13,7 @@ import { nearestSiblings } from './fs.mjs';
  */
 export function makePatchTools(root) {
   const apply = ({ path, edits }) => {
-    const abs = inWorkspace(root, path);
+    const abs = resolvePath(root, path);
     if (!existsSync(abs) || statSync(abs).isDirectory()) {
       throw new ToolError('ERR_NOT_FOUND', `No such file: ${path}`, { path, nearestExisting: nearestSiblings(root, abs) });
     }
