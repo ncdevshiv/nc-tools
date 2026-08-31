@@ -147,11 +147,15 @@ export const tier3 = [
     verify: async (root, kernel) => {
       const r = await kernel.call('test.run', { framework: 'node', path: 'tests/fizz.test.mjs' });
       const impl = await kernel.call('fs.stat', { path: 'src/fizz.js' });
-      // TDD order proof from the journal: test file written BEFORE the implementation
-      const writes = kernel.journal.readAll().filter((e) => e.kind === 'tool.call' && e.tool === 'fs.write');
-      const testIdx = writes.findIndex((w) => (w.args?.path || '').includes('fizz.test.mjs'));
-      const implIdx = writes.findIndex((w) => (w.args?.path || '').includes('src/fizz.js'));
-      const tddOrder = testIdx !== -1 && implIdx !== -1 && testIdx < implIdx;
+      const testFile = await kernel.call('fs.stat', { path: 'tests/fizz.test.mjs' });
+      // TDD order proof, arm-neutral: the test file must exist and have been
+      // written BEFORE the implementation (mtime test <= impl, +1s tolerance
+      // for same-millisecond writes). Journal-based ordering would bias
+      // against the bash arm, which writes files via proc.spawn, not fs.write.
+      let tddOrder = false;
+      if (testFile.result?.exists && impl.result?.exists) {
+        tddOrder = testFile.result.mtimeMs <= impl.result.mtimeMs + 1000;
+      }
       const pass = r.ok && r.result?.failed === 0 && r.result?.passed >= 1 && impl.result?.exists && tddOrder;
       return { pass, evidence: JSON.stringify({ tests: r.result?.passed, failed: r.result?.failed, impl: !!impl.result?.exists, tddOrder }) };
     },

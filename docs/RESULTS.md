@@ -1,6 +1,53 @@
 # nc-tools Benchmark Results — Real Runs
 
-Date: 2026-08-31 (wave 5: diverse ladder)
+Date: 2026-08-31 (wave 6: variance measurement)
+
+## Wave 6: is the benchmark stable? — repeat runs
+
+Every ladder cell ran once; the natural question is how much of that is
+signal. `benchmark/variance.mjs` computes solve-rate stability and
+token/time spread for cells run N times (`NCTOOLS_REPEATS=3`).
+
+### What repeated runs showed (deepseek, 3x on easy/medium/hard/expert)
+
+| Cell | n | Solve rate | Token spread |
+|---|---|---|---|
+| fix-off-by-one | 3 | 3/3 | 2% (kernel), 31% (bash) |
+| add-feature-with-test | 3 | 3/3 | 5% (kernel), 29% (bash) |
+| multi-step-tdd | 3 | 3/3 | 25% (kernel), 227% (bash) |
+| expert-refactor-lib | 3 | 3/3 | 35% (kernel), 79% (bash) |
+
+**deepseek is stable**: 12/12 across repeats, and the kernel arm's token
+spread (2–35%) is consistently tighter than bash's (29–227%) — the typed
+surface produces more reproducible behavior.
+
+### The verifier bias the repeats caught
+
+The first variance run showed multi-step-tdd/bash 0/3 — solid-looking
+evidence against bash. Investigation found the verifier was biased: it
+checked TDD ordering via journal `fs.write` events, but the bash arm writes
+files through `proc.spawn`, so its journal can never contain `fs.write`.
+The verifier was fixed to use file mtimes (arm-neutral); with the fix the
+bash arm scores 3/3. A verifier bug, not a capability gap — and repeats are
+*why* it surfaced. Post-fix, `validate-verifiers` still proves 18/18.
+
+### glm is unstable — and partly provider-unstable
+
+| Cell | n | Solve rate |
+|---|---|---|
+| fix-off-by-one kernel | 3 | **1/3** (FAIL,FAIL,PASS) |
+| fix-off-by-one bash | 3 | 2/3 (PASS,PASS,FAIL) |
+| multi-step-tdd kernel | 3 | 2/3 (FAIL,PASS,PASS) |
+| multi-step-tdd bash | 3 | 1/3 (FAIL,FAIL,PASS) |
+
+Two of the glm failures were not agent behavior at all: `stopped=api_error`
+with HTTP 400 from the upstream provider (0 tokens spent). The other
+failures are genuine variance: glm sometimes solves a task in 40s, sometimes
+fails after 295s. **Conclusion: deepseek's ladder scores are stable; glm's
+are small-sample noise and must not be read as calibrated.** This is recorded
+rather than hidden — it's the honest reading of repeated data.
+
+## Wave 5: the diverse ladder — 18 tasks, easy → expert, 2 languages, 72 agent runs
 
 ## Wave 5: the diverse ladder — 18 tasks, easy → expert, 2 languages, 72 agent runs
 

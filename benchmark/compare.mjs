@@ -17,6 +17,7 @@ const models = (process.env.NCTOOLS_LLM_MODELS || '').split(',').map((s) => s.tr
 const outDir = resolve(process.argv[2] || 'benchmark/results/compare');
 const onlyTask = process.env.NCTOOLS_TASK || (process.env.NCTOOLS_TASKS ? null : null);
 const onlyTasks = (process.env.NCTOOLS_TASKS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const repeatRuns = Math.max(1, Number(process.env.NCTOOLS_REPEATS || 1));
 
 if (!baseURL || models.length === 0) {
   console.error('Usage: NCTOOLS_LLM_BASEURL=... NCTOOLS_LLM_APIKEY=... NCTOOLS_LLM_MODELS=a,b node benchmark/compare.mjs [outDir]');
@@ -46,7 +47,8 @@ for (const model of models) {
     if (onlyTask && task.id !== onlyTask) continue;
     if (onlyTasks.length && !onlyTasks.includes(task.id)) continue;
     for (const mode of ['kernel', 'bash']) {
-      const root = mkdtempSync(join(tmpdir(), `nccmp-${task.id}-${mode}-`));
+      for (let rep = 1; rep <= repeatRuns; rep++) {
+      const root = mkdtempSync(join(tmpdir(), `nccmp-${task.id}-${mode}-r${rep}-`));
       gitInit(root);
       setupWorkspace(root, task);
       const kernel = new Kernel(root);
@@ -66,7 +68,7 @@ for (const model of models) {
       }
       const journal = kernel.journal.readAll();
       const record = {
-        task: task.id, category: task.category, model, mode,
+        task: task.id, category: task.category, model, mode, repeat: rep,
         solved: verdict.pass === true,
         evidence: String(verdict.evidence || '').slice(0, 600),
         stopped: result.stopped,
@@ -92,7 +94,8 @@ for (const model of models) {
         process.stderr.write(`warn: could not remove ${root}: ${e.message}\n`);
       }
       summary.push(record);
-      console.log(`[${model}/${mode}] ${task.id}: ${record.solved ? 'SOLVED' : 'FAILED'} (${result.toolCalls} calls, ${record.totalTokens ?? '?'} tok, ${(wallMs / 1000).toFixed(1)}s)`);
+      console.log(`[${model}/${mode}] ${task.id} #${rep}: ${record.solved ? 'SOLVED' : 'FAILED'} (${result.toolCalls} calls, ${record.totalTokens ?? '?'} tok, ${(wallMs / 1000).toFixed(1)}s)`);
+      }
     }
   }
 }
