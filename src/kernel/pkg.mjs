@@ -5,6 +5,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { ToolError } from './errors.mjs';
 import { resolvePath } from './paths.mjs';
+import { childEnv } from './childenv.mjs';
 
 // Windows: npm is a .CMD shim; spawnSync rejects .cmd without a shell (EINVAL)
 // and nc-tools never uses shells. Run npm-cli.js under the current node instead.
@@ -29,7 +30,7 @@ function run(root, cmd, args, timeoutMs = 300_000) {
     exe = process.execPath;
     argv = [resolveNpmCli(), ...args];
   }
-  const r = spawnSync(exe, argv, { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+  const r = spawnSync(exe, argv, { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env: childEnv() });
   if (r.error) {
     if (r.error.code === 'ENOENT') throw new ToolError('ERR_CMD_NOT_FOUND', `${cmd} is not available`);
     throw new ToolError('ERR_SPAWN', `${cmd} failed: ${r.error.message}`);

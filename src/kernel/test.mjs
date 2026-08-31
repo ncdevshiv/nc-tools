@@ -6,6 +6,7 @@ import { readFileSync, rmSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { ToolError } from './errors.mjs';
 import { resolvePath } from './paths.mjs';
+import { childEnv } from './childenv.mjs';
 
 // Node's test runner expands glob patterns itself (v21+); a bare directory is
 // NOT descended into (Node 24 treats it as a module path and fails), so
@@ -65,7 +66,7 @@ function parseJunitXml(xml, framework) {
 function runSuite(root, cmd, args, timeoutMs) {
   // Strip NODE_TEST_CONTEXT: node sets it for its own test children, and an
   // inherited value makes the spawned runner think it is nested and skip files.
-  const env = { ...process.env };
+  const env = childEnv();
   delete env.NODE_TEST_CONTEXT;
   const r = spawnSync(cmd, args, { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true, env });
   if (r.error) {

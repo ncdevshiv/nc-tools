@@ -6,11 +6,13 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { ToolError } from './errors.mjs';
 import { resolvePath } from './paths.mjs';
+import { childEnv } from './childenv.mjs';
 
 function git(dir, args, { input } = {}) {
   const r = spawnSync('git', args, {
     cwd: dir,
     input,
+    env: childEnv(),
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     timeout: 60_000,

@@ -5,6 +5,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { ToolError } from './errors.mjs';
 import { resolvePath } from './paths.mjs';
+import { childEnv as normalizeChildEnv } from './childenv.mjs';
 
 const MAX_BUFFER = 2_000_000;
 
@@ -41,7 +42,7 @@ export function makeProcTools(root, sessionEnv) {
   const handles = new Map();
   let handleSeq = 0;
 
-  const childEnv = () => ({ ...process.env, ...Object.fromEntries(sessionEnv) });
+  const childEnv = () => normalizeChildEnv(Object.fromEntries(sessionEnv));
 
   const spawnTool = async ({ cmd, args = [], cwd = '.', timeoutMs = 120_000, maxOutputBytes = MAX_BUFFER }) => {
     if (typeof cmd !== 'string' || cmd.length === 0) throw new ToolError('ERR_BAD_INPUT', 'cmd must be a non-empty string');
