@@ -21,6 +21,9 @@ export function makeProcTools(root, sessionEnv) {
     if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
       throw new ToolError('ERR_BAD_INPUT', 'args must be an array of strings (typed argv — no shell)');
     }
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 600_000) {
+      throw new ToolError('ERR_BAD_INPUT', 'timeoutMs must be an integer between 100 and 600000', { got: timeoutMs });
+    }
     const cwdAbs = inWorkspace(root, cwd);
 
     return await new Promise((resolvePromise) => {
@@ -74,6 +77,9 @@ export function makeProcTools(root, sessionEnv) {
     if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) {
       throw new ToolError('ERR_BAD_INPUT', 'args must be an array of strings (typed argv — no shell)');
     }
+    if (!Number.isInteger(maxDurationMs) || maxDurationMs < 1000 || maxDurationMs > 3_600_000) {
+      throw new ToolError('ERR_BAD_INPUT', 'maxDurationMs must be an integer between 1000 and 3600000', { got: maxDurationMs });
+    }
     const cwdAbs = inWorkspace(root, cwd);
     let child;
     try {
@@ -99,11 +105,9 @@ export function makeProcTools(root, sessionEnv) {
       rec.exitCode = code;
       rec.signal = signal;
     });
-    if (maxDurationMs > 0 && maxDurationMs <= 3_600_000) {
-      rec.timer = setTimeout(() => {
-        if (rec.running) { rec.timedOut = true; try { child.kill('SIGKILL'); } catch { /* dead */ } }
-      }, maxDurationMs);
-    }
+    rec.timer = setTimeout(() => {
+      if (rec.running) { rec.timedOut = true; try { child.kill('SIGKILL'); } catch { /* dead */ } }
+    }, maxDurationMs);
     handles.set(handleId, rec);
     return { handleId, pid: rec.pid, startedAt: new Date(rec.startedAt).toISOString() };
   };

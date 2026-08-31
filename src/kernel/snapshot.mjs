@@ -1,22 +1,27 @@
 // sys.snapshot / sys.rollback — workspace snapshots with manifest-based
 // restore. This is the primitive that makes agent *speculation* safe:
 // snapshot before a risky edit, roll back if verification fails.
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, lstatSync, realpathSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { ToolError } from './errors.mjs';
-import { inWorkspace } from './paths.mjs';
+import { inWorkspace, isInsidePath } from './paths.mjs';
 
 const EXCLUDED = new Set(['.git', 'node_modules', '.nc-tools']);
 
-function walkFiles(dir, rel = '') {
+function walkFiles(root, dir, rel = '') {
   const out = [];
   for (const name of readdirSync(dir).sort()) {
     if (EXCLUDED.has(name)) continue;
     const abs = join(dir, name);
     const relPath = rel ? `${rel}/${name}` : name;
-    const st = statSync(abs);
-    if (st.isDirectory()) out.push(...walkFiles(abs, relPath));
-    else out.push(relPath);
+    let st;
+    try { st = lstatSync(abs); } catch { continue; }
+    if (st.isSymbolicLink()) continue; // never follow links into the snapshot
+    if (st.isDirectory()) {
+      // a junction may point outside the workspace; skip it
+      try { if (!isInsidePath(root, realpathSync(abs))) continue; } catch { continue; }
+      out.push(...walkFiles(root, abs, relPath));
+    } else out.push(relPath);
   }
   return out;
 }
@@ -27,7 +32,7 @@ export function makeSnapshotTools(root) {
   const snapshot = ({ label = 'auto' }) => {
     const id = `${Date.now()}-${String(label).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     const dir = join(snapshotsRoot, id);
-    const files = walkFiles(root);
+    const files = walkFiles(root, root);
     for (const relPath of files) {
       const src = join(root, relPath);
       const dst = join(dir, relPath);
@@ -67,7 +72,7 @@ export function makeSnapshotTools(root) {
     }
     // 2. remove files created after the snapshot (not in manifest, not excluded)
     const manifestSet = new Set(manifest.files);
-    const current = walkFiles(root);
+    const current = walkFiles(root, root);
     const removed = [];
     for (const relPath of current) {
       if (manifestSet.has(relPath)) continue;

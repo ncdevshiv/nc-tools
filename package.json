@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test tests/",
+    "test": "node --test \"tests/**/*.test.mjs\"",
     "audit": "node tools/audit.mjs",
     "bench": "node benchmark/harness.mjs"
   },

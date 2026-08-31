@@ -60,6 +60,38 @@ mutated.
    error path nested the hint as `{hint: {...}}` while every other error had
    `{hint}` directly. Normalized.
 
+## Post-wave-8 fix wave (2026-08-31)
+
+Wave 9 (uncommitted at time of writing) — defects found by re-auditing through
+the live MCP, all fixed + regression-tested (`tests/auditfixes.test.mjs`):
+
+1. **Jail bypass via symlinks/junctions (high).** The path jail checked paths
+   lexically only; a junction inside the workspace pointed at `C:\Windows` and
+   `fs.read` followed it. `paths.mjs` now resolves the real on-disk location
+   (deepest existing ancestor) and re-verifies it stays inside the root; all
+   walkers (`fs.list`, `search.grep/files`, `search.semantic`,
+   `sys.snapshot/rollback`) skip reparse points that leave the workspace.
+2. **Case-sensitive jail compare (Windows).** `F:/NC-TOOLS/…` and
+   `f:/nc-tools/…` were falsely rejected as escapes; comparisons are now
+   case-folded on win32.
+3. **`search.files` crashed `ERR_INTERNAL ENOTDIR` on single-file paths** — the
+   wave-8 fix covered `search.grep`; `search.files` now handles files too.
+4. **`test.run` false green.** Default patterns missed `tests/` and reported
+   `{passed: 0, failed: 0, exitCode: 0}`; directories are now expanded to
+   globs and zero discovered tests return `ERR_NO_TESTS` instead of a silent
+   pass. `package.json` `test` script fixed (`node --test tests/` fails on
+   Node 24 — dirs are not descended; glob form runs the suite).
+5. **`NCTOOLS_MCP_IDLE_MS=0` killed the server.** A 0ms idle timer exited after
+   the first request (docs told users to set `"0"` to disable). Non-positive /
+   non-numeric values now disable the timer; docs corrected.
+6. **`search.semantic` path not jailed** (`join(root, path)` without
+   `inWorkspace`) — `path: ".."` would have indexed the whole drive; now
+   validated before the model loads.
+7. Misc: batch/call accept MCP-style underscored names (`fs_stat` → `fs.stat`);
+   `proc.spawn/start` enforce their configured time bounds in the handler
+   (schema caps are bypassable via `batch.execute`); `git.status` hides only
+   the `.nc-tools` directory; `ERR_NO_TESTS` added to the taxonomy.
+
 ## How to re-run
 
 ```bash
@@ -67,5 +99,5 @@ node tools/crossaudit.mjs            # audits the repo
 node tools/crossaudit.mjs F:/some/dir  # audits any workspace via its MCP server
 ```
 
-Status after fixes: **58/58 unit tests, 14/14 conformance, 20/20 cross-audit,
+Status after fixes: **67/67 unit tests, 14/14 conformance, 20/20 cross-audit,
 audit-suite clean.**

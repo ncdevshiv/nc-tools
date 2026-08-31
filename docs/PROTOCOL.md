@@ -110,6 +110,7 @@ On error, `ok` is `false`, `error` is `{code, message, hint?}` and
 | `ERR_SPAWN` / `ERR_CMD_NOT_FOUND` | process spawn issues |
 | `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
 | `ERR_TEST_PARSE` | runner produced no structured report |
+| `ERR_NO_TESTS` | runner discovered zero tests (hint: check the path/patterns) |
 | `ERR_NET` / `ERR_TIMEOUT` | network request failures |
 | `ERR_UNKNOWN_SNAPSHOT` | snapshot id unknown (hint: available) |
 | `ERR_BAD_REGEX` | invalid search pattern |

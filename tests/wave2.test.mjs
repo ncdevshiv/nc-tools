@@ -107,7 +107,8 @@ test('test.run rejects unknown frameworks and empty suites', async () => {
   assert.equal(bad.error.code, 'ERR_BAD_INPUT');
   const empty = await k.call('test.run', { framework: 'node', path: 'nowhere/' });
   assert.equal(empty.ok, false);
-  assert.equal(empty.error.code, 'ERR_TEST_PARSE');
+  // a missing path is rejected before the runner is even spawned
+  assert.equal(empty.error.code, 'ERR_NOT_FOUND');
 });
 
 test('pkg.scripts reads real package.json; pkg.runScript runs a script', async () => {

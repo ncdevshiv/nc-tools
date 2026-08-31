@@ -1,21 +1,25 @@
 // search.* tools — line-based regex grep and glob-ish file search, both jailed.
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, lstatSync, statSync, existsSync, realpathSync } from 'node:fs';
 import { join, relative, extname, dirname, basename } from 'node:path';
 import { ToolError } from './errors.mjs';
-import { inWorkspace } from './paths.mjs';
+import { inWorkspace, isInsidePath } from './paths.mjs';
 import { nearestSiblings } from './fs.mjs';
 
 const TEXT_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.txt', '.css', '.html', '.py', '.rs', '.go', '.java', '.yml', '.yaml', '.toml', '.sh', '.c', '.h', '.cpp', '.hpp', '.sql', '.env', '.gitignore', '.log', '']);
 
-function* walkFiles(dir, depth = 0) {
+function* walkFiles(root, dir, depth = 0) {
   if (depth > 12) return;
   for (const name of readdirSync(dir).sort()) {
     if (name === '.git' || name === 'node_modules' || name === '.nc-tools') continue;
     const full = join(dir, name);
     let st;
-    try { st = statSync(full); } catch { continue; }
-    if (st.isDirectory()) yield* walkFiles(full, depth + 1);
-    else yield full;
+    try { st = lstatSync(full); } catch { continue; }
+    if (st.isSymbolicLink()) continue; // never follow links (they may leave the workspace)
+    if (st.isDirectory()) {
+      // a junction may point outside the workspace; skip it
+      try { if (!isInsidePath(root, realpathSync(full))) continue; } catch { continue; }
+      yield* walkFiles(root, full, depth + 1);
+    } else yield full;
   }
 }
 
@@ -29,7 +33,7 @@ export function makeSearchTools(root) {
     if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { nearestExisting: nearestSiblings(root, base) });
     // path may name a single file (e.g. docs/PROTOCOL.md); only walk if a dir
     const files = [];
-    if (statSync(base).isDirectory()) files.push(...walkFiles(base));
+    if (statSync(base).isDirectory()) files.push(...walkFiles(root, base));
     else files.push(base);
     const matches = [];
     let total = 0;
@@ -63,9 +67,13 @@ export function makeSearchTools(root) {
     const base = inWorkspace(root, path);
     if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
     const out = [];
-    for (const file of walkFiles(base)) {
-      const rel = relative(base, file).replaceAll('\\', '/');
-      if (globMatch(pattern, rel)) out.push(relative(root, file).replaceAll('\\', '/'));
+    if (statSync(base).isDirectory()) {
+      for (const file of walkFiles(root, base)) {
+        const rel = relative(base, file).replaceAll('\\', '/');
+        if (globMatch(pattern, rel)) out.push(relative(root, file).replaceAll('\\', '/'));
+      }
+    } else if (globMatch(pattern, basename(base)) || globMatch(pattern, relative(root, base).replaceAll('\\', '/'))) {
+      out.push(relative(root, base).replaceAll('\\', '/'));
     }
     return { files: out, total: out.length };
   };

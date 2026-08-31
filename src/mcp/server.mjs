@@ -3,8 +3,9 @@
 // Usage: node src/mcp/server.mjs [workspaceRoot]
 //   Falls back to NCTOOLS_WORKSPACE, then cwd.
 // Idle auto-sleep: if no request arrives for NCTOOLS_MCP_IDLE_MS ms (default
-// 30 min), the server exits(0). MCP clients restart a stdio server on demand,
-// so this makes dormant agents free the process until the next call.
+// 30 min), the server exits(0). Set "0" or leave empty to disable the idle
+// timer. MCP clients restart a stdio server on demand, so this makes dormant
+// agents free the process until the next call.
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Kernel } from '../kernel/kernel.mjs';
@@ -14,10 +15,19 @@ const workspace = resolve(process.argv[2] || process.env.NCTOOLS_WORKSPACE || pr
 const kernel = new Kernel(workspace);
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'nc-tools', version: '0.1.0' };
-const IDLE_MS = Number(process.env.NCTOOLS_MCP_IDLE_MS || 30 * 60 * 1000);
+// "0" (or garbage) disables the idle timer: a 0ms timer would exit the server
+// between requests, and a misconfigured env must never kill the process.
+function idleMsFromEnv() {
+  const raw = process.env.NCTOOLS_MCP_IDLE_MS;
+  if (raw === undefined || raw === '') return 30 * 60 * 1000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+const IDLE_MS = idleMsFromEnv();
 
 let idleTimer = null;
 function touch() {
+  if (IDLE_MS === null) return;
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
     process.stderr.write(`[nc-tools-mcp] idle ${IDLE_MS}ms — exiting; clients restart on demand\n`);

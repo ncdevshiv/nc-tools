@@ -65,11 +65,12 @@ export class Kernel {
             results.push({ ok: false, error: { code: 'ERR_BAD_INPUT', message: 'each call needs a string tool' } });
             continue;
           }
-          if (c.tool === 'batch.execute') {
+          const subTool = this.#resolveTool(c.tool);
+          if (subTool === 'batch.execute') {
             results.push({ ok: false, error: { code: 'ERR_REFUSED', message: 'batch.execute cannot nest itself' } });
             continue;
           }
-          results.push(await this.call(c.tool, c.args ?? {}));
+          results.push(await this.call(subTool, c.args ?? {}));
         }
         const okCount = results.filter((r) => r.ok).length;
         return { results, ok: okCount, failed: results.length - okCount };
@@ -82,32 +83,43 @@ export class Kernel {
   }
 
   /**
+   * MCP clients expose kernel names with underscores (fs_stat); kernel names
+   * are dotted (fs.stat). Accept both: try exact, then translate _ -> .
+   */
+  #resolveTool(name) {
+    if (this.tools.has(name)) return name;
+    const dotted = name.replaceAll('_', '.');
+    return this.tools.has(dotted) ? dotted : name;
+  }
+
+  /**
    * Execute a tool call with journaling.
    * @returns {Promise<{ok: boolean, result?: object, error?: {code, message, hint?}, durationMs: number, seq: number}>}
    */
   async call(tool, args = {}) {
     const started = Date.now();
-    const def = this.tools.get(tool);
-    const callEvent = this.journal.append('tool.call', { tool, args });
+    const toolName = this.#resolveTool(tool);
+    const def = this.tools.get(toolName);
+    const callEvent = this.journal.append('tool.call', { tool: toolName, args });
     if (!def) {
-      const err = new ToolError('ERR_UNKNOWN_TOOL', `Unknown tool: ${tool}`, { available: this.listTools() });
-      return this.#finish(callEvent, tool, false, null, err, started);
+      const err = new ToolError('ERR_UNKNOWN_TOOL', `Unknown tool: ${toolName}`, { available: this.listTools() });
+      return this.#finish(callEvent, toolName, false, null, err, started);
     }
     // Fault-injection hooks (chaos harness). An injected failure is journaled
     // like any real one, so recovery from it is measurable.
     for (const hook of this.hooks) {
-      const injected = hook(tool, args);
+      const injected = hook(toolName, args);
       if (injected) {
         const err = new ToolError(injected.code, injected.message, injected.hint);
-        return this.#finish(callEvent, tool, false, null, err, started);
+        return this.#finish(callEvent, toolName, false, null, err, started);
       }
     }
     try {
       const result = await def.handler(args);
-      return this.#finish(callEvent, tool, true, result, null, started);
+      return this.#finish(callEvent, toolName, true, result, null, started);
     } catch (e) {
       const err = e instanceof ToolError ? e : new ToolError('ERR_INTERNAL', e.message);
-      return this.#finish(callEvent, tool, false, null, err, started);
+      return this.#finish(callEvent, toolName, false, null, err, started);
     }
   }
 

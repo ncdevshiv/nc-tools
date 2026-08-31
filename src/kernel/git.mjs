@@ -31,7 +31,7 @@ export function makeGitTools(root) {
     const files = lines.slice(1).map((l) => ({
       status: l.slice(0, 2).trim() || '?',
       path: l.slice(3).trim(),
-    })).filter((f) => !f.path.startsWith('.nc-tools'));
+    })).filter((f) => f.path !== '.nc-tools' && !f.path.startsWith('.nc-tools/'));
     let head = null;
     try { head = git(root, ['rev-parse', '--short', 'HEAD']).trim(); } catch { /* empty repo */ }
     return { branch, head, files };

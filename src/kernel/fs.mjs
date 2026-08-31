@@ -1,9 +1,9 @@
 // fs.* tools — typed file operations, jailed to the workspace.
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, rmSync, renameSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, rmSync, renameSync, existsSync, realpathSync } from 'node:fs';
 import { join, relative, dirname, basename, resolve, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ToolError } from './errors.mjs';
-import { inWorkspace } from './paths.mjs';
+import { inWorkspace, isInsidePath } from './paths.mjs';
 
 function digestOf(abs) {
   const st = statSync(abs);
@@ -118,7 +118,11 @@ export function makeFsTools(root) {
         const rel = relative(root, full).replaceAll('\\', '/');
         const isDir = st.isDirectory();
         entries.push({ name, path: rel, type: isDir ? 'dir' : 'file', size: isDir ? null : st.size });
-        if (isDir && recursive && depth < 8) walk(full, depth + 1);
+        if (isDir && recursive && depth < 8) {
+          // a junction may point outside the workspace; list it but never recurse into it
+          try { if (!isInsidePath(root, realpathSync(full))) continue; } catch { continue; }
+          walk(full, depth + 1);
+        }
       }
     };
     walk(abs, 0);

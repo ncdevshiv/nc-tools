@@ -3,9 +3,10 @@
 // @xenova/transformers) embeds files; queries are ranked by cosine
 // similarity. No API dependency, no remote calls. This is the capability
 // grep provably lacks: it finds "where is auth handled?" by meaning.
-import { readFileSync, existsSync, statSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, mkdirSync, readdirSync, writeFileSync, lstatSync, realpathSync } from 'node:fs';
 import { join, relative, extname } from 'node:path';
 import { ToolError } from './errors.mjs';
+import { inWorkspace, isInsidePath } from './paths.mjs';
 
 const TEXT_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.txt', '.css', '.html', '.py', '.rs', '.go', '.java', '.yml', '.yaml', '.toml', '.sh', '.c', '.h', '.cpp', '.hpp', '.sql', '']);
 const EMBED_EXT = new Set([...TEXT_EXT]);
@@ -22,15 +23,19 @@ async function getEmbedder(cacheDir) {
   return pipelinePromise;
 }
 
-function* walkTextFiles(dir, depth = 0) {
+function* walkTextFiles(root, dir, depth = 0) {
   if (depth > 12) return;
   for (const name of readdirSync(dir).sort()) {
     if (name === '.git' || name === 'node_modules' || name === '.nc-tools') continue;
     const full = join(dir, name);
     let st;
-    try { st = statSync(full); } catch { continue; }
-    if (st.isDirectory()) yield* walkTextFiles(full, depth + 1);
-    else if (EMBED_EXT.has(extname(full).toLowerCase())) yield full;
+    try { st = lstatSync(full); } catch { continue; }
+    if (st.isSymbolicLink()) continue; // never follow links (they may leave the workspace)
+    if (st.isDirectory()) {
+      // a junction may point outside the workspace; skip it
+      try { if (!isInsidePath(root, realpathSync(full))) continue; } catch { continue; }
+      yield* walkTextFiles(root, full, depth + 1);
+    } else if (EMBED_EXT.has(extname(full).toLowerCase())) yield full;
   }
 }
 
@@ -63,6 +68,9 @@ export function makeSemanticTools(root) {
     if (typeof query !== 'string' || !query.trim()) {
       throw new ToolError('ERR_BAD_INPUT', 'query must be a non-empty string');
     }
+    // Validate the path BEFORE touching the model: refusing an escape must not
+    // require a local embedding pipeline to be up (and must not read outside).
+    const base = inWorkspace(root, path);
     let embedder;
     try {
       embedder = await getEmbedder(process.env.NCTOOLS_MODEL_CACHE || cacheDir || join(root, '.nc-tools', 'model-cache'));
@@ -73,8 +81,7 @@ export function makeSemanticTools(root) {
     }
     const { createHash } = await import('node:crypto');
     const files = [];
-    const base = join(root, path);
-    for (const f of walkTextFiles(base)) files.push(f);
+    for (const f of walkTextFiles(root, base)) files.push(f);
 
     // encode query
     const qOut = await embedder(query, { pooling: 'mean', normalize: true });

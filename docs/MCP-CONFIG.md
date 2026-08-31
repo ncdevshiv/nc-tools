@@ -32,7 +32,8 @@ needed on the agent side; the protocol is MCP `2024-11-05`.
 - `NCTOOLS_MCP_IDLE_MS` = idle auto-sleep (default 30 min): after that long
   with no requests, the server exits. Standard MCP clients restart a stdio
   server when the next call arrives, so the agent effectively "sleeps"
-  between uses and wakes on demand. Set `"0"` to disable.
+  between uses and wakes on demand. Set `"0"` to disable the idle timer
+  entirely (the server then stays up until the client disconnects).
 
 ### Claude Desktop (`claude_desktop_config.json`)
 
