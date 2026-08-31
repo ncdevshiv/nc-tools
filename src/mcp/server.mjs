@@ -2,6 +2,9 @@
 // Protocol: MCP 2024-11-05 (initialize, tools/list, tools/call).
 // Usage: node src/mcp/server.mjs [workspaceRoot]
 //   Falls back to NCTOOLS_WORKSPACE, then cwd.
+// Idle auto-sleep: if no request arrives for NCTOOLS_MCP_IDLE_MS ms (default
+// 30 min), the server exits(0). MCP clients restart a stdio server on demand,
+// so this makes dormant agents free the process until the next call.
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { Kernel } from '../kernel/kernel.mjs';
@@ -11,6 +14,17 @@ const workspace = resolve(process.argv[2] || process.env.NCTOOLS_WORKSPACE || pr
 const kernel = new Kernel(workspace);
 const PROTOCOL_VERSION = '2024-11-05';
 const SERVER_INFO = { name: 'nc-tools', version: '0.1.0' };
+const IDLE_MS = Number(process.env.NCTOOLS_MCP_IDLE_MS || 30 * 60 * 1000);
+
+let idleTimer = null;
+function touch() {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    process.stderr.write(`[nc-tools-mcp] idle ${IDLE_MS}ms — exiting; clients restart on demand\n`);
+    process.exit(0);
+  }, IDLE_MS);
+  idleTimer.unref?.(); // don't hold the event loop open on its own
+}
 
 function rpcResult(id, result) {
   return JSON.stringify({ jsonrpc: '2.0', id, result });
@@ -52,6 +66,7 @@ async function handle(msg) {
 
 const rl = createInterface({ input: process.stdin });
 rl.on('line', async (line) => {
+  touch();
   const trimmed = line.trim();
   if (!trimmed) return;
   let msg;
@@ -67,5 +82,6 @@ rl.on('line', async (line) => {
   }
 });
 rl.on('close', () => process.exit(0));
+touch();
 
 process.stderr.write(`[nc-tools-mcp] serving workspace: ${workspace}\n`);
