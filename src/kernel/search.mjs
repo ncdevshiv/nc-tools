@@ -1,8 +1,9 @@
 // search.* tools — line-based regex grep and glob-ish file search, both jailed.
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
-import { join, relative, extname } from 'node:path';
+import { join, relative, extname, dirname, basename } from 'node:path';
 import { ToolError } from './errors.mjs';
 import { inWorkspace } from './paths.mjs';
+import { nearestSiblings } from './fs.mjs';
 
 const TEXT_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.txt', '.css', '.html', '.py', '.rs', '.go', '.java', '.yml', '.yaml', '.toml', '.sh', '.c', '.h', '.cpp', '.hpp', '.sql', '.env', '.gitignore', '.log', '']);
 
@@ -25,11 +26,15 @@ export function makeSearchTools(root) {
       throw new ToolError('ERR_BAD_REGEX', `Invalid regex: ${e.message}`, { pattern });
     }
     const base = inWorkspace(root, path);
-    if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
+    if (!existsSync(base)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { nearestExisting: nearestSiblings(root, base) });
+    // path may name a single file (e.g. docs/PROTOCOL.md); only walk if a dir
+    const files = [];
+    if (statSync(base).isDirectory()) files.push(...walkFiles(base));
+    else files.push(base);
     const matches = [];
     let total = 0;
     let truncated = false;
-    for (const file of walkFiles(base)) {
+    for (const file of files) {
       if (glob && !globMatch(glob, relative(base, file).replaceAll('\\', '/'))) continue;
       if (!TEXT_EXT.has(extname(file).toLowerCase()) && extname(file) !== '') continue;
       let content;

@@ -25,7 +25,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 39 tools; schema in `src/kernel/descriptors.mjs`)
+## 3. Tool surface (must be 40 tools; schema in `src/kernel/descriptors.mjs`)
 
 - `fs.read`, `fs.readMany`, `fs.write`, `fs.writeMany`, `fs.list`, `fs.stat`,
   `fs.mkdir`, `fs.delete`, `fs.move`
@@ -140,7 +140,7 @@ A direct binding calls `kernel.call(tool, args)` and receives
 args from env `NCTOOLS_CONFORMANCE_CMD`, cwd = a fresh temp workspace),
 drives it over MCP stdio, and checks:
 
-1. exact tool count (39) and all tool names present;
+1. exact tool count (40) and all tool names present;
 2. every tool has a JSON-Schema `inputSchema` and non-empty `description`;
 3. initialization handshake shape;
 4. required error codes, byte-exact, on the failure cases listed in

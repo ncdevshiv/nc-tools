@@ -32,6 +32,8 @@ const PATTERNS = [
 // (e.g. the audit tool's own pattern table, or prose *describing* the policy)
 const ALLOW = [
   /tools[\\/]audit\.mjs$/,          // the auditor itself
+  /tools[\\/]crossaudit\.mjs$/,     // auditor #2 — it searches FOR these markers
+  /AUDIT\.md$/,                     // audit report — lists what was searched for
   /SPEC\.md$/,                      // spec deliberately documents exclusions
   /README\.md$/,                    // policy statement section
 ];

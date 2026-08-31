@@ -125,3 +125,22 @@ test('ERR_PATH_ESCAPE hint includes suggestion and workspace root', async () => 
   assert.equal(out.error.hint.workspaceRoot, root);
   assert.match(out.error.hint.suggestion, /fs\.list/);
 });
+
+test('search.grep accepts a FILE path (regression: ENOTDIR bug)', async () => {
+  const k = new Kernel(root);
+  await k.call('fs.write', { path: 'docs/spec.md', content: 'the magic token appears here\n' });
+  const out = await k.call('search.grep', { pattern: 'magic token', path: 'docs/spec.md' });
+  assert.equal(out.ok, true, JSON.stringify(out.error || ''));
+  assert.equal(out.result.total, 1);
+  assert.equal(out.result.matches[0].file, 'docs/spec.md');
+  assert.equal(out.result.matches[0].line, 1);
+});
+
+test('search.grep missing file path returns ERR_NOT_FOUND with sibling hints', async () => {
+  const k = new Kernel(root);
+  await k.call('fs.write', { path: 'docs/a.md', content: 'x' });
+  const out = await k.call('search.grep', { pattern: 'x', path: 'docs/zzz.md' });
+  assert.equal(out.ok, false);
+  assert.equal(out.error.code, 'ERR_NOT_FOUND');
+  assert.ok(out.error.hint.nearestExisting.includes('docs/a.md'));
+});
