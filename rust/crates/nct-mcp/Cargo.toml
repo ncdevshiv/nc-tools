@@ -1,0 +1,36 @@
+[package]
+name = "nct-mcp"
+version.workspace = true
+edition.workspace = true
+description = "nc-tools MCP stdio server binary (nc-tools-mcp)"
+
+[lib]
+name = "nct_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nc-tools-mcp"
+path = "src/main.rs"
+
+[features]
+default = ["fs", "git", "proc", "net", "semantic"]
+fs = []
+git = []
+proc = []
+net = []
+semantic = []
+
+[dependencies]
+nct-core = { path = "../nct-core" }
+nct-fs = { path = "../nct-fs" }
+nct-git = { path = "../nct-git" }
+nct-proc = { path = "../nct-proc" }
+nct-net = { path = "../nct-net" }
+nct-semantic = { path = "../nct-semantic" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+dunce = { workspace = true }
+
+[lints]
+workspace = true

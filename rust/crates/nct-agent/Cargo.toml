@@ -1,0 +1,24 @@
+[package]
+name = "nct-agent"
+version.workspace = true
+edition.workspace = true
+description = "nc-tools reference terminal-free agent loop (OpenAI-compatible chat endpoint)"
+
+[[bin]]
+name = "nct-agent"
+path = "src/main.rs"
+
+[dependencies]
+nct-core = { path = "../nct-core" }
+nct-fs = { path = "../nct-fs" }
+nct-git = { path = "../nct-git" }
+nct-proc = { path = "../nct-proc" }
+nct-net = { path = "../nct-net" }
+nct-semantic = { path = "../nct-semantic" }
+nct-mcp = { path = "../nct-mcp" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+
+[lints]
+workspace = true

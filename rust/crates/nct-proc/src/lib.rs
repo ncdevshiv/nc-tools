@@ -1,0 +1,776 @@
+// proc.* — execution tools, behavior-parity port of src/kernel/proc.mjs.
+// proc.spawn for bounded runs; proc.start creates a MANAGED background
+// process (handle, streamed output, status, stop) — the typed replacement
+// for "run a server / watcher in a terminal tab". proc.list and proc.kill
+// cover the OS process table (tasklist/ps + pid kill). env.* manages the
+// session environment that every spawned child inherits.
+use std::collections::HashMap;
+use std::io::Read;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use nct_core::childenv::child_env;
+use nct_core::errors::ToolError;
+use nct_core::kernel::{parse_args, Handler, Kernel};
+use nct_core::paths::resolve_checked;
+use nct_core::{now_iso, CREATE_NO_WINDOW};
+
+pub const SPAWN_DESC: &str = "Run a program with typed argv (no shell). Captures stdout/stderr, exit code, hard timeout.";
+pub const START_DESC: &str = "Start a LONG-RUNNING background process (server, watcher). Returns a handleId. NOT for one-shot commands — use proc.spawn for those.";
+pub const STATUS_DESC: &str = "Status of a background process handle: running, exitCode, outputBytes, uptime.";
+pub const READ_OUTPUT_DESC: &str = "Read recent output (stdout+stderr merged) of a background process.";
+pub const STOP_DESC: &str = "Stop a background process by handle.";
+pub const LIST_DESC: &str = "List the OS process table (tasklist/ps). Optional substring filter by process name.";
+pub const KILL_DESC: &str = "Kill a process by PID (system process, not just managed handles).";
+pub const ENV_GET_DESC: &str = "Read an environment variable (session override wins over host).";
+pub const ENV_SET_DESC: &str = "Set a session environment variable; all subsequent proc.* calls inherit it.";
+pub const ENV_LIST_DESC: &str = "List session environment overrides.";
+
+
+pub fn register(k: &mut Kernel) {
+    let handles = HandleTable::default();
+    k.register("proc.spawn", SPAWN_DESC, nct_core::schema::schema_for::<SpawnArgs>(), Arc::new(SpawnHandler));
+    k.register("proc.start", START_DESC, nct_core::schema::schema_for::<StartArgs>(), Arc::new(StartHandler { handles: handles.clone() }));
+    k.register("proc.status", STATUS_DESC, nct_core::schema::schema_for::<HandleArgs>(), Arc::new(StatusHandler { handles: handles.clone() }));
+    k.register("proc.readOutput", READ_OUTPUT_DESC, nct_core::schema::schema_for::<ReadOutputArgs>(), Arc::new(ReadOutputHandler { handles: handles.clone() }));
+    k.register("proc.stop", STOP_DESC, nct_core::schema::schema_for::<StopArgs>(), Arc::new(StopHandler { handles: handles.clone() }));
+    k.register("proc.list", LIST_DESC, nct_core::schema::schema_for::<ListArgs>(), Arc::new(ListHandler));
+    k.register("proc.kill", KILL_DESC, nct_core::schema::schema_for::<KillArgs>(), Arc::new(KillHandler));
+    k.register("env.get", ENV_GET_DESC, nct_core::schema::schema_for::<EnvNameArgs>(), Arc::new(EnvGetHandler));
+    k.register("env.set", ENV_SET_DESC, nct_core::schema::schema_for::<EnvSetArgs>(), Arc::new(EnvSetHandler));
+    k.register("env.list", ENV_LIST_DESC, nct_core::schema::schema_for::<EmptyPArgs>(), Arc::new(EnvListHandler));
+}
+
+pub(crate) fn schema<T: schemars::JsonSchema>() -> Value {
+    nct_core::schema::schema_for::<T>()
+}
+
+mod pkg;
+mod test;
+pub use pkg::register_pkg;
+pub use test::register_test;
+
+// ---- typed args -------------------------------------------------------------
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnArgs {
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[doc = "Working dir (absolute allowed; default base dir)"]
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 100, max = 600000))]
+    pub timeoutMs: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StartArgs {
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[doc = "Working dir (absolute allowed; default base dir)"]
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 1000, max = 3600000))]
+    pub maxDurationMs: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HandleArgs {
+    pub handleId: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOutputArgs {
+    pub handleId: String,
+    #[serde(default)]
+    #[schemars(range(min = 100, max = 100000))]
+    pub fromEnd: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopArgs {
+    pub handleId: String,
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListArgs {
+    #[serde(default)]
+    pub filter: Option<String>,
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 2000))]
+    pub maxResults: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct KillArgs {
+    #[schemars(range(min = 1))]
+    pub pid: u64,
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvNameArgs {
+    pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EnvSetArgs {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyPArgs {}
+
+// ---- managed background handles ----------------------------------------------
+
+/// Shared registry of managed background handles — the closure state of the
+/// JS makeProcTools (handles Map + handleSeq counter).
+#[derive(Default, Clone)]
+pub struct HandleTable {
+    map: Arc<Mutex<HashMap<String, Arc<HandleRec>>>>,
+    seq: Arc<AtomicU64>,
+}
+
+impl HandleTable {
+    fn next_id(&self) -> String {
+        let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        format!("h{n}")
+    }
+    fn insert(&self, id: String, rec: Arc<HandleRec>) {
+        self.map.lock().unwrap().insert(id, rec);
+    }
+    fn get(&self, id: &str) -> Option<Arc<HandleRec>> {
+        self.map.lock().unwrap().get(id).cloned()
+    }
+    fn known(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.map.lock().unwrap().keys().cloned().collect();
+        v.sort();
+        v
+    }
+}
+
+pub struct HandleRec {
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    pub pid: Option<u32>,
+    started_at: Instant,
+    started_at_iso: String,
+    pub running: Mutex<bool>,
+    pub exit_code: Mutex<Option<i32>>,
+    pub signal: Mutex<Option<String>>,
+    pub timed_out: Mutex<bool>,
+    pub spawn_error: Mutex<Option<String>>,
+    pub output: Arc<Mutex<String>>,
+    /// Owned child; polled + reaped by the watcher thread, or taken by stop().
+    child: Mutex<Option<Child>>,
+}
+
+impl HandleRec {
+    fn record_exit(&self, status: &ExitStatus) {
+        let (code, sig) = exit_and_signal(status);
+        *self.exit_code.lock().unwrap() = code.as_i64().map(|v| v as i32);
+        *self.signal.lock().unwrap() = sig.as_str().map(String::from);
+        *self.running.lock().unwrap() = false;
+    }
+    /// Lock-free poll window: lock, try_wait, act, unlock.
+    /// None = child taken (stop() owns reaping); Some(Ok(None)) = still running.
+    fn poll_once(&self) -> Option<Result<Option<ExitStatus>, String>> {
+        let mut cell = self.child.lock().unwrap();
+        cell.as_mut().map(|c| c.try_wait().map_err(|e| e.to_string()))
+    }
+    fn take_child(&self) -> Option<Child> {
+        self.child.lock().unwrap().take()
+    }
+}
+
+// ---- spawn machinery -----------------------------------------------------------
+
+fn validate_cmd(cmd: &str) -> Result<(), ToolError> {
+    if cmd.is_empty() {
+        return Err(ToolError::new("ERR_BAD_INPUT", "cmd must be a non-empty string"));
+    }
+    Ok(())
+}
+
+fn build_command(k: &Kernel, cmd: &str, args: &[String], cwd_abs: &std::path::Path) -> Command {
+    let mut c = Command::new(cmd);
+    c.args(args)
+        .current_dir(cwd_abs)
+        .stdin(Stdio::null())
+        .env_clear()
+        .envs(child_env(&k.session_env.snapshot()));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
+fn spawn_failure(cmd: &str, err: &std::io::Error) -> Value {
+    // proc.mjs close/error semantics: ENOENT is a structured "not found"
+    // inside a SUCCESSFUL tool result; other spawn failures are ERR_SPAWN.
+    if err.kind() == std::io::ErrorKind::NotFound {
+        json!({
+            "pid": Value::Null,
+            "exitCode": Value::Null,
+            "signal": Value::Null,
+            "timedOut": false,
+            "stdout": "",
+            "stderr": "",
+            "error": { "code": "ERR_CMD_NOT_FOUND", "message": format!("command not found: {cmd}") },
+        })
+    } else {
+        json!({
+            "pid": Value::Null,
+            "exitCode": Value::Null,
+            "signal": Value::Null,
+            "timedOut": false,
+            "stdout": "",
+            "stderr": "",
+            "error": { "code": "ERR_SPAWN", "message": err.to_string() },
+        })
+    }
+}
+
+/// Map ExitStatus to (exitCode, signal) mirroring Node's close event:
+/// normal exit → (code, null); killed by signal → (null, "SIGKILL"-style).
+fn exit_and_signal(status: &ExitStatus) -> (Value, Value) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return (Value::Null, json!(unix_signal_name(sig)));
+        }
+    }
+    (json!(status.code()), Value::Null)
+}
+
+#[cfg(unix)]
+fn unix_signal_name(sig: i32) -> String {
+    match sig {
+        1 => "SIGHUP".into(),
+        2 => "SIGINT".into(),
+        9 => "SIGKILL".into(),
+        15 => "SIGTERM".into(),
+        other => format!("SIG{other}"),
+    }
+}
+
+/// Pump a child stream into a shared capped buffer until EOF.
+fn pump<R: Read + Send + 'static>(mut stream: R, buf: Arc<Mutex<String>>, cap: usize) {
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut g = buf.lock().unwrap();
+                    if g.len() < cap {
+                        g.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+    s.chars().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+}
+
+// ---- proc.spawn ----------------------------------------------------------------
+
+pub struct SpawnHandler;
+impl Handler for SpawnHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: SpawnArgs = parse_args(args)?;
+        let args_v = a.args.clone().unwrap_or_default();
+        validate_cmd(&a.cmd)?;
+        let timeout_ms = a.timeoutMs.unwrap_or(k.cfg.limits.spawn_timeout_ms);
+        if !(100..=k.cfg.limits.spawn_timeout_max_ms).contains(&timeout_ms) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!("timeoutMs must be an integer between 100 and {}", k.cfg.limits.spawn_timeout_max_ms),
+                json!({ "got": a.timeoutMs }),
+            ));
+        }
+        let cwd_abs = resolve_checked(&k.root, a.cwd.as_deref().unwrap_or("."))?;
+        let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
+        let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+            Ok(c) => c,
+            Err(e) => return Ok(spawn_failure(&a.cmd, &e)),
+        };
+        let pid = child.id();
+        let out_buf = Arc::new(Mutex::new(String::new()));
+        let err_buf = Arc::new(Mutex::new(String::new()));
+        let max = k.cfg.limits.proc_output_bytes;
+        if let Some(s) = child.stdout.take() {
+            pump(s, out_buf.clone(), max);
+        }
+        if let Some(s) = child.stderr.take() {
+            pump(s, err_buf.clone(), max);
+        }
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break Some(s),
+                Ok(None) => {
+                    if Instant::now() > deadline {
+                        timed_out = true;
+                        let _ = child.kill();
+                        break child.wait().ok();
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break None,
+            }
+        };
+        let (exit_code, signal) = match &status {
+            Some(s) => exit_and_signal(s),
+            None => (Value::Null, Value::Null),
+        };
+        let out = out_buf.lock().unwrap().clone();
+        let err = err_buf.lock().unwrap().clone();
+        Ok(json!({
+            "pid": pid,
+            "exitCode": exit_code,
+            "signal": signal,
+            "timedOut": timed_out,
+            "stdout": tail_chars(&out, max),
+            "stderr": tail_chars(&err, max),
+        }))
+    }
+}
+
+// ---- proc.start / status / readOutput / stop ------------------------------------
+
+pub struct StartHandler {
+    handles: HandleTable,
+}
+impl Handler for StartHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: StartArgs = parse_args(args)?;
+        let args_v = a.args.clone().unwrap_or_default();
+        validate_cmd(&a.cmd)?;
+        let max_duration = a.maxDurationMs.unwrap_or(600_000);
+        if !(1000..=k.cfg.limits.proc_max_duration_ms).contains(&max_duration) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!("maxDurationMs must be an integer between 1000 and {}", k.cfg.limits.proc_max_duration_ms),
+                json!({ "got": a.maxDurationMs }),
+            ));
+        }
+        let cwd_abs = resolve_checked(&k.root, a.cwd.as_deref().unwrap_or("."))?;
+        let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
+        let spawn_result = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        let handle_id = self.handles.next_id();
+        let (child, spawn_error) = match spawn_result {
+            Ok(c) => (Some(c), None),
+            Err(e) => (
+                None,
+                Some(if e.kind() == std::io::ErrorKind::NotFound {
+                    format!("command not found: {}", a.cmd)
+                } else {
+                    e.to_string()
+                }),
+            ),
+        };
+        let rec = Arc::new(HandleRec {
+            cmd: a.cmd.clone(),
+            args: args_v.clone(),
+            cwd: cwd_abs.display().to_string(),
+            pid: child.as_ref().map(|c| c.id()),
+            started_at: Instant::now(),
+            started_at_iso: now_iso(),
+            running: Mutex::new(child.is_some()),
+            exit_code: Mutex::new(None),
+            signal: Mutex::new(None),
+            timed_out: Mutex::new(false),
+            spawn_error: Mutex::new(spawn_error),
+            output: Arc::new(Mutex::new(String::new())),
+            child: Mutex::new(child),
+        });
+        // output pumps: stdout+stderr merged into rec.output, capped (proc.mjs)
+        let max = k.cfg.limits.proc_handle_output_bytes;
+        if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stdout.take()) {
+            pump(s, rec.output.clone(), max);
+        }
+        if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stderr.take()) {
+            pump(s, rec.output.clone(), max);
+        }
+        // watcher thread: reaps exit, enforces maxDuration (proc.mjs timers)
+        // (a failed spawn has no child; the watcher exits immediately)
+        let rec_w = rec.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                match rec_w.poll_once() {
+                    None => return, // child taken by stop()
+                    Some(Ok(Some(status))) => {
+                        rec_w.record_exit(&status);
+                        rec_w.take_child();
+                        return;
+                    }
+                    Some(Ok(None)) => {}
+                    Some(Err(e)) => {
+                        *rec_w.spawn_error.lock().unwrap() = Some(e);
+                        *rec_w.running.lock().unwrap() = false;
+                        rec_w.take_child();
+                        return;
+                    }
+                }
+                if started.elapsed() > Duration::from_millis(max_duration) {
+                    if let Some(mut c) = rec_w.take_child() {
+                        *rec_w.timed_out.lock().unwrap() = true;
+                        let _ = c.kill();
+                        if let Ok(status) = c.wait() {
+                            rec_w.record_exit(&status);
+                        }
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        self.handles.insert(handle_id.clone(), rec.clone());
+        Ok(json!({
+            "handleId": handle_id,
+            "pid": rec.pid,
+            "startedAt": rec.started_at_iso,
+        }))
+    }
+}
+
+pub struct StatusHandler {
+    handles: HandleTable,
+}
+impl Handler for StatusHandler {
+    fn call(&self, _k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: HandleArgs = parse_args(args)?;
+        let rec = self.handles.get(&a.handleId).ok_or_else(|| {
+            ToolError::with_hint(
+                "ERR_UNKNOWN_HANDLE",
+                format!("no such process handle: {}", a.handleId),
+                json!({ "known": self.handles.known() }),
+            )
+        })?;
+        let running = *rec.running.lock().unwrap();
+        let uptime_ms = if running { Some(rec.started_at.elapsed().as_millis() as u64) } else { None };
+        Ok(json!({
+            "handleId": a.handleId,
+            "pid": rec.pid,
+            "cmd": rec.cmd,
+            "args": rec.args,
+            "running": running,
+            "exitCode": *rec.exit_code.lock().unwrap(),
+            "signal": *rec.signal.lock().unwrap(),
+            "timedOut": *rec.timed_out.lock().unwrap(),
+            "spawnError": *rec.spawn_error.lock().unwrap(),
+            "outputBytes": rec.output.lock().unwrap().len(),
+            "uptimeMs": uptime_ms,
+        }))
+    }
+}
+
+pub struct ReadOutputHandler {
+    handles: HandleTable,
+}
+impl Handler for ReadOutputHandler {
+    fn call(&self, _k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: ReadOutputArgs = parse_args(args)?;
+        let rec = self.handles.get(&a.handleId).ok_or_else(|| {
+            ToolError::with_hint(
+                "ERR_UNKNOWN_HANDLE",
+                format!("no such process handle: {}", a.handleId),
+                json!({ "known": self.handles.known() }),
+            )
+        })?;
+        let from_end = a.fromEnd.unwrap_or(4000) as usize;
+        let total = rec.output.lock().unwrap().chars().count();
+        let output = if total <= from_end {
+            rec.output.lock().unwrap().clone()
+        } else {
+            tail_chars(&rec.output.lock().unwrap(), from_end)
+        };
+        Ok(json!({
+            "handleId": a.handleId,
+            "output": output,
+            "totalBytes": total,
+            "truncated": total > from_end,
+            "running": *rec.running.lock().unwrap(),
+        }))
+    }
+}
+
+pub struct StopHandler {
+    handles: HandleTable,
+}
+impl Handler for StopHandler {
+    fn call(&self, _k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: StopArgs = parse_args(args)?;
+        let rec = self.handles.get(&a.handleId).ok_or_else(|| {
+            ToolError::with_hint(
+                "ERR_UNKNOWN_HANDLE",
+                format!("no such process handle: {}", a.handleId),
+                json!({ "known": self.handles.known() }),
+            )
+        })?;
+        let was_running = *rec.running.lock().unwrap();
+        // On Windows kill() is async-ish; report current knowledge, caller
+        // re-statuses (same contract as proc.mjs stop).
+        if let Some(mut child) = rec.take_child() {
+            let _ = child.kill(); // std has no graceful signal; force = the stop
+            if let Ok(status) = child.wait() {
+                rec.record_exit(&status);
+            }
+        }
+        Ok(json!({ "handleId": a.handleId, "requested": true, "wasRunning": was_running }))
+    }
+}
+
+// ---- proc.list / proc.kill --------------------------------------------------------
+
+pub struct ListHandler;
+impl Handler for ListHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: ListArgs = parse_args(args)?;
+        let max_results = a.maxResults.unwrap_or(500) as usize;
+        if !(1..=k.cfg.limits.proc_list_max).contains(&max_results) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!("maxResults must be an integer between 1 and {}", k.cfg.limits.proc_list_max),
+                json!({ "got": a.maxResults }),
+            ));
+        }
+        let mut procs = system_processes(&k.session_env.snapshot(), &k.root)?;
+        if let Some(f) = &a.filter {
+            let needle = f.to_lowercase();
+            procs.retain(|p: &Value| p["name"].as_str().unwrap_or("").to_lowercase().contains(&needle));
+        }
+        let total = procs.len();
+        procs.truncate(max_results);
+        Ok(json!({ "processes": procs, "total": total, "truncated": total > max_results }))
+    }
+}
+
+/// Parse the OS process table into [{pid, name, memKb?}] (proc.mjs
+/// systemProcesses: tasklist CSV on Windows, ps on Unix).
+fn system_processes(env: &std::collections::BTreeMap<String, String>, root: &std::path::Path) -> Result<Vec<Value>, ToolError> {
+    #[cfg(windows)]
+    {
+        let out = run_sync("tasklist", &["/FO", "CSV", "/NH"], Duration::from_secs(20), env, root)?;
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut procs = Vec::new();
+        for line in stdout.lines().filter(|l| l.contains("\",\"")) {
+            let trimmed = line.trim().trim_matches('"');
+            let cols: Vec<&str> = trimmed.split("\",\"").collect();
+            if cols.len() >= 2 {
+                let pid: Option<u64> = cols[1].parse().ok();
+                if let Some(pid) = pid.filter(|p| *p > 0) {
+                    let mem: Option<u64> = cols
+                        .get(4)
+                        .and_then(|m| {
+                            let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
+                            digits.parse().ok()
+                        });
+                    procs.push(json!({ "pid": pid, "name": cols[0], "memKb": mem }));
+                }
+            }
+        }
+        Ok(procs)
+    }
+    #[cfg(unix)]
+    {
+        let out = run_sync("ps", &["-A", "-o", "pid=,comm="], Duration::from_secs(20), env, root)?;
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut procs = Vec::new();
+        for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+            let l = line.trim();
+            if let Some((pid_s, name)) = l.split_once(char::is_whitespace) {
+                if let Ok(pid) = pid_s.parse::<u64>().filter(|p| *p > 0) {
+                    procs.push(json!({ "pid": pid, "name": name.trim() }));
+                }
+            }
+        }
+        return Ok(procs);
+    }
+}
+
+/// Bounded sync child run used for tasklist/ps — the same windowsHide +
+/// timeout contract as proc.mjs spawnSync.
+pub(crate) fn run_sync(program: &str, args: &[&str], timeout: Duration, env_session: &std::collections::BTreeMap<String, String>, cwd: &std::path::Path) -> Result<std::process::Output, ToolError> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .env_clear()
+        .envs(child_env(env_session));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ToolError::new("ERR_CMD_NOT_FOUND", format!("{program} is not available"))
+        } else {
+            ToolError::new("ERR_SPAWN", format!("{program} failed: {e}"))
+        }
+    })?;
+    let mut out = String::new();
+    let mut err = String::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_string(&mut err);
+    }
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(ToolError::new("ERR_SPAWN", format!("{program} timed out")));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(ToolError::new("ERR_SPAWN", format!("{program} failed: {e}"))),
+        }
+    };
+    Ok(std::process::Output { status, stdout: out.into_bytes(), stderr: err.into_bytes() })
+}
+
+pub struct KillHandler;
+impl Handler for KillHandler {
+    fn call(&self, _k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: KillArgs = parse_args(args)?;
+        if a.pid == 0 {
+            return Err(ToolError::with_hint("ERR_BAD_INPUT", "pid must be a positive integer", json!({ "got": a.pid })));
+        }
+        kill_pid(a.pid as i32)
+    }
+}
+
+fn kill_pid(pid: i32) -> Result<Value, ToolError> {
+    #[cfg(unix)]
+    {
+        // process.kill semantics: ESRCH → not found, EPERM → refused
+        let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(match err.raw_os_error() {
+                Some(libc::ESRCH) => ToolError::with_hint("ERR_PROC_NOT_FOUND", format!("no process with pid {pid}"), json!({ "pid": pid })),
+                Some(libc::EPERM) => ToolError::with_hint("ERR_REFUSED", format!("permission denied killing pid {pid}"), json!({ "pid": pid })),
+                _ => ToolError::with_hint("ERR_SPAWN", format!("kill failed: {err}"), json!({ "pid": pid })),
+            });
+        }
+        return Ok(json!({ "pid": pid, "signal": "SIGKILL", "requested": true }));
+    }
+    #[cfg(windows)]
+    {
+        // Node's process.kill on Windows terminates unconditionally, so both
+        // SIGKILL and SIGTERM map to a hard kill here.
+        let mut tk = Command::new("taskkill");
+        tk.args(["/PID", &pid.to_string(), "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            tk.creation_flags(CREATE_NO_WINDOW);
+        }
+        match tk.status()
+        {
+            Ok(s) if s.success() => Ok(json!({ "pid": pid, "signal": "SIGKILL", "requested": true })),
+            Ok(_) => Err(ToolError::with_hint("ERR_PROC_NOT_FOUND", format!("no process with pid {pid}"), json!({ "pid": pid }))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ToolError::new("ERR_CMD_NOT_FOUND", "taskkill is not available")),
+            Err(e) => Err(ToolError::with_hint("ERR_SPAWN", format!("kill failed: {e}"), json!({ "pid": pid }))),
+        }
+    }
+}
+
+// ---- env.* ------------------------------------------------------------------------
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+pub struct EnvGetHandler;
+impl Handler for EnvGetHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: EnvNameArgs = parse_args(args)?;
+        if !valid_env_name(&a.name) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                "env name must match [A-Za-z_][A-Za-z0-9_]*",
+                json!({ "got": a.name }),
+            ));
+        }
+        if k.session_env.contains(&a.name) {
+            return Ok(json!({ "name": a.name, "value": k.session_env.get(&a.name), "source": "session" }));
+        }
+        match std::env::var(&a.name) {
+            Ok(v) => Ok(json!({ "name": a.name, "value": v, "source": "host" })),
+            Err(_) => Ok(json!({ "name": a.name, "value": Value::Null, "source": "unset" })),
+        }
+    }
+}
+
+pub struct EnvSetHandler;
+impl Handler for EnvSetHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: EnvSetArgs = parse_args(args)?;
+        if !valid_env_name(&a.name) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                "env name must match [A-Za-z_][A-Za-z0-9_]*",
+                json!({ "got": a.name }),
+            ));
+        }
+        let previous = k.session_env.get(&a.name).or_else(|| std::env::var(&a.name).ok());
+        k.session_env.set(&a.name, &a.value);
+        Ok(json!({ "name": a.name, "value": a.value, "previous": previous, "source": "session" }))
+    }
+}
+
+pub struct EnvListHandler;
+impl Handler for EnvListHandler {
+    fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
+        Ok(json!({ "session": k.session_env.snapshot() }))
+    }
+}

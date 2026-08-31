@@ -17,7 +17,8 @@ changing their model or harness.
 | `src/agent/` | A terminal-free agent loop that operates the kernel via tool calls |
 | `src/mcp/` | MCP stdio server exposing the kernel to any MCP-capable agent |
 | `benchmark/` | Harness, task suite, verifier, and results for terminal-free runs |
-| `tools/audit.mjs` | Repository audit: scans for stubs/TODOs/mocks/fakes/placeholders |
+| `rust/` | Full Rust port: `cargo build --release -p nct-mcp` → single static `nc-tools-mcp` binary, same 48-tool protocol |
+| `tools/audit.mjs` | Repository audit: scans for stubs/TODOs/mocks/fakes/placeholders (JS **and** Rust source) |
 
 ## Verified outcomes
 

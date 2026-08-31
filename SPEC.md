@@ -135,6 +135,36 @@ OpenAI-compatible chat-completions endpoint (works with any provider).
 - **Verifier is real**: it inspects the resulting workspace with the same
   kernel tools and returns pass/fail with evidence. No self-report.
 
+## 8b. Rust implementation (nct-rs)
+
+`rust/` is a complete second implementation of this spec in Rust. The JS
+implementation is the **oracle**: `conformance/golden/tools.json` (frozen
+descriptor export) and `tools/conformance.mjs` (black-box protocol cases)
+grade the Rust binary — same names, same error codes, same journal format,
+same result shapes.
+
+- `cargo build --release -p nct-mcp` produces a single static `nc-tools-mcp`
+  binary (no Node, no npx, no shims — the Windows launcher/PATH class of
+  problems disappears by construction).
+- Tool contracts are **generated** from typed args structs (serde + schemars):
+  the advertised schema and the accepted input are the same type, so
+  schema/behavior drift is a compile-time impossibility. The golden parity
+  test (`cargo test -p nct-mcp --test parity`) locks the generated surface to
+  the frozen JS descriptors.
+- Crate layout is the module map: `nct-core` (errors, config, paths, journal,
+  kernel), `nct-fs` (fs/patch/search/snapshots), `nct-git`, `nct-proc`
+  (proc/pkg/test/env), `nct-net`, `nct-semantic` (candle MiniLM, local), and
+  `nct-mcp` (stdio server). Families are compile-time plugins (cargo
+  features).
+- Journal additions (additive, benchmarks keep reading the same fields):
+  `sid` on every event, `parentSeq` reserved for batch lineage.
+- `search.semantic` embeds with all-MiniLM-L6-v2 via candle (pure Rust, no
+  API calls); the model downloads once into the cache dir, mean-pooled and
+  L2-normalized identically to the JS pipeline, sharing the same
+  `semantic-index.jsonl` cache format.
+
+Run: `NCTOOLS_CONFORMANCE_CMD="<path to nc-tools-mcp.exe>" node tools/conformance.mjs`
+
 ## 9. What v1 deliberately excludes
 
 Virtualization/rollback, driver synthesis, multi-ecosystem drivers — the

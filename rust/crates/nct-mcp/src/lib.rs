@@ -1,0 +1,30 @@
+// Kernel builder: assembles the full 48-tool kernel from the family crates.
+// Families are compile-time plugins (cargo features); every registered tool
+// gets MCP exposure, journaling, and batch support automatically.
+use nct_core::{Kernel, ToolError};
+
+pub mod sysbatch;
+pub use sysbatch::register_sys_batch;
+
+pub const SERVER_NAME: &str = "nc-tools";
+pub const SERVER_VERSION: &str = "0.2.0";
+
+pub fn build_kernel(workspace: std::path::PathBuf) -> Result<Kernel, ToolError> {
+    let mut kernel = Kernel::new(workspace)?;
+    #[cfg(feature = "fs")]
+    nct_fs::register(&mut kernel);
+    #[cfg(feature = "git")]
+    nct_git::register(&mut kernel);
+    #[cfg(feature = "proc")]
+    {
+        nct_proc::register(&mut kernel);
+        nct_proc::register_pkg(&mut kernel);
+        nct_proc::register_test(&mut kernel);
+    }
+    #[cfg(feature = "net")]
+    nct_net::register(&mut kernel);
+    #[cfg(feature = "semantic")]
+    nct_semantic::register(&mut kernel);
+    register_sys_batch(&mut kernel);
+    Ok(kernel)
+}

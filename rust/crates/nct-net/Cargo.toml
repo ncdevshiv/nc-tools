@@ -1,0 +1,15 @@
+[package]
+name = "nct-net"
+version.workspace = true
+edition.workspace = true
+description = "nc-tools net.* tool family (HTTP, port probing)"
+
+[dependencies]
+nct-core = { path = "../nct-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+ureq = { workspace = true }
+
+[lints]
+workspace = true

@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const SKIP_DIRS = new Set(['node_modules', '.git', '.nc-tools', 'benchmark', 'coverage']);
-const SCAN_EXT = new Set(['.mjs', '.js', '.cjs', '.ts', '.json', '.md']);
+const SKIP_DIRS = new Set(['node_modules', '.git', '.nc-tools', 'benchmark', 'coverage', 'target']);
+const SCAN_EXT = new Set(['.mjs', '.js', '.cjs', '.ts', '.json', '.md', '.rs', '.toml']);
 
 // Patterns that indicate unfinished/fake work in shipped source.
 const PATTERNS = [
@@ -18,6 +18,8 @@ const PATTERNS = [
   { re: /\bXXX\b/, label: 'XXX marker' },
   { re: /\bnot implemented\b/i, label: '"not implemented"' },
   { re: /\bunimplemented\b/i, label: '"unimplemented"' },
+  { re: /\btodo!\s*\(/, label: 'rust todo! macro' },
+  { re: /\bunimplemented!\s*\(/, label: 'rust unimplemented! macro' },
   { re: /throw new Error\(\s*['"`](STUB|PLACEHOLDER)/i, label: 'stub error throw' },
   { re: /\bstub(s)?\b/i, label: '"stub"' },
   { re: /\bplaceholder\b/i, label: '"placeholder"' },
