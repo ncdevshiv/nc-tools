@@ -260,11 +260,26 @@ impl Embedder {
 
     /// Embed text: BERT hidden states → masked mean over tokens → L2 norm.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, ToolError> {
-        let enc = self
+        // Encode WITHOUT special tokens, truncate the raw sequence to the
+        // model window (MiniLM: 512 position embeddings; the tokenizers crate
+        // does not truncate by default — untruncated inputs silently produce
+        // degenerate vectors that dominate every ranking), then add
+        // [CLS] … [SEP] the way BERT truncation is defined. Truncating AFTER
+        // specials would cut [SEP] and change the embedding.
+        let mut body: Vec<u32> = self
             .tokenizer
-            .encode(text, true)
-            .map_err(|e| ToolError::new("ERR_INTERNAL", format!("tokenization failed: {e}")))?;
-        let ids: Vec<u32> = enc.get_ids().to_vec();
+            .encode(text, false)
+            .map_err(|e| ToolError::new("ERR_INTERNAL", format!("tokenization failed: {e}")))?
+            .get_ids()
+            .to_vec();
+        const MAX_POSITIONS: usize = 512;
+        body.truncate(MAX_POSITIONS.saturating_sub(2));
+        let cls = self.tokenizer.token_to_id("[CLS]").unwrap_or(101);
+        let sep = self.tokenizer.token_to_id("[SEP]").unwrap_or(102);
+        let mut ids: Vec<u32> = Vec::with_capacity(body.len() + 2);
+        ids.push(cls);
+        ids.extend_from_slice(&body);
+        ids.push(sep);
         let len = ids.len();
         if len == 0 {
             return Err(ToolError::new("ERR_INTERNAL", "empty tokenization result"));
@@ -286,7 +301,10 @@ impl Embedder {
         let masked = (hidden * mask_f.broadcast_as(shape).map_err(tensor_err)?).map_err(tensor_err)?;
         let sum = masked.sum(1).map_err(tensor_err)?; // [1, H]
         let count = mask_f.sum(1).map_err(tensor_err)?; // [1, 1]
-        let pooled = (sum / count).map_err(tensor_err)?;
+        // candle's `Div for Tensor` requires identical shapes — plain `sum / count`
+        // fails with "shape mismatch in div, lhs: [1, H], rhs: [1, 1]". Broadcasting
+        // division must be explicit.
+        let pooled = sum.broadcast_div(&count).map_err(tensor_err)?; // [1, H]
         let v = pooled.squeeze(0).map_err(tensor_err)?.to_vec1::<f32>().map_err(tensor_err)?;
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
         Ok(v.iter().map(|x| x / norm).collect())

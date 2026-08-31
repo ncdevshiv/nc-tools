@@ -140,6 +140,12 @@ Every error must have exactly these fields: `code`, `message`, optional
   (no response), `tools/list` (each tool has `name`, `description`,
   `inputSchema` — a JSON Schema object), `tools/call`
   (`{name, arguments}` → `{content: [{type:"text", text}], isError}`).
+- **Tool-name aliases**: `tools/call` accepts the dotted surface name plus
+  two wire forms: single-underscore (`fs_stat`) and double-underscore
+  (`fs__stat` — what agent loops emit for providers that forbid dotted
+  names). Resolution order: exact → `__`→`.` → `_`→`.`; the journal records
+  the canonical dotted name. No surface tool name contains `_`, so the
+  rewrites are unambiguous.
 
 ### 6.2 Direct binding (any language)
 
@@ -152,7 +158,7 @@ A direct binding calls `kernel.call(tool, args)` and receives
 args from env `NCTOOLS_CONFORMANCE_CMD`, cwd = a fresh temp workspace),
 drives it over MCP stdio, and checks:
 
-1. exact tool count (40) and all tool names present;
+1. exact tool count (48) and all tool names present;
 2. every tool has a JSON-Schema `inputSchema` and non-empty `description`;
 3. initialization handshake shape;
 4. required error codes, byte-exact, on the failure cases listed in

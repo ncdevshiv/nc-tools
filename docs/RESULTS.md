@@ -1,6 +1,79 @@
 # nc-tools Benchmark Results — Real Runs
 
-Date: 2026-08-31 (wave 6: variance measurement)
+Date: 2026-08-31 (wave 14: dual-implementation benchmark — Rust primary vs JS oracle)
+
+## Wave 14: the Rust kernel is now primary — measured, not asserted
+
+Three independent measurements, all reproducible:
+
+### 1. Deterministic perf benchmark (`benchmark/kernel-perf.mjs`, no LLM)
+
+Same corpus, same ops, both servers as opaque MCP-stdio processes; parity
+column = identical observable results (byte counts, match counts, rollback
+shape) on every op:
+
+| Op (15 iters, med / p90) | JS oracle | Rust primary | Parity |
+|---|---|---|---|
+| cold start → initialize + tools/list | 110ms | **58ms** | 48/48 tools both |
+| fs.write (1KB) | 2.6 / 3.3ms | 1.8 / 2.2ms | 1024 bytes both |
+| fs.read (400 lines) | 2.6 / 2.9ms | 1.9 / 2.2ms | 10,579 chars both |
+| fs.readMany (8 files) | 6.1 / 6.3ms | 6.3 / 7.0ms | 8/8 ok both |
+| fs.list (recursive, 43 entries) | 3.3 / 3.7ms | 6.1 / 6.6ms | 43 both |
+| search.grep (corpus) | 9.5 / 11.5ms | 11.5 / 12.6ms | 5 matches both |
+| patch.apply | 2.0 / 2.3ms | 1.6 / 1.8ms | 1 replacement both |
+| snapshot + rollback | 426.4 / 465.0ms | **87.0 / 94.2ms** (~5× faster) | same rollback shape |
+| batch.execute (10 reads) | 25.3 / 26.7ms | 18.6 / 19.7ms | 10/10 ok both |
+
+**Reading:** Rust wins the lifecycle ops (cold start ~2×, snapshot/rollback
+~5×) and the mutation ops; per-op read latency is in the same 2–12ms band on
+both (the grep/list edge for JS is single-digit ms and shrinks with warm OS
+caches). The JS oracle stays as behavioral reference, not for speed.
+
+### 2. Agent head-to-head (4 tasks × deepseek-v4-flash-vision-exp × both arms)
+
+Same tasks, same model, same verifier (JS oracle kernel grades both arms;
+the Rust agent embeds its own Rust kernel and writes the same journal format).
+
+| Arm | Result | Errors |
+|---|---|---|
+| JS oracle kernel | 3/4 (fix-off-by-one, add-feature-with-test, multi-step-tdd) | 0 |
+| Rust kernel (`nct-agent.exe`) | 3/4 (same three) | 3 × ERR_INTERNAL (semantic) |
+
+**The head-to-head found real Rust defects the conformance suite missed:**
+`search.semantic` in the Rust binary failed on **every** call with
+`embedding failed: shape mismatch in div, lhs: [1, 384], rhs: [1, 1]` —
+candle's `Tensor / Tensor` requires identical shapes; masked-mean pooling
+divides `[1,H]` by `[1,1]` and needs explicit `broadcast_div`. Fixed
+(`sum.broadcast_div(&count)`), rebuilt, and re-verified end-to-end. Behind it
+sat a second latent defect: the tokenizers crate does not truncate, so
+>512-token inputs hit the model unbounded — now truncated the way BERT
+defines it (raw sequence to the 512-token window, then `[CLS] … [SEP]`).
+Post-fix, natural-language queries agree on top-1 across both runtimes
+(payments query → the payments file first, on both). Known limitation,
+recorded not hidden: ranking **beyond top-1** on degenerate inputs (e.g. a
+file of 5,000 `x` characters) differs between the onnx and candle runtimes —
+numeric noise on meaningless content; agents must verify semantic hits by
+reading the file (the loop already prompts for that). Kernel-perf parity ops
+passed because the perf workload doesn't touch the embedder — the
+head-to-head is what caught the crash. This is why both exist.
+
+Both arms independently failed `semantic-locate` the same way (same wrong
+target module), which doubles as wire-level parity evidence — and confirms
+the known adoption problem: even when the task begs for it, agents use
+`search.semantic` and then don't trust the ranking over their own priors.
+
+### 3. Conformance: 17/17 on both implementations
+
+Three new cases extend coverage into areas the benchmark showed are
+real-agent-shaped: `fs.copy`/`fs.move` → `ERR_NOT_FOUND` on the moved-from
+path; `git.add`/`git.commit` (sha) / `git.status` (branch+head) after
+`proc.spawn git init`; and **tool-name wire aliases** — `fs_stat` and
+`sys__workspace` resolve and answer identically (the usage audit found 7
+real `ERR_UNKNOWN_TOOL` attempts at these forms; both kernels now resolve
+exact → `__`→`.` → `_`→`.`). The suite is language-neutral: same cases,
+`NCTOOLS_CONFORMANCE_CMD` picks the server.
+
+## Earlier waves (archived results)
 
 ## Wave 6: is the benchmark stable? — repeat runs
 

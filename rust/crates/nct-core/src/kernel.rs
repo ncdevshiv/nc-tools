@@ -102,6 +102,13 @@ impl Kernel {
         if self.tools.contains_key(name) {
             return name.to_string();
         }
+        // Wire aliases: single underscore (fs_stat) and the double-underscore
+        // wire form (git__status, what agent loops emit for providers that
+        // forbid dotted names). Try __ -> . first, then _ -> .
+        let double = name.replace("__", ".");
+        if self.tools.contains_key(&double) {
+            return double;
+        }
         let dotted = name.replace('_', ".");
         if self.tools.contains_key(&dotted) {
             dotted

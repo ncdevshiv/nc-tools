@@ -83,13 +83,18 @@ export class Kernel {
   }
 
   /**
-   * MCP clients expose kernel names with underscores (fs_stat); kernel names
-   * are dotted (fs.stat). Accept both: try exact, then translate _ -> .
+   * MCP clients expose kernel names with underscores (fs_stat) or the
+   * double-underscore wire form (git__status — what agent loops emit for
+   * providers that forbid dotted names). Kernel names are dotted. Accept
+   * all three: exact, __ -> ., then _ -> .
    */
   #resolveTool(name) {
     if (this.tools.has(name)) return name;
-    const dotted = name.replaceAll('_', '.');
-    return this.tools.has(dotted) ? dotted : name;
+    const candidates = [name.replaceAll('__', '.'), name.replaceAll('_', '.')];
+    for (const c of candidates) {
+      if (this.tools.has(c)) return c;
+    }
+    return name;
   }
 
   /**

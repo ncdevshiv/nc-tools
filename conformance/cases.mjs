@@ -146,4 +146,60 @@ export const conformanceCases = [
         return res.stdout.includes('visible');
       } },
   ]),
+  caseTemplate('fs.copy/fs.move lifecycle across the protocol', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'orig.txt', content: 'content-A' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.copy', arguments: { from: 'orig.txt', to: 'copy.txt' } },
+      expect: (r) => JSON.parse(r.result.content[0].text).copied === true },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.read', arguments: { path: 'copy.txt' } },
+      expect: (r) => r.result.content[0].text.includes('content-A') },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.move', arguments: { from: 'copy.txt', to: 'moved.txt' } },
+      expect: (r) => JSON.parse(r.result.content[0].text).moved === true },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.read', arguments: { path: 'moved.txt' } },
+      expect: (r) => r.result.content[0].text.includes('content-A') },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.read', arguments: { path: 'copy.txt' } },
+      expect: (r) => {
+        const err = JSON.parse(r.result.content[0].text);
+        return err.error.code === 'ERR_NOT_FOUND';
+      } },
+  ]),
+  caseTemplate('git round-trip: init via proc.spawn, add, commit, status', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.spawn', arguments: { cmd: 'git', args: ['init'] } },
+      expect: (r) => JSON.parse(r.result.content[0].text).exitCode === 0 },
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.spawn', arguments: { cmd: 'git', args: ['config', 'user.email', 'conform@nc-tools.local'] } },
+      expect: (r) => JSON.parse(r.result.content[0].text).exitCode === 0 },
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.spawn', arguments: { cmd: 'git', args: ['config', 'user.name', 'conformance'] } },
+      expect: (r) => JSON.parse(r.result.content[0].text).exitCode === 0 },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'repo-file.txt', content: 'tracked content' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'git.add', arguments: { paths: ['repo-file.txt'] } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return Array.isArray(res.added) && res.added.includes('repo-file.txt');
+      } },
+    { type: 'mcp', method: 'tools/call', params: { name: 'git.commit', arguments: { message: 'conformance commit' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return typeof res.sha === 'string' && res.sha.length >= 7;
+      } },
+    { type: 'mcp', method: 'tools/call', params: { name: 'git.status', arguments: {} },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return typeof res.branch === 'string' && typeof res.head === 'string' && res.head.length >= 7;
+      } },
+  ]),
+  caseTemplate('tool-name wire aliases: underscored forms resolve', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'alias.txt', content: 'alias body' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs_stat', arguments: { path: 'alias.txt' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return !res.error && typeof res.size === 'number' && res.size > 0;
+      } },
+    { type: 'mcp', method: 'tools/call', params: { name: 'sys__workspace', arguments: {} },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return !res.error && typeof res.root === 'string' && res.root.length > 0;
+      } },
+  ]),
 ];
