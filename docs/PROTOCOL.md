@@ -25,14 +25,16 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 40 tools; schema in `src/kernel/descriptors.mjs`)
+## 3. Tool surface (must be 48 tools; schema in `src/kernel/descriptors.mjs`)
 
-- `fs.read`, `fs.readMany`, `fs.write`, `fs.writeMany`, `fs.list`, `fs.stat`,
-  `fs.mkdir`, `fs.delete`, `fs.move`
+- `fs.read`, `fs.readMany`, `fs.write`, `fs.writeMany`, `fs.append`,
+  `fs.copy`, `fs.list`, `fs.stat`, `fs.mkdir`, `fs.delete`, `fs.move`
 - `patch.apply`, `patch.applyMany`
-- `search.grep`, `search.files`
-- `git.status`, `git.diff`, `git.add`, `git.commit`, `git.log`
-- `proc.spawn`, `proc.start`, `proc.status`, `proc.readOutput`, `proc.stop`
+- `search.grep`, `search.files`, `search.semantic`
+- `git.status`, `git.diff`, `git.add`, `git.commit`, `git.log`,
+  `git.branch`, `git.checkout`, `git.push`, `git.pull`
+- `proc.spawn`, `proc.start`, `proc.status`, `proc.readOutput`, `proc.stop`,
+  `proc.list`, `proc.kill`
 - `test.run` (frameworks: `node`, `pytest`)
 - `pkg.add`, `pkg.list`, `pkg.scripts`, `pkg.runScript`
 - `net.http`, `net.probePort`
@@ -73,6 +75,13 @@ Behavioral invariants every implementation MUST honor:
    sorted; journal `seq` is monotonically increasing.
 10. **Session env.** `env.set` overrides are inherited by every subsequent
     proc.* call; `env.get` resolves session → host → `unset`.
+11. **Proc control.** `proc.list` returns the OS process table
+    (`{pid, name, memKb?}`, optional name `filter`, capped by `maxResults`);
+    `proc.kill` kills by PID and errors `ERR_PROC_NOT_FOUND` (ESRCH) or
+    `ERR_REFUSED` (EPERM).
+12. **Branch ops.** `git.branch` lists or creates; `git.checkout` switches
+    (or creates); `git.push`/`git.pull` set tracking / stay ff-only by
+    default. All git tools error `ERR_GIT` with the stderr tail on failure.
 
 ## 4. Journal schema (JSONL, one object per line)
 
@@ -109,6 +118,7 @@ On error, `ok` is `false`, `error` is `{code, message, hint?}` and
 | `ERR_NOT_A_REPO` | workspace has no .git |
 | `ERR_SPAWN` / `ERR_CMD_NOT_FOUND` | process spawn issues |
 | `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
+| `ERR_PROC_NOT_FOUND` | no process with that pid (proc.kill) |
 | `ERR_TEST_PARSE` | runner produced no structured report |
 | `ERR_NO_TESTS` | runner discovered zero tests (hint: check the path/patterns) |
 | `ERR_NET` / `ERR_TIMEOUT` | network request failures |

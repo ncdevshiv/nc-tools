@@ -1,11 +1,40 @@
 // proc.* — execution tools. proc.spawn for bounded runs; proc.start creates a
 // MANAGED background process (handle, streamed output, status, stop) — the
-// typed replacement for "run a server / watcher in a terminal tab".
-import { spawn } from 'node:child_process';
+// typed replacement for "run a server / watcher in a terminal tab". proc.list
+// and proc.kill cover the OS process table (tasklist/ps + pid kill).
+import { spawn, spawnSync } from 'node:child_process';
 import { ToolError } from './errors.mjs';
 import { inWorkspace } from './paths.mjs';
 
 const MAX_BUFFER = 2_000_000;
+
+/** Parse the OS process table into [{pid, name, memKb?}]. */
+function systemProcesses() {
+  if (process.platform === 'win32') {
+    const r = spawnSync('tasklist', ['/FO', 'CSV', '/NH'], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+    if (r.error) {
+      if (r.error.code === 'ENOENT') throw new ToolError('ERR_CMD_NOT_FOUND', 'tasklist is not available');
+      throw new ToolError('ERR_SPAWN', `tasklist failed: ${r.error.message}`);
+    }
+    return (r.stdout || '')
+      .split('\n').filter((l) => l.includes('","')).map((line) => {
+        const cols = line.trim().replace(/^"|"$/g, '').split('","');
+        const name = cols[0], pid = Number(cols[1]);
+        const memKb = Number((cols[4] ?? '').replace(/[^\d]/g, ''));
+        return { pid, name, memKb: Number.isFinite(memKb) ? memKb : null };
+      }).filter((p) => Number.isInteger(p.pid) && p.pid > 0);
+  }
+  const r = spawnSync('ps', ['-A', '-o', 'pid=,comm='], { encoding: 'utf8', timeout: 20_000 });
+  if (r.error) {
+    if (r.error.code === 'ENOENT') throw new ToolError('ERR_CMD_NOT_FOUND', 'ps is not available');
+    throw new ToolError('ERR_SPAWN', `ps failed: ${r.error.message}`);
+  }
+  return (r.stdout || '')
+    .split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+      const m = l.match(/^(\d+)\s+(.+)$/);
+      return m ? { pid: Number(m[1]), name: m[2].trim() } : null;
+    }).filter((p) => p && Number.isInteger(p.pid) && p.pid > 0);
+}
 
 export function makeProcTools(root, sessionEnv) {
   /** @type {Map<string, object>} handleId -> record */
@@ -99,11 +128,15 @@ export function makeProcTools(root, sessionEnv) {
     child.on('error', (e) => {
       rec.running = false;
       rec.spawnError = e.code === 'ENOENT' ? `command not found: ${cmd}` : e.message;
+      if (rec.timer) { clearTimeout(rec.timer); rec.timer = null; }
     });
     child.on('close', (code, signal) => {
       rec.running = false;
       rec.exitCode = code;
       rec.signal = signal;
+      // a lingering maxDuration timer would keep the event loop alive (and the
+      // session/process) after the child is gone
+      if (rec.timer) { clearTimeout(rec.timer); rec.timer = null; }
     });
     rec.timer = setTimeout(() => {
       if (rec.running) { rec.timedOut = true; try { child.kill('SIGKILL'); } catch { /* dead */ } }
@@ -143,11 +176,38 @@ export function makeProcTools(root, sessionEnv) {
     return { handleId, requested: true, wasRunning: rec.running };
   };
 
+  const list = ({ filter, maxResults = 500 } = {}) => {
+    if (filter !== undefined && typeof filter !== 'string') throw new ToolError('ERR_BAD_INPUT', 'filter must be a string');
+    if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 2000) {
+      throw new ToolError('ERR_BAD_INPUT', 'maxResults must be an integer between 1 and 2000', { got: maxResults });
+    }
+    let procs = systemProcesses();
+    if (filter) {
+      const needle = filter.toLowerCase();
+      procs = procs.filter((p) => p.name.toLowerCase().includes(needle));
+    }
+    return { processes: procs.slice(0, maxResults), total: procs.length, truncated: procs.length > maxResults };
+  };
+
+  const kill = ({ pid, force = true }) => {
+    if (!Number.isInteger(pid) || pid <= 0) throw new ToolError('ERR_BAD_INPUT', 'pid must be a positive integer', { got: pid });
+    try {
+      process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
+      return { pid, signal: force ? 'SIGKILL' : 'SIGTERM', requested: true };
+    } catch (e) {
+      if (e.code === 'ESRCH') throw new ToolError('ERR_PROC_NOT_FOUND', `no process with pid ${pid}`, { pid });
+      if (e.code === 'EPERM') throw new ToolError('ERR_REFUSED', `permission denied killing pid ${pid}`, { pid });
+      throw new ToolError('ERR_SPAWN', `kill failed: ${e.message}`, { pid });
+    }
+  };
+
   return {
     'proc.spawn': { handler: spawnTool },
     'proc.start': { handler: start },
     'proc.status': { handler: status },
     'proc.readOutput': { handler: readOutput },
     'proc.stop': { handler: stop },
+    'proc.list': { handler: list },
+    'proc.kill': { handler: kill },
   };
 }

@@ -99,5 +99,14 @@ node tools/crossaudit.mjs            # audits the repo
 node tools/crossaudit.mjs F:/some/dir  # audits any workspace via its MCP server
 ```
 
-Status after fixes: **67/67 unit tests, 14/14 conformance, 20/20 cross-audit,
+Status after fixes: **73/73 unit tests, 14/14 conformance, 20/20 cross-audit,
 audit-suite clean.**
+
+## Wave 10 — terminal-control gap fill
+
+48 tools (was 40). New: `git.branch/checkout/push/pull`, `proc.list`
+(OS process table)/`proc.kill` (kill by PID), `fs.copy`, `fs.append`.
+Cross-audit now derives tool-count assertions from its expected list instead
+of hardcoding 40; conformance and MCP tests assert 48. Also fixed: managed
+`proc.start` processes left their `maxDurationMs` timer armed after exit,
+holding the event loop (and process) alive for the full duration.

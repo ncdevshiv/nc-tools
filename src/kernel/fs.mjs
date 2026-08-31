@@ -1,5 +1,5 @@
 // fs.* tools — typed file operations, jailed to the workspace.
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, rmSync, renameSync, existsSync, realpathSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, rmSync, renameSync, existsSync, realpathSync, cpSync } from 'node:fs';
 import { join, relative, dirname, basename, resolve, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ToolError } from './errors.mjs';
@@ -106,6 +106,26 @@ export function makeFsTools(root) {
     return { path, bytes, created: !existed, overwrote: existed };
   };
 
+  const append = ({ path, content }) => {
+    const abs = inWorkspace(root, path);
+    const existed = existsSync(abs);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, content, { encoding: 'utf8', flag: 'a' });
+    const bytes = Buffer.byteLength(content, 'utf8');
+    return { path, bytes, created: !existed, appended: true };
+  };
+
+  const copy = ({ from, to, recursive = true }) => {
+    const fromAbs = inWorkspace(root, from);
+    const toAbs = inWorkspace(root, to);
+    if (!existsSync(fromAbs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${from}`, { path: from, nearestExisting: nearestSiblings(root, fromAbs) });
+    const st = statSync(fromAbs);
+    if (st.isDirectory() && !recursive) throw new ToolError('ERR_IS_DIRECTORY', `${from} is a directory; pass recursive=true to copy it`, { path: from });
+    mkdirSync(dirname(toAbs), { recursive: true });
+    cpSync(fromAbs, toAbs, { recursive: !!recursive });
+    return { from, to, copied: true };
+  };
+
   const list = ({ path = '.', recursive = false }) => {
     const abs = inWorkspace(root, path);
     if (!existsSync(abs)) throw new ToolError('ERR_NOT_FOUND', `No such path: ${path}`, { path });
@@ -173,6 +193,8 @@ export function makeFsTools(root) {
     'fs.readMany': { handler: readMany },
     'fs.write': { handler: write },
     'fs.writeMany': { handler: writeMany },
+    'fs.append': { handler: append },
+    'fs.copy': { handler: copy },
     'fs.list': { handler: list },
     'fs.stat': { handler: stat },
     'fs.mkdir': { handler: mkdir },

@@ -63,13 +63,13 @@ function connect(root) {
 
     const list = await client.rpc('tools/list', {});
     const tools = list.result.tools;
-    report('tool count (40)', tools.length === 40 ? 'PASS' : 'FAIL', `got ${tools.length}`);
+    const expected = ['batch.execute','env.get','env.list','env.set','fs.append','fs.copy','fs.delete','fs.list','fs.mkdir','fs.move','fs.read','fs.readMany','fs.stat','fs.write','fs.writeMany','git.add','git.branch','git.checkout','git.commit','git.diff','git.log','git.pull','git.push','git.status','net.http','net.probePort','patch.apply','patch.applyMany','pkg.add','pkg.list','pkg.runScript','pkg.scripts','proc.kill','proc.list','proc.readOutput','proc.spawn','proc.start','proc.status','proc.stop','search.files','search.grep','search.semantic','sys.journal','sys.listSnapshots','sys.rollback','sys.snapshot','sys.workspace','test.run'];
+    report('tool count matches expected list', tools.length === expected.length ? 'PASS' : 'FAIL', `expected ${expected.length}, got ${tools.length}`);
     const noSchemas = tools.filter((t) => !t.inputSchema || t.inputSchema.type !== 'object' || !t.description);
     report('all tools have schema + description', noSchemas.length === 0 ? 'PASS' : 'FAIL', noSchemas.map((t) => t.name).join(','));
     const names = tools.map((t) => t.name).sort();
-    const expected = ['batch.execute','env.get','env.list','env.set','fs.delete','fs.list','fs.mkdir','fs.move','fs.read','fs.readMany','fs.stat','fs.write','fs.writeMany','git.add','git.commit','git.diff','git.log','git.status','net.http','net.probePort','patch.apply','patch.applyMany','pkg.add','pkg.list','pkg.runScript','pkg.scripts','proc.readOutput','proc.spawn','proc.start','proc.status','proc.stop','search.files','search.grep','search.semantic','sys.journal','sys.listSnapshots','sys.rollback','sys.snapshot','sys.workspace','test.run'];
     const missing = expected.filter((n) => !names.includes(n));
-    report('tool names match PROTOCOL.md list', missing.length === 0 ? 'PASS' : 'FAIL', missing.join(',') || 'all 40 present');
+    report('tool names match PROTOCOL.md list', missing.length === 0 ? 'PASS' : 'FAIL', missing.join(',') || `all ${expected.length} present`);
 
     // ---- 2. live behavior in a sandbox ---------------------------------------
     const sandbox = mkdtempSync(join(tmpdir(), 'nc-audit-'));
@@ -128,11 +128,11 @@ function connect(root) {
     report('no TODO/FIXME/XXX in src/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
     const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'src', maxResults: 50 });
     report('no placeholder/not-implemented markers in src/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
-    // docs claim check: RESULTS.md says "40 tools"
-    const doc = await call('search.grep', { pattern: '40 tools', path: 'docs' });
-    report('docs claim "40 tools" present', !doc.isError && doc.result.total >= 1 ? 'PASS' : 'INFO', `hits=${doc.result.total}`);
+    // docs claim check
+    const doc = await call('search.grep', { pattern: `${expected.length} tools`, path: 'docs' });
+    report(`docs claim "${expected.length} tools" present`, !doc.isError && doc.result.total >= 1 ? 'PASS' : 'INFO', `hits=${doc.result.total}`);
     // spec/tool cross-check: PROTOCOL.md tool count statement
-    const protoDoc = await call('search.grep', { pattern: '40 tools', path: 'docs/PROTOCOL.md', maxResults: 5 });
+    const protoDoc = await call('search.grep', { pattern: `${expected.length} tools`, path: 'docs/PROTOCOL.md', maxResults: 5 });
     report('PROTOCOL.md tool-count consistent', !protoDoc.isError && protoDoc.result.total >= 1 ? 'PASS' : 'FAIL', protoDoc.isError ? JSON.stringify(protoDoc.error) : protoDoc.result.matches.map((m) => m.text.slice(0, 60)).join(' | ') || '(no matching line)');
 
     s.close();

@@ -69,11 +69,55 @@ export function makeGitTools(root) {
     return { commits };
   };
 
+  const branch = ({ name } = {}) => {
+    if (!available()) throw new ToolError('ERR_NOT_A_REPO', 'workspace is not a git repository');
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) throw new ToolError('ERR_BAD_INPUT', 'branch name required');
+      git(root, ['branch', name.trim()]);
+      return { branch: name.trim(), created: true };
+    }
+    const out = git(root, ['branch', '--list']);
+    const lines = out.split('\n').filter(Boolean);
+    const branches = lines.map((l) => ({
+      name: l.replace(/^\*\s+/, '').trim(),
+      current: l.trim().startsWith('*'),
+    }));
+    return {
+      branches,
+      current: branches.find((b) => b.current)?.name ?? null,
+    };
+  };
+
+  const checkout = ({ branch: name, create = false }) => {
+    if (!available()) throw new ToolError('ERR_NOT_A_REPO', 'workspace is not a git repository');
+    if (typeof name !== 'string' || !name.trim()) throw new ToolError('ERR_BAD_INPUT', 'branch name required');
+    git(root, create ? ['checkout', '-b', name.trim()] : ['checkout', name.trim()]);
+    return { branch: name.trim(), created: create };
+  };
+
+  const push = ({ remote = 'origin', branch: name, setUpstream = true }) => {
+    if (!available()) throw new ToolError('ERR_NOT_A_REPO', 'workspace is not a git repository');
+    const args = ['push', ...(name && setUpstream ? ['-u'] : []), remote, ...(name ? [name] : [])];
+    const out = git(root, args);
+    return { remote, branch: name ?? null, upstream: !!(name && setUpstream), output: out.trim().split('\n').filter(Boolean) };
+  };
+
+  const pull = ({ remote = 'origin', branch: name, ffOnly = true }) => {
+    if (!available()) throw new ToolError('ERR_NOT_A_REPO', 'workspace is not a git repository');
+    const args = ['pull', '--no-edit', ...(ffOnly ? ['--ff-only'] : []), remote, ...(name ? [name] : [])];
+    const out = git(root, args);
+    return { remote, branch: name ?? null, output: out.trim().split('\n').filter(Boolean) };
+  };
+
   return {
     'git.status': { handler: status },
     'git.diff': { handler: diff },
     'git.add': { handler: add },
     'git.commit': { handler: commit },
     'git.log': { handler: log },
+    'git.branch': { handler: branch },
+    'git.checkout': { handler: checkout },
+    'git.push': { handler: push },
+    'git.pull': { handler: pull },
   };
 }

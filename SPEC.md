@@ -26,6 +26,9 @@ All tools live under the `nc` server. Names are `category.action`.
 - `fs.read` `{path, offset?, limit?}` → `{content, totalLines, truncated}`
 - `fs.write` `{path, content}` → `{path, bytes, created}` — creates parent dirs;
   refuses to silently overwrite unless path already existed (event records it)
+- `fs.append` `{path, content}` → `{path, bytes, created}` — appends, creating
+  the file + parent dirs if missing
+- `fs.copy` `{from, to, recursive?}` → `{from, to, copied}` — file or dir copy
 - `fs.list` `{path, recursive?}` → `{entries:[{name,path,type,size}]}`
 - `fs.stat` `{path}` → `{exists, type, size, mtimeMs}`
 - `fs.mkdir` `{path, recursive?}` → `{path, created}`
@@ -50,6 +53,12 @@ All tools live under the `nc` server. Names are `category.action`.
 - `git.add` `{paths}` → `{added}`
 - `git.commit` `{message}` → `{sha, message}`
 - `git.log` `{maxCount?}` → `{commits:[{sha, message, author, date}]}`
+- `git.branch` `{name?}` → `{branches:[{name, current}], current}` (list) or
+  `{branch, created}` (create)
+- `git.checkout` `{branch, create?}` → `{branch, created}`
+- `git.push` `{remote?, branch?, setUpstream?}` → `{remote, branch, output}`
+- `git.pull` `{remote?, branch?, ffOnly?}` → `{remote, branch, output}`
+  (ff-only by default — no surprise merge commits)
 
 ### proc.*
 - `proc.spawn` `{cmd, args, cwd?, timeoutMs?, background?}` →
@@ -57,6 +66,10 @@ All tools live under the `nc` server. Names are `category.action`.
   typed (arg array, no shell), journaled, and timeout-bounded. Not a shell: no
   string interpolation, no pipes, no cwd tricks. Exists for compilers, test
   runners, and build tools, which are programs with structured behavior.
+- `proc.list` `{filter?, maxResults?}` → `{processes:[{pid, name, memKb?}], total}`
+  — the OS process table (tasklist/ps)
+- `proc.kill` `{pid, force?}` → `{pid, signal, requested}` — kill by PID
+  (`ERR_PROC_NOT_FOUND` / `ERR_REFUSED`)
 
 ### sys.*
 - `sys.journal` `{lastN?}` → `{events:[...]}` — the agent can read its own trail

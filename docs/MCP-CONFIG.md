@@ -59,10 +59,11 @@ env:     NCTOOLS_MCP_IDLE_MS=1800000
 
 ## What the agent sees
 
-- `tools/list` → **40 typed tools**: `fs.*`, `patch.apply(Many)`,
-  `search.grep/files/semantic`, `git.*`, `proc.spawn/start/status/readOutput/stop`,
-  `test.run`, `pkg.*`, `net.http/probePort`, `env.*`, `sys.snapshot/rollback/
-  listSnapshots/journal/workspace`, `batch.execute`.
+- `tools/list` → **48 typed tools**: `fs.*` (incl. `append`/`copy`),
+  `patch.apply(Many)`, `search.grep/files/semantic`, `git.*` (incl.
+  `branch/checkout/push/pull`), `proc.spawn/start/status/readOutput/stop`
+  (incl. `list`/`kill`), `test.run`, `pkg.*`, `net.http/probePort`, `env.*`,
+  `sys.snapshot/rollback/listSnapshots/journal/workspace`, `batch.execute`.
 - Every result is structured JSON; every failure is
   `{error: {code, message, hint}}` — the agent never scrapes stdout.
 - `sys.journal` lets the agent read its own trail; `sys.snapshot`/`rollback`
