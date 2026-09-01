@@ -2,9 +2,9 @@
 
 This document is the contract for *any* reimplementation of the nc-tools
 kernel — Rust, Go, Python, Java, or a different JS runtime — that claims to
-be a compatible nc-tools implementation. The reference implementation is
-`src/` (JS/Node); a port must pass the conformance suite
-(`tools/conformance.mjs`) without modification.
+be a compatible nc-tools implementation. The reference implementation is the archived JS oracle under
+`oracle/`; the **primary implementation is Rust** (`rust/`). A port must pass
+the conformance suite (`tools/conformance.mjs`) without modification.
 
 ## 1. Scope
 
@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 48 tools; schema in `src/kernel/descriptors.mjs`)
+## 3. Tool surface (must be 48 tools; schema in `oracle/kernel/descriptors.mjs`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.write`, `fs.writeMany`, `fs.append`,
   `fs.copy`, `fs.list`, `fs.stat`, `fs.mkdir`, `fs.delete`, `fs.move`

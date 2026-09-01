@@ -126,10 +126,10 @@ function connect(root) {
 
     // ---- 3. codebase hygiene via the tools themselves (no direct reads) ------
     // cross-check the docs claim against code surfaced through search
-    const todo = await call('search.grep', { pattern: '\\bTODO\\b|\\bFIXME\\b|\\bXXX\\b', path: 'src', maxResults: 50 });
-    report('no TODO/FIXME/XXX in src/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
-    const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'src', maxResults: 50 });
-    report('no placeholder/not-implemented markers in src/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
+    const todo = await call('search.grep', { pattern: '\\bTODO\\b|\\bFIXME\\b|\\bXXX\\b', path: 'oracle', maxResults: 50 });
+    report('no TODO/FIXME/XXX in oracle/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
+    const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'oracle', maxResults: 50 });
+    report('no placeholder/not-implemented markers in oracle/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
     // docs claim check
     const doc = await call('search.grep', { pattern: `${expected.length} tools`, path: 'docs' });
     report(`docs claim "${expected.length} tools" present`, !doc.isError && doc.result.total >= 1 ? 'PASS' : 'INFO', `hits=${doc.result.total}`);

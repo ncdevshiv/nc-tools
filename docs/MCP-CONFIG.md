@@ -130,7 +130,8 @@ Recommended per-agent layout anyway:
 ## Direct binding (no MCP host needed)
 
 ```js
-import { Kernel } from './src/kernel/kernel.mjs';
+// JS oracle kernel (primary kernel is Rust: rust/target/release/nc-tools-mcp.exe)
+import { Kernel } from './oracle/kernel/kernel.mjs';
 const k = new Kernel('F:/nc-tools');
 const out = await k.call('search.grep', { pattern: 'ERR_' });
 console.log(out.result);
@@ -139,7 +140,7 @@ console.log(out.result);
 ## Quick check
 
 ```bash
-node F:/nc-tools/src/mcp/server.mjs F:/nc-tools
+node F:/nc-tools/oracle/mcp/server.mjs F:/nc-tools
 # other terminal:
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' | node F:/nc-tools/src/mcp/server.mjs F:/nc-tools
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' | node F:/nc-tools/oracle/mcp/server.mjs F:/nc-tools
 ```
