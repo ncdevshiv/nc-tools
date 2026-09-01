@@ -97,24 +97,33 @@ impl Kernel {
     }
 
     /// MCP clients expose kernel names with underscores (fs_stat); kernel
-    /// names are dotted (fs.stat). Accept both.
+    /// names are dotted (fs.stat). Several agent loops additionally render
+    /// MCP tools as "<server-name>-<tool>" (Qwen sent `nc-tools-fs.read` for
+    /// server "nc-tools", tool "fs.read") or as `mcp__<server>__<tool>__<name>`.
+    /// Accept every wire form: exact match first, then underscore groups
+    /// normalized to dots (fs_stat, git__status), then — universally — try
+    /// progressively shorter prefixes (any head ending at `-` or `.`) until
+    /// the remainder is a registered tool, so `anything-fs.read` /
+    /// `nc_tools-fs.read` / `Nc_tool-net.http` all resolve while unknown
+    /// tools still fall through to the ERR_UNKNOWN_TOOL path unchanged.
     pub fn resolve_tool(&self, name: &str) -> String {
         if self.tools.contains_key(name) {
             return name.to_string();
         }
-        // Wire aliases: single underscore (fs_stat) and the double-underscore
-        // wire form (git__status, what agent loops emit for providers that
-        // forbid dotted names). Try __ -> . first, then _ -> .
-        let double = name.replace("__", ".");
-        if self.tools.contains_key(&double) {
-            return double;
+        let normalized = name.replace("__", ".").replace('_', ".");
+        if self.tools.contains_key(&normalized) {
+            return normalized;
         }
-        let dotted = name.replace('_', ".");
-        if self.tools.contains_key(&dotted) {
-            dotted
-        } else {
-            name.to_string()
+        let bytes = normalized.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b'-' || bytes[i] == b'.' {
+                let rest = &normalized[i + 1..];
+                if self.tools.contains_key(rest) {
+                    return rest.to_string();
+                }
+            }
         }
+        name.to_string()
     }
 
     pub fn descriptors(&self) -> Vec<Value> {
@@ -189,4 +198,61 @@ fn session_id() -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("{:x}-{:x}", ms, std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Noop;
+    impl Handler for Noop {
+        fn call(&self, _k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
+            Ok(Value::Null)
+        }
+    }
+
+    fn kernel_with_tools() -> Kernel {
+        let dir = std::env::temp_dir().join(format!("nct-kernel-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = Kernel::new(dir).unwrap();
+        for t in ["fs.read", "git.status", "net.http", "search.grep"] {
+            k.register(t, "d", json!({}), Arc::new(Noop));
+        }
+        k
+    }
+
+    // Wire forms observed in real MCP clients: canonical dotted names, the
+    // underscore variants, and a live Qwen session sending
+    // "<server>-<tool>" (nc-tools-fs.read) plus mcp__-style renders.
+    #[test]
+    fn resolve_tool_accepts_observed_wire_forms() {
+        let k = kernel_with_tools();
+        for (sent, expected) in [
+            ("fs.read", "fs.read"),               // canonical
+            ("fs_read", "fs.read"),               // single underscore
+            ("git__status", "git.status"),        // double underscore
+            ("nc-tools-fs.read", "fs.read"),      // Qwen real: <server>-<tool>
+            ("nctools-fs.read", "fs.read"),
+            ("tools-fs.read", "fs.read"),
+            ("tool-fs.read", "fs.read"),
+            ("nc_tools-fs.read", "fs.read"),
+            ("Nc_tool-fs.read", "fs.read"),
+            ("nc-tools.fs.read", "fs.read"),      // <server>.<tool>
+            ("mcp__nc-tools__fs__read", "fs.read"),
+            ("mcp__other__git__status", "git.status"),
+            ("nc-tools-net.http", "net.http"),
+            ("anything-search.grep", "search.grep"),
+        ] {
+            assert_eq!(k.resolve_tool(sent), expected, "wire form failed: {sent}");
+        }
+    }
+
+    #[test]
+    fn resolve_tool_still_rejects_unknown_names() {
+        let k = kernel_with_tools();
+        for sent in ["fs.unknown", "read", "fs.readx", "nc-tool-read", "grep"] {
+            let resolved = k.resolve_tool(sent);
+            assert_eq!(resolved, sent, "unknown name must not be mis-resolved: {sent}");
+        }
+    }
 }
