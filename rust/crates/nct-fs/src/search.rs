@@ -1,11 +1,16 @@
 // search.* tools — line-based regex grep and glob-ish file search, machine-wide.
-// Behavior-parity port of src/kernel/search.mjs.
+// Behavior-parity port of src/kernel/search.mjs, with bounded directory scans:
+// the walk skips generated trees, drops oversized files, and stops on a
+// configurable file/time budget so one grep can never own the server (the
+// journal once recorded a 228s root grep on a tree with a 23 GB sqlite).
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use nct_core::config::Limits;
 use nct_core::errors::ToolError;
 use nct_core::helpers::rel_slash;
 use nct_core::kernel::{parse_args, Handler, Kernel};
@@ -13,8 +18,8 @@ use nct_core::paths::{is_reparse_point, resolve_checked};
 
 use crate::fs_tools::{err_no_path, err_no_path_with_siblings};
 
-pub const GREP_DESC: &str = "Regex search across files. Returns file/line/text matches.";
-pub const FILES_DESC: &str = "Find files by glob pattern (e.g. \"**/*.test.mjs\").";
+pub const GREP_DESC: &str = "Regex search across files. Returns file/line/text matches. Directory scans are bounded: they skip .git/node_modules/.nc-tools/target/dist/build, skip files over 10MB, and stop after 20k files or 10s (limits.grepMaxScan*) — scanTruncated:true in the result means the budget stopped the scan, so matches may be partial. Directly-targeted file paths are always scanned in full.";
+pub const FILES_DESC: &str = "Find files by glob pattern (e.g. \"**/*.test.mjs\"). Directory scans are bounded like search.grep; scanTruncated:true means the scan budget stopped early.";
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +51,53 @@ const TEXT_EXT: &[&str] = &[
     "java", "yml", "yaml", "toml", "sh", "c", "h", "cpp", "hpp", "sql", "env", "gitignore", "log",
 ];
 
+/// Directories never walked by search.*/: dependency and build-artifact trees
+/// are both unboundedly large and never match a code-search intent (the
+/// 228s-grep incident walked a Rust target/ plus node-sized data trees).
+/// Shared by the grep/files walk and the replace/symbols walk.
+pub const SCAN_SKIP: &[&str] = &[".git", "node_modules", ".nc-tools", "target", "dist", "build"];
+
+/// Scan budget for directory walks (grep_max_scan_* limits). Files of
+/// `max_file_bytes` or more are dropped from the walk; the walk stops after
+/// `max_files` files scanned. The wall-clock cap lives in `ScanGuard` so the
+/// deadline spans the whole call — walk AND the read+regex pass.
+#[derive(Clone, Copy)]
+pub struct WalkBudget {
+    pub max_files: usize,
+    pub max_file_bytes: u64,
+    pub max_depth: usize,
+}
+
+impl WalkBudget {
+    pub fn from_limits(l: &Limits) -> Self {
+        WalkBudget {
+            max_files: l.grep_max_scan_files,
+            max_file_bytes: l.grep_max_file_bytes,
+            max_depth: l.walk_depth,
+        }
+    }
+}
+
+/// Wall-clock deadline for one whole grep/files scan (walk + reads). Checked
+/// in the walk loop and in the read loop; a direct, explicitly-targeted file
+/// path is never deadline-truncated by construction (its loop runs once and
+/// the deadline could only expire after the walk that never happened).
+#[derive(Clone, Copy)]
+pub struct ScanGuard {
+    started: Instant,
+    max_ms: u64,
+}
+
+impl ScanGuard {
+    pub fn from_limits(l: &Limits) -> Self {
+        ScanGuard { started: Instant::now(), max_ms: l.grep_max_scan_ms }
+    }
+
+    pub fn expired(&self) -> bool {
+        self.max_ms > 0 && self.started.elapsed().as_millis() >= self.max_ms as u128
+    }
+}
+
 pub struct GrepHandler;
 impl Handler for GrepHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
@@ -58,16 +110,23 @@ impl Handler for GrepHandler {
             return Err(err_no_path_with_siblings(&path_str, &base));
         }
         let max_results = a.maxResults.unwrap_or(k.cfg.limits.grep_max_results as u64) as usize;
+        let budget = WalkBudget::from_limits(&k.cfg.limits);
+        let guard = ScanGuard::from_limits(&k.cfg.limits);
         let mut files: Vec<PathBuf> = Vec::new();
-        if fs::metadata(&base)?.is_dir() {
-            walk(&base, 0, &mut files);
+        let mut scan_truncated = if fs::metadata(&base)?.is_dir() {
+            walk(&base, 0, budget, &guard, &mut files)
         } else {
             files.push(base.clone());
-        }
+            false
+        };
         let mut matches: Vec<Value> = Vec::new();
         let mut total = 0usize;
         let mut truncated = false;
-        for file in &files {
+        'files: for file in &files {
+            if guard.expired() {
+                scan_truncated = true;
+                break;
+            }
             if let Some(glob) = &a.glob {
                 if !glob_match(glob, &rel_slash(&base, file)) {
                     continue;
@@ -84,6 +143,10 @@ impl Handler for GrepHandler {
                 continue;
             }
             for (i, line) in content.split('\n').enumerate() {
+                if (i & 0x3FF) == 0 && guard.expired() {
+                    scan_truncated = true;
+                    break 'files;
+                }
                 if let Ok(true) = re.is_match(line) {
                     total += 1;
                     if matches.len() < max_results {
@@ -98,7 +161,7 @@ impl Handler for GrepHandler {
                 }
             }
         }
-        Ok(json!({ "matches": matches, "total": total, "truncated": truncated }))
+        Ok(json!({ "matches": matches, "total": total, "truncated": truncated, "scanTruncated": scan_truncated }))
     }
 }
 
@@ -111,11 +174,18 @@ impl Handler for FilesHandler {
         if !base.exists() {
             return Err(err_no_path(&path_str));
         }
+        let budget = WalkBudget::from_limits(&k.cfg.limits);
+        let guard = ScanGuard::from_limits(&k.cfg.limits);
         let mut out: Vec<String> = Vec::new();
+        let mut scan_truncated = false;
         if fs::metadata(&base)?.is_dir() {
             let mut files: Vec<PathBuf> = Vec::new();
-            walk(&base, 0, &mut files);
+            scan_truncated = walk(&base, 0, budget, &guard, &mut files);
             for file in &files {
+                if guard.expired() {
+                    scan_truncated = true;
+                    break;
+                }
                 if glob_match(&a.pattern, &rel_slash(&base, file)) {
                     out.push(rel_slash(&k.root, file));
                 }
@@ -129,22 +199,29 @@ impl Handler for FilesHandler {
                 out.push(rel_slash(&k.root, &base));
             }
         }
-        Ok(json!({ "files": out, "total": out.len() }))
+        Ok(json!({ "files": out, "total": out.len(), "scanTruncated": scan_truncated }))
     }
 }
 
-/// Sorted walk with cycle safety: skip .git/node_modules/.nc-tools, never
-/// follow symlinks/junctions, depth-capped (search.mjs walkFiles).
-pub fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if depth > 12 {
-        return;
+/// Sorted walk with cycle safety and a scan budget: skips SCAN_SKIP dirs,
+/// never follows symlinks/junctions, skips files >= max_file_bytes, depth-
+/// capped, and stops early once max_files files were scanned or the guard's
+/// deadline passed. Returns true when the budget cut the scan short —
+/// callers surface that as scanTruncated so partial results are never silent.
+pub fn walk(dir: &Path, depth: usize, budget: WalkBudget, guard: &ScanGuard, out: &mut Vec<PathBuf>) -> bool {
+    if depth > budget.max_depth {
+        return false;
     }
-    let Ok(rd) = fs::read_dir(dir) else { return };
+    let Ok(rd) = fs::read_dir(dir) else { return false };
     let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     entries.sort();
+    let mut scanned = 0usize;
     for full in entries {
+        if guard.expired() {
+            return true;
+        }
         let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        if name == ".git" || name == "node_modules" || name == ".nc-tools" {
+        if SCAN_SKIP.contains(&name.as_str()) {
             continue;
         }
         let Ok(lm) = fs::symlink_metadata(&full) else { continue };
@@ -155,11 +232,21 @@ pub fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
             if is_reparse_point(&full) {
                 continue;
             }
-            walk(&full, depth + 1, out);
+            if walk(&full, depth + 1, budget, guard, out) {
+                return true;
+            }
         } else {
+            scanned += 1;
+            if budget.max_files > 0 && scanned > budget.max_files {
+                return true;
+            }
+            if lm.len() > budget.max_file_bytes {
+                continue;
+            }
             out.push(full);
         }
     }
+    false
 }
 
 fn is_text_file(p: &Path) -> bool {
@@ -212,10 +299,10 @@ pub fn glob_match(glob: &str, s: &str) -> bool {
 
 pub const REPLACE_DESC: &str = "Regex search/replace across files. dryRun=true (default) reports per-file match counts without writing; dryRun=false rewrites files (run sys.snapshot first for rollback). Supports $0-$9 capture backrefs ($$ = literal $). Skips binaries and .git/node_modules/target/dist/build/.nc-tools.";
 
-const REPLACE_SKIP: [&str; 5] = [".git", "node_modules", ".nc-tools", "target", "dist"];
-
-/// Like walk(), but also skips target/dist/build so bulk edits never touch
-/// generated artifacts. Used by search.replace and code.symbols.
+/// Like walk(), but also skips SCAN_SKIP dirs (target/dist/build included)
+/// so bulk edits never touch generated artifacts. Used by search.replace and
+/// code.symbols. Depth-cap is generous: replace/symbols operate on the whole
+/// candidate set, not a bounded scan.
 pub fn walk_files_ext(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     if depth > 32 {
         return Ok(());
@@ -225,7 +312,7 @@ pub fn walk_files_ext(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::
     entries.sort();
     for full in entries {
         let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        if REPLACE_SKIP.contains(&name.as_str()) {
+        if SCAN_SKIP.contains(&name.as_str()) {
             continue;
         }
         let Ok(lm) = fs::symlink_metadata(&full) else { continue };
@@ -393,4 +480,86 @@ fn apply_backrefs(caps: &fancy_regex::Captures, replacement: &str) -> String {
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nct-search-test-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn budget(max_files: usize) -> WalkBudget {
+        WalkBudget { max_files, max_file_bytes: u64::MAX, max_depth: 12 }
+    }
+
+    fn guard() -> ScanGuard {
+        ScanGuard { started: Instant::now(), max_ms: 0 }
+    }
+
+    // Regression: the 228s proxyhub grep walked a Rust target/ plus dist/build
+    // trees. Generated + dependency dirs must never be walked at all.
+    #[test]
+    fn walk_skips_generated_and_dependency_dirs() {
+        let root = temp_root("skip");
+        for (dir, f) in [
+            ("target", "t.rs"),
+            ("dist", "d.js"),
+            ("build", "b.js"),
+            ("node_modules", "n.js"),
+            (".git", "g.js"),
+            (".nc-tools", "j.js"),
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join(f), b"x").unwrap();
+        }
+        fs::write(root.join("keep.ts"), b"x").unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub").join("keep2.ts"), b"x").unwrap();
+
+        let mut out = Vec::new();
+        let truncated = walk(&root, 0, budget(10_000), &guard(), &mut out);
+        assert!(!truncated);
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["keep.ts", "keep2.ts"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walk_stops_at_max_files() {
+        let root = temp_root("budget");
+        for i in 0..30 {
+            fs::write(root.join(format!("f{i:02}.txt")), b"x").unwrap();
+        }
+        let mut out = Vec::new();
+        let truncated = walk(&root, 0, budget(10), &guard(), &mut out);
+        assert!(truncated, "budget stop must report scanTruncated");
+        assert_eq!(out.len(), 10);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walk_skips_oversized_files() {
+        let root = temp_root("size");
+        fs::write(root.join("big.txt"), vec![b'x'; 4096]).unwrap();
+        fs::write(root.join("small.txt"), b"x").unwrap();
+        let mut out = Vec::new();
+        let b = WalkBudget { max_files: 100, max_file_bytes: 1024, max_depth: 12 };
+        let truncated = walk(&root, 0, b, &guard(), &mut out);
+        assert!(!truncated);
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["small.txt"]);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

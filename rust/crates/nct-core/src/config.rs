@@ -55,6 +55,16 @@ pub struct Limits {
     pub walk_depth: usize,
     /// search.grep line snippet cap
     pub grep_line_chars: usize,
+    /// search.grep / search.files: max files scanned before a walk stops early
+    /// (0 = unlimited). Without a budget one grep can own the server for
+    /// minutes on a big tree — the journal recorded a 228s root grep.
+    pub grep_max_scan_files: usize,
+    /// search.grep / search.files: max wall-clock ms for one directory scan
+    /// (0 = no limit; the file cap still applies)
+    pub grep_max_scan_ms: u64,
+    /// search.grep / search.files: while walking a directory, skip files
+    /// larger than this (explicitly-targeted files are always scanned)
+    pub grep_max_file_bytes: u64,
     /// test.run timeout
     pub test_timeout_ms: u64,
     /// max process table rows
@@ -83,6 +93,9 @@ impl Default for Limits {
             list_depth: 8,
             walk_depth: 12,
             grep_line_chars: 400,
+            grep_max_scan_files: 20_000,
+            grep_max_scan_ms: 10_000,
+            grep_max_file_bytes: 10_000_000,
             test_timeout_ms: 300_000,
             proc_list_max: 2000,
         }

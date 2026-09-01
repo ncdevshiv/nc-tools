@@ -1236,7 +1236,7 @@
     },
     {
       "name": "search.files",
-      "description": "Find files by glob pattern (e.g. \"**/*.test.mjs\").",
+      "description": "Find files by glob pattern (e.g. \"**/*.test.mjs\"). Directory scans are bounded like search.grep; scanTruncated:true means the scan budget stopped early.",
       "inputSchema": {
         "type": "object",
         "required": [
@@ -1256,7 +1256,7 @@
     },
     {
       "name": "search.grep",
-      "description": "Regex search across files. Returns file/line/text matches.",
+      "description": "Regex search across files. Returns file/line/text matches. Directory scans are bounded: they skip .git/node_modules/.nc-tools/target/dist/build, skip files over 10MB, and stop after 20k files or 10s (limits.grepMaxScan*) — scanTruncated:true in the result means the budget stopped the scan, so matches may be partial. Directly-targeted file paths are always scanned in full.",
       "inputSchema": {
         "type": "object",
         "required": [

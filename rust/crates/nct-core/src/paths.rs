@@ -84,18 +84,29 @@ fn canonicalize_loose(p: &Path) -> PathBuf {
     }
 }
 
-/// True if abs is a reparse point (symlink or junction on Windows): its
-/// canonical location differs from its textual path (case-folded on Windows).
+/// True if abs is a reparse point (symlink or junction): see the platform
+/// impls. The Windows attribute check is authoritative and cheap; a
+/// canonicalize-vs-textual comparison misfires on 8.3 short names
+/// (NCDEVS~1 → Ncdevshiv) and would wrongly prune every subdirectory under
+/// an aliased path component.
+#[cfg(windows)]
+pub fn is_reparse_point(abs: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    match std::fs::symlink_metadata(abs) {
+        // FILE_ATTRIBUTE_REPARSE_POINT (junctions and symlinks)
+        Ok(m) => m.file_attributes() & 0x400 != 0,
+        Err(_) => false,
+    }
+}
+
+/// Non-Windows port of the canonicalize-vs-textual comparison (symlinks are
+/// already skipped by callers, so only mount/bind aliases land here).
+#[cfg(not(windows))]
 pub fn is_reparse_point(abs: &Path) -> bool {
     match canonicalize(abs) {
         Ok(real) => fold(&real) != fold(&lex_normalize(abs)),
         Err(_) => false,
     }
-}
-
-#[cfg(windows)]
-fn fold(p: &Path) -> String {
-    p.to_string_lossy().to_lowercase()
 }
 
 #[cfg(not(windows))]

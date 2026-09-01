@@ -42,21 +42,54 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+const USAGE: &str = concat!(
+    "usage: nc-tools-mcp [--dump-tools <path>] [workspace-dir]\n",
+    "\n",
+    "options:\n",
+    "  --dump-tools <path>   write the tool descriptor golden JSON and exit\n",
+    "  --help, -h            show this help and exit\n",
+    "  --version, -V         print server name + version and exit\n",
+    "\n",
+    "workspace-dir is the root the tools operate on (default: $NCTOOLS_WORKSPACE,\n",
+    "then the current working directory). MCP stdio protocol on stdin/stdout."
+);
+
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut workspace_arg: Option<String> = None;
     let mut dump_path: Option<std::path::PathBuf> = None;
     let mut i = 0;
     while i < raw.len() {
-        if raw[i] == "--dump-tools" {
-            i += 1;
-            if let Some(p) = raw.get(i) {
-                dump_path = Some(std::path::PathBuf::from(p));
+        match raw[i].as_str() {
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
             }
-            i += 1;
-        } else {
-            workspace_arg = Some(raw[i].clone());
-            i += 1;
+            "--version" | "-V" => {
+                println!("{SERVER_NAME} {SERVER_VERSION}");
+                std::process::exit(0);
+            }
+            "--dump-tools" => {
+                i += 1;
+                match raw.get(i) {
+                    Some(p) => {
+                        dump_path = Some(std::path::PathBuf::from(p));
+                        i += 1;
+                    }
+                    None => {
+                        eprintln!("[nc-tools-mcp] --dump-tools requires an output path\n{USAGE}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            s if s.starts_with('-') => {
+                eprintln!("[nc-tools-mcp] unknown option: {s}\n{USAGE}");
+                std::process::exit(2);
+            }
+            s => {
+                workspace_arg = Some(s.to_string());
+                i += 1;
+            }
         }
     }
     let workspace = match workspace_arg {
@@ -85,6 +118,10 @@ fn main() {
             "toolCount": descriptors.len(),
             "tools": descriptors,
         });
+        if dump.is_dir() {
+            eprintln!("[nc-tools-mcp] --dump-tools target is a directory: {}", dump.display());
+            std::process::exit(1);
+        }
         if let Some(parent) = dump.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
