@@ -207,3 +207,190 @@ pub fn glob_match(glob: &str, s: &str) -> bool {
         Err(_) => false,
     }
 }
+
+// ---- search.replace (phase 2) -------------------------------------------------
+
+pub const REPLACE_DESC: &str = "Regex search/replace across files. dryRun=true (default) reports per-file match counts without writing; dryRun=false rewrites files (run sys.snapshot first for rollback). Supports $0-$9 capture backrefs ($$ = literal $). Skips binaries and .git/node_modules/target/dist/build/.nc-tools.";
+
+const REPLACE_SKIP: [&str; 5] = [".git", "node_modules", ".nc-tools", "target", "dist"];
+
+/// Like walk(), but also skips target/dist/build so bulk edits never touch
+/// generated artifacts. Used by search.replace and code.symbols.
+pub fn walk_files_ext(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if depth > 32 {
+        return Ok(());
+    }
+    let rd = fs::read_dir(dir)?;
+    let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    entries.sort();
+    for full in entries {
+        let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        if REPLACE_SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        let Ok(lm) = fs::symlink_metadata(&full) else { continue };
+        if lm.is_symlink() {
+            continue;
+        }
+        if lm.is_dir() {
+            if is_reparse_point(&full) {
+                continue;
+            }
+            walk_files_ext(&full, depth + 1, out)?;
+        } else {
+            out.push(full);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceArgs {
+    pub pattern: String,
+    pub replacement: String,
+    #[doc = "Root of the search (default: base dir)"]
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub glob: Option<String>,
+    #[doc = "true (default) = report only; false = write the changes"]
+    #[serde(default)]
+    pub dryRun: Option<bool>,
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 2000))]
+    pub maxFiles: Option<u64>,
+}
+
+pub struct ReplaceHandler;
+impl Handler for ReplaceHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: ReplaceArgs = parse_args(args)?;
+        let re = fancy_regex::Regex::new(&a.pattern).map_err(|e| {
+            ToolError::with_hint("ERR_BAD_REGEX", format!("invalid regex: {e}"), json!({ "pattern": a.pattern }))
+        })?;
+        let base = resolve_checked(&k.root, a.path.as_deref().unwrap_or("."))?;
+        if !base.exists() {
+            return Err(err_no_path(a.path.as_deref().unwrap_or(".")));
+        }
+        let dry_run = a.dryRun.unwrap_or(true);
+        let max_files = a.maxFiles.unwrap_or(200) as usize;
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if fs::metadata(&base)?.is_dir() {
+            walk_files_ext(&base, 0, &mut candidates)
+                .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        } else {
+            candidates.push(base.clone());
+        }
+        let mut files: Vec<Value> = Vec::new();
+        let mut total_matches: u64 = 0;
+        let mut truncated = false;
+        for f in candidates {
+            let rel = rel_slash(&base, &f);
+            if let Some(g) = &a.glob {
+                if !glob_match(g, &rel) {
+                    continue;
+                }
+            }
+            let bytes = match fs::read(&f) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if bytes.len() > 10_000_000 {
+                continue; // skip very large files
+            }
+            if bytes[..bytes.len().min(8192)].contains(&0) {
+                continue; // binary
+            }
+            let content = match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let count = re.find_iter(&content).count() as u64;
+            if count == 0 {
+                continue;
+            }
+            if files.len() >= max_files {
+                truncated = true;
+                break;
+            }
+            let replaced = expand_replacement(&re, &content, &a.replacement);
+            let changed = replaced != content;
+            if !dry_run && changed {
+                fs::write(&f, replaced.as_bytes()).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            }
+            total_matches += count;
+            files.push(json!({
+                "path": rel,
+                "matches": count,
+                "bytesBefore": content.len(),
+                "bytesAfter": replaced.len(),
+                "changed": changed,
+            }));
+        }
+        Ok(json!({
+            "dryRun": dry_run,
+            "pattern": a.pattern,
+            "files": files,
+            "totalFiles": files.len(),
+            "totalMatches": total_matches,
+            "truncated": truncated,
+        }))
+    }
+}
+
+/// Replace every non-overlapping match, honoring $0..$9 backrefs ($$ = literal $).
+fn expand_replacement(re: &fancy_regex::Regex, content: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut last = 0usize;
+    for m in re.find_iter(content) {
+        let m = match m {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+        out.push_str(&content[last..m.start()]);
+        let caps = match re.captures(&content[m.start()..m.end()]) {
+            Ok(Some(c)) => c,
+            _ => {
+                out.push_str(&content[m.start()..m.end()]);
+                last = m.end();
+                continue;
+            }
+        };
+        out.push_str(&apply_backrefs(&caps, replacement));
+        last = m.end();
+    }
+    out.push_str(&content[last..]);
+    out
+}
+
+fn apply_backrefs(caps: &fancy_regex::Captures, replacement: &str) -> String {
+    let chars: Vec<char> = replacement.chars().collect();
+    let mut out = String::with_capacity(replacement.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() {
+            let nxt = chars[i + 1];
+            if nxt == '$' {
+                out.push('$');
+                i += 2;
+                continue;
+            }
+            if nxt.is_ascii_digit() {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let g: usize = chars[i + 1..j].iter().collect::<String>().parse().unwrap_or(0);
+                if let Some(cm) = caps.get(g) {
+                    out.push_str(cm.as_str());
+                }
+                i = j;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}

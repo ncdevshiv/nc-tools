@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { conformanceCases } from '../conformance/cases.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const defaultCmd = `node ${join(here, '..', 'oracle', 'mcp', 'server.mjs')}`;
+const defaultBin = process.platform === 'win32' ? 'nc-tools-mcp.exe' : 'nc-tools-mcp';
+const defaultCmd = join(here, '..', 'rust', 'target', 'release', defaultBin);
 const cmdStr = process.env.NCTOOLS_CONFORMANCE_CMD || defaultCmd;
 // split command string (support simple `cmd args` shape)
 const [cmd, ...cmdArgs] = cmdStr.split(' ').filter(Boolean);

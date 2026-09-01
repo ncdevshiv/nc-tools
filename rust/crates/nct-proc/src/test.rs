@@ -11,7 +11,9 @@ use nct_core::kernel::{parse_args, Handler, Kernel};
 use nct_core::paths::resolve_checked;
 
 use super::schema;
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const RUN_DESC: &str = "Run a test suite and get STRUCTURED results: passed/failed counts, failing test names + messages. Frameworks: node (node:test), pytest.";
@@ -51,6 +53,8 @@ pub struct RunArgs {
 pub enum Framework {
     Node,
     Pytest,
+    #[serde(alias = "rust", alias = "cargotest")]
+    Cargo,
 }
 
 pub struct RunHandler;
@@ -60,6 +64,7 @@ impl Handler for RunHandler {
         match a.framework.unwrap_or(Framework::Node) {
             Framework::Node => run_node(k, a.path.as_deref(), a.timeoutMs),
             Framework::Pytest => run_pytest(k, a.path.as_deref(), a.timeoutMs),
+            Framework::Cargo => run_cargo(k, a.path.as_deref(), a.timeoutMs),
         }
     }
 }
@@ -299,6 +304,122 @@ fn parse_junit_xml(xml: &str, framework: &str) -> Result<Value, ToolError> {
         "skipped": skipped,
         "total": total,
         "durationMs": duration_ms.round() as u64,
+        "failures": failures,
+    }))
+}
+
+// ---- cargo (Rust) driver ----------------------------------------------------
+
+fn run_cargo(k: &Kernel, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
+    let dir = match path {
+        Some(p) => {
+            let abs = resolve_checked(&k.root, p)?;
+            if abs.is_file() {
+                abs.parent().map(|d| d.to_path_buf()).unwrap_or(abs.clone())
+            } else {
+                abs
+            }
+        }
+        None => k.root.clone(),
+    };
+    let timeout = timeout_ms.unwrap_or(300_000);
+    let mut c = Command::new("cargo");
+    c.arg("test")
+        .current_dir(&dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .envs(child_env(&k.session_env.snapshot()));
+    let started = std::time::Instant::now();
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ToolError::new("ERR_CMD_NOT_FOUND", "cargo not found on PATH"));
+        }
+        Err(e) => return Err(ToolError::new("ERR_SPAWN", e.to_string())),
+    };
+    let out_buf = Arc::new(Mutex::new(String::new()));
+    let err_buf = Arc::new(Mutex::new(String::new()));
+    let t_out = child.stdout.take().map(|mut s| {
+        let b = out_buf.clone();
+        std::thread::spawn(move || {
+            let mut tmp = String::new();
+            let _ = s.read_to_string(&mut tmp);
+            *b.lock().unwrap() = tmp;
+        })
+    });
+    let t_err = child.stderr.take().map(|mut s| {
+        let b = err_buf.clone();
+        std::thread::spawn(move || {
+            let mut tmp = String::new();
+            let _ = s.read_to_string(&mut tmp);
+            *b.lock().unwrap() = tmp;
+        })
+    });
+    let deadline = started + Duration::from_millis(timeout);
+    let _timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break false,
+        }
+    };
+    if let Some(t) = t_out {
+        let _ = t.join();
+    }
+    if let Some(t) = t_err {
+        let _ = t.join();
+    }
+    let elapsed = started.elapsed().as_millis() as u64;
+    let stdout = out_buf.lock().unwrap().clone();
+    let stderr = err_buf.lock().unwrap().clone();
+    let code = child.try_wait().ok().flatten().and_then(|s| s.code());
+    parse_cargo_output(&stdout, &stderr, code, elapsed)
+}
+
+fn parse_cargo_output(stdout: &str, stderr: &str, code: Option<i32>, duration_ms: u64) -> Result<Value, ToolError> {
+    let mut passed = 0u64;
+    let mut failed = 0u64;
+    let mut ignored = 0u64;
+    let mut failures: Vec<Value> = Vec::new();
+    let test_re = regex::Regex::new(r"test (\S+) \.\.\. (ok|FAILED|ignored)").unwrap();
+    for cap in test_re.captures_iter(stdout) {
+        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        match cap.get(2).map(|m| m.as_str()).unwrap_or("") {
+            "ok" => passed += 1,
+            "FAILED" => {
+                failed += 1;
+                failures.push(json!({ "name": name, "file": Value::Null, "message": "failed" }));
+            }
+            "ignored" => ignored += 1,
+            _ => {}
+        }
+    }
+    let err_re = regex::Regex::new(r"error(?:\[E\d+\])?: ([^\n]*)").unwrap();
+    for e in err_re.find_iter(stderr) {
+        failures.push(json!({ "name": "compile error", "file": Value::Null, "message": e.as_str().to_string() }));
+    }
+    let compile_broke = !failures.is_empty() && code.map(|c| c != 0).unwrap_or(false);
+    if compile_broke && failed == 0 {
+        failed = 1;
+    }
+    let total = passed + failed + ignored;
+    Ok(json!({
+        "framework": "cargo",
+        "passed": passed,
+        "failed": failed,
+        "errors": if compile_broke && failed == 1 && passed == 0 { 1 } else { 0 },
+        "skipped": ignored,
+        "total": total,
+        "durationMs": duration_ms,
         "failures": failures,
     }))
 }

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const SKIP_DIRS = new Set(['node_modules', '.git', '.nc-tools', 'benchmark', 'coverage', 'target']);
+const SKIP_DIRS = new Set(['node_modules', '.git', '.nc-tools', 'benchmark', 'coverage', 'target', 'oracle']);
 const SCAN_EXT = new Set(['.mjs', '.js', '.cjs', '.ts', '.json', '.md', '.rs', '.toml']);
 
 // Patterns that indicate unfinished/fake work in shipped source.
@@ -38,6 +38,8 @@ const ALLOW = [
   /AUDIT\.md$/,                     // audit report — lists what was searched for
   /SPEC\.md$/,                      // spec deliberately documents exclusions
   /README\.md$/,                    // policy statement section
+  /PHASE2\.md$/,                    // phase report — describes the no-stubs policy
+  /RESULTS\.md$/,                   // results report — may reference the policy
 ];
 
 function* walk(dir) {

@@ -621,3 +621,231 @@ impl Handler for MoveHandler {
         Ok(json!({ "from": a.from, "to": a.to, "moved": true }))
     }
 }
+
+// ---- phase 2 additions: fs.readRange / fs.tree -------------------------------
+
+pub const READ_RANGE_DESC: &str = "Read a BYTE RANGE of a file without loading it whole - for huge files and logs. Returns the decoded window, byte offsets (chain via nextByteOffset), the 1-based line number where the window starts, and eof. Use fs.read for line-based paging of normal files.";
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadRangeArgs {
+    #[doc = "Path - relative to the base dir, or absolute (any location allowed)"]
+    pub path: String,
+    #[doc = "Byte offset to start from (0 = file start)"]
+    #[serde(default)]
+    pub byteOffset: Option<u64>,
+    #[doc = "Window size in bytes (default 65536, max 1048576)"]
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 1048576))]
+    pub maxBytes: Option<u64>,
+}
+
+pub struct ReadRangeHandler;
+impl Handler for ReadRangeHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: ReadRangeArgs = parse_args(args)?;
+        let abs = resolve_checked(&k.root, &a.path)?;
+        let meta = fs::metadata(&abs).map_err(|_| err_no_file(&a.path, &abs))?;
+        if meta.is_dir() {
+            return Err(ToolError::with_hint(
+                "ERR_IS_DIRECTORY",
+                format!("{} is a directory; use fs.list", a.path),
+                json!({ "path": a.path }),
+            ));
+        }
+        let total_bytes = meta.len();
+        let offset = a.byteOffset.unwrap_or(0);
+        if offset >= total_bytes && total_bytes > 0 {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!("byteOffset {} is past end of file ({} bytes)", offset, total_bytes),
+                json!({ "byteOffset": offset, "fileSize": total_bytes }),
+            ));
+        }
+        use std::io::{Read, Seek, SeekFrom};
+        let max_bytes = a.maxBytes.unwrap_or(65_536) as usize;
+        let mut f = fs::File::open(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        // 1-based line number where the window starts: count newlines in [0, offset).
+        let mut start_line: u64 = 1;
+        if offset > 0 {
+            f.seek(SeekFrom::Start(0)).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            let mut remaining = offset as usize;
+            let mut buf = [0u8; 65_536];
+            while remaining > 0 {
+                let take = remaining.min(buf.len());
+                let n = f
+                    .read(&mut buf[..take])
+                    .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                if n == 0 {
+                    break;
+                }
+                start_line += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64;
+                remaining -= n;
+            }
+        }
+        f.seek(SeekFrom::Start(offset)).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        let mut window = vec![0u8; max_bytes];
+        let mut filled = 0usize;
+        while filled < max_bytes {
+            let n = f
+                .read(&mut window[filled..])
+                .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        window.truncate(filled);
+        // Trim to a valid UTF-8 boundary so the next window starts clean.
+        let valid = match std::str::from_utf8(&window) {
+            Ok(_) => filled,
+            Err(e) => e.valid_up_to(),
+        };
+        window.truncate(valid);
+        let content = String::from_utf8_lossy(&window).to_string();
+        let window_lines = content.split('\n').count() as u64;
+        let eof = (offset + valid as u64) >= total_bytes;
+        Ok(json!({
+            "path": a.path,
+            "fileSize": total_bytes,
+            "byteOffset": offset,
+            "byteLength": valid,
+            "nextByteOffset": offset + valid as u64,
+            "eof": eof,
+            "startLine": start_line,
+            "lines": window_lines,
+            "content": content,
+        }))
+    }
+}
+
+pub const TREE_DESC: &str = "Render a bounded directory tree in one call: depth-capped, entry-capped, skips .git/node_modules/target/dist/.nc-tools. Returns structured entries (path/type/size/depth) plus an ASCII rendering. Directories sort first.";
+
+const TREE_SKIP: [&str; 5] = [".git", "node_modules", ".nc-tools", "target", "dist"];
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TreeArgs {
+    #[doc = "Path - relative to the base dir, or absolute (any location allowed)"]
+    #[serde(default)]
+    pub path: Option<String>,
+    #[doc = "Max depth (default 4, max 12)"]
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 12))]
+    pub depth: Option<u64>,
+    #[doc = "Max entries (default 500, max 5000)"]
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 5000))]
+    pub maxEntries: Option<u64>,
+}
+
+pub struct TreeHandler;
+impl Handler for TreeHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: TreeArgs = parse_args(args)?;
+        let path_str = a.path.clone().unwrap_or_else(|| ".".to_string());
+        let abs = resolve_checked(&k.root, &path_str)?;
+        if !abs.is_dir() {
+            return Err(ToolError::with_hint(
+                "ERR_NOT_FOUND",
+                format!("not a directory: {}", path_str),
+                json!({ "path": path_str }),
+            ));
+        }
+        let max_depth = a.depth.unwrap_or(4) as usize;
+        let max_entries = a.maxEntries.unwrap_or(500) as usize;
+        let mut entries: Vec<Value> = Vec::new();
+        let mut lines: Vec<String> = Vec::new();
+        let mut truncated = false;
+        tree_walk(
+            &abs, "", "", 0, max_depth, max_entries, &mut entries, &mut lines, &mut truncated,
+        )?;
+        Ok(json!({
+            "path": path_str,
+            "tree": lines.join("\n"),
+            "entries": entries,
+            "total": entries.len(),
+            "truncated": truncated,
+        }))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_walk(
+    dir: &Path,
+    rel_prefix: &str,
+    ascii_prefix: &str,
+    depth: usize,
+    max_depth: usize,
+    max_entries: usize,
+    entries: &mut Vec<Value>,
+    lines: &mut Vec<String>,
+    truncated: &mut bool,
+) -> Result<(), ToolError> {
+    if depth > max_depth {
+        return Ok(());
+    }
+    let mut kids: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    kids.sort();
+    kids.sort_by_key(|p| !p.is_dir()); // dirs first within each level
+    let visible: Vec<PathBuf> = kids
+        .into_iter()
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            !TREE_SKIP.contains(&name.as_str())
+        })
+        .collect();
+    let count = visible.len();
+    for (i, full) in visible.into_iter().enumerate() {
+        if entries.len() >= max_entries {
+            *truncated = true;
+            return Ok(());
+        }
+        let name = full
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let meta = match fs::symlink_metadata(&full) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_symlink() {
+            continue;
+        }
+        let is_dir = meta.is_dir();
+        let rel = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel_prefix, name)
+        };
+        let last = i + 1 == count;
+        let branch = if last { "└── " } else { "├── " };
+        lines.push(format!(
+            "{}{}{}",
+            ascii_prefix,
+            branch,
+            if is_dir { format!("{name}/") } else { name.clone() }
+        ));
+        entries.push(json!({
+            "path": rel,
+            "type": if is_dir { "dir" } else { "file" },
+            "size": if is_dir { Value::Null } else { json!(meta.len()) },
+            "depth": depth,
+        }));
+        if is_dir {
+            let child_ascii = format!("{}{}", ascii_prefix, if last { "    " } else { "│   " });
+            tree_walk(
+                &full, &rel, &child_ascii, depth + 1, max_depth, max_entries, entries, lines, truncated,
+            )?;
+        }
+    }
+    Ok(())
+}
+

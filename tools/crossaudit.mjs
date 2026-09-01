@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = join(here, '..');
-const serverPath = join(REPO, 'oracle', 'mcp', 'server.mjs');
+const binName = process.platform === 'win32' ? 'nc-tools-mcp.exe' : 'nc-tools-mcp';
+const serverPath = join(REPO, 'rust', 'target', 'release', binName);
 const workspace = process.argv[2] || REPO;
 
 const findings = []; // {check, status: 'PASS'|'FAIL'|'INFO', evidence}
@@ -21,7 +22,7 @@ function report(check, status, evidence) {
 }
 
 function connect(root) {
-  const child = spawn(process.execPath, [serverPath, root], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(serverPath, [root], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stderr.on('data', () => {});
   let id = 0;
   const pending = new Map();
@@ -63,7 +64,7 @@ function connect(root) {
 
     const list = await client.rpc('tools/list', {});
     const tools = list.result.tools;
-    const expected = ['batch.execute','env.get','env.list','env.set','fs.append','fs.copy','fs.delete','fs.list','fs.mkdir','fs.move','fs.read','fs.readMany','fs.stat','fs.write','fs.writeMany','git.add','git.branch','git.checkout','git.commit','git.diff','git.log','git.pull','git.push','git.status','net.http','net.probePort','patch.apply','patch.applyMany','pkg.add','pkg.list','pkg.runScript','pkg.scripts','proc.kill','proc.list','proc.readOutput','proc.spawn','proc.start','proc.status','proc.stop','search.files','search.grep','search.semantic','sys.journal','sys.listSnapshots','sys.rollback','sys.snapshot','sys.workspace','test.run'];
+    const expected = ['batch.execute','code.symbols','env.get','env.list','env.set','fs.append','fs.copy','fs.delete','fs.list','fs.mkdir','fs.move','fs.read','fs.readMany','fs.readRange','fs.stat','fs.tree','fs.write','fs.writeMany','git.add','git.blame','git.branch','git.checkout','git.commit','git.diff','git.log','git.pull','git.push','git.status','net.http','net.probePort','patch.apply','patch.applyMany','pkg.add','pkg.list','pkg.runScript','pkg.scripts','proc.kill','proc.list','proc.readOutput','proc.runScript','proc.spawn','proc.start','proc.status','proc.stop','proc.watch','search.files','search.grep','search.replace','search.semantic','sys.doctor','sys.journal','sys.listSnapshots','sys.rollback','sys.snapshot','sys.workspace','test.run','text.diff'];
     report('tool count matches expected list', tools.length === expected.length ? 'PASS' : 'FAIL', `expected ${expected.length}, got ${tools.length}`);
     const noSchemas = tools.filter((t) => !t.inputSchema || t.inputSchema.type !== 'object' || !t.description);
     report('all tools have schema + description', noSchemas.length === 0 ? 'PASS' : 'FAIL', noSchemas.map((t) => t.name).join(','));
@@ -126,10 +127,10 @@ function connect(root) {
 
     // ---- 3. codebase hygiene via the tools themselves (no direct reads) ------
     // cross-check the docs claim against code surfaced through search
-    const todo = await call('search.grep', { pattern: '\\bTODO\\b|\\bFIXME\\b|\\bXXX\\b', path: 'oracle', maxResults: 50 });
-    report('no TODO/FIXME/XXX in oracle/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
-    const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'oracle', maxResults: 50 });
-    report('no placeholder/not-implemented markers in oracle/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
+    const todo = await call('search.grep', { pattern: '\\bTODO\\b|\\bFIXME\\b|\\bXXX\\b', path: 'rust/crates', maxResults: 50 });
+    report('no TODO/FIXME/XXX in rust/crates/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
+    const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'rust/crates', maxResults: 50 });
+    report('no placeholder/not-implemented markers in rust/crates/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
     // docs claim check
     const doc = await call('search.grep', { pattern: `${expected.length} tools`, path: 'docs' });
     report(`docs claim "${expected.length} tools" present`, !doc.isError && doc.result.total >= 1 ? 'PASS' : 'INFO', `hits=${doc.result.total}`);

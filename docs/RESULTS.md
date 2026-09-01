@@ -515,3 +515,19 @@ the benchmark roadmap, not a fake win.
   received mid-run (e.g. a `PATCH_NO_MATCH` with nearest-line hints) and
   recovered from on the next step — the recovery behavior the journal makes
   measurable.
+
+## Phase 2 — Rust-only live system
+
+- The JS oracle is now a frozen archive (`oracle/`); the live server is the
+  Rust binary (`rust/target/release/nc-tools-mcp`).
+- `conformance/golden/tools.json` is regenerated from the Rust binary via
+  `node tools/golden.mjs` → **57 tools** (`generatedFrom: rust/nct-mcp`).
+- Ten new fully-real tools landed: `fs.readRange`, `fs.tree`, `search.replace`,
+  `code.symbols`, `text.diff`, `proc.runScript`, `proc.watch`, `git.blame`,
+  `sys.doctor`, and a `cargo` driver in `test.run`.
+- Verified: `cargo check --workspace` clean, `cargo test --workspace --lib`
+  green, golden parity test PASS, and live MCP smoke tests for each new family.
+- Roadmap: port `conformance/cases.mjs` + `tools/crossaudit.mjs` + `audit.mjs`
+  to the Rust-primary layout, port `tests/` to drive the Rust binary, and run
+  the real-world benchmark (see `docs/PHASE2.md`).
+

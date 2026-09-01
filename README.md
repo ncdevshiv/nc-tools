@@ -19,9 +19,9 @@ implementation against it.
 
 | Path | What it is |
 |---|---|
-| `rust/` | **Primary implementation**: 8 crates; `cargo build --release -p nct-mcp` → single static `nc-tools-mcp` binary, same 48-tool protocol |
+| `rust/` | **Primary implementation**: 8 crates; `cargo build --release -p nct-mcp` → single static `nc-tools-mcp` binary, same 57-tool protocol |
 | `oracle/` | JS reference implementation, archived: kernel, MCP stdio server, agent loop. Frozen oracle for conformance; runs via `node oracle/mcp/server.mjs` |
-| `conformance/golden/` | Frozen 48-tool descriptor export (`tools/golden.mjs` regenerates; changes must be deliberate) |
+| `conformance/golden/` | Frozen 57-tool descriptor export (`tools/golden.mjs` regenerates; changes must be deliberate) |
 | `benchmark/` | Harness, task suite, verifier, and results for terminal-free runs |
 | `tools/audit.mjs` | Repository audit: scans for stubs/TODOs/mocks/fakes/placeholders (JS **and** Rust source) |
 

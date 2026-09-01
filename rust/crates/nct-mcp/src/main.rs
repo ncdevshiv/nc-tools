@@ -4,7 +4,8 @@
 // failures, idle auto-exit (NCTOOLS_MCP_IDLE_MS) so dormant agents free the
 // process until the next call.
 use std::io::{BufRead, Write};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nct_mcp::{build_kernel, SERVER_NAME, SERVER_VERSION};
 use serde_json::{json, Value};
@@ -33,11 +34,33 @@ fn call_envelope(out: &nct_core::CallOutcome) -> Value {
     })
 }
 
+/// Current wall-clock time in milliseconds since the epoch (for the idle timer).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let arg_root = args.next();
-    let workspace = match arg_root {
-        Some(r) if !r.is_empty() => std::path::PathBuf::from(&r),
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut workspace_arg: Option<String> = None;
+    let mut dump_path: Option<std::path::PathBuf> = None;
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == "--dump-tools" {
+            i += 1;
+            if let Some(p) = raw.get(i) {
+                dump_path = Some(std::path::PathBuf::from(p));
+            }
+            i += 1;
+        } else {
+            workspace_arg = Some(raw[i].clone());
+            i += 1;
+        }
+    }
+    let workspace = match workspace_arg {
+        Some(r) if !r.is_empty() => std::path::PathBuf::from(r),
         _ => match std::env::var("NCTOOLS_WORKSPACE") {
             Ok(w) if !w.is_empty() => std::path::PathBuf::from(w),
             _ => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -55,6 +78,22 @@ fn main() {
 
     // idle auto-exit: 0 (or garbage) disables the timer — a misconfigured env
     // must never kill the process (server.mjs idleMsFromEnv).
+    if let Some(dump) = dump_path {
+        let descriptors = kernel.descriptors();
+        let golden = json!({
+            "generatedFrom": "rust/nct-mcp (build_kernel)",
+            "toolCount": descriptors.len(),
+            "tools": descriptors,
+        });
+        if let Some(parent) = dump.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&dump, serde_json::to_string_pretty(&golden).unwrap_or_default() + "\n")
+            .expect("write golden spec");
+        eprintln!("[nc-tools-mcp] golden spec written: {} ({} tools)", dump.display(), descriptors.len());
+        std::process::exit(0);
+    }
+
     let idle_ms = std::env::var("NCTOOLS_MCP_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -62,15 +101,33 @@ fn main() {
         .unwrap_or(30 * 60 * 1000);
     eprintln!("[nc-tools-mcp] serving workspace: {}", workspace.display());
 
+    // Idle auto-exit: a background watcher exits the process after `idle_ms`
+    // of no requests, so a dormant agent frees the process even while the main
+    // loop is blocked on stdin (server.mjs idleMsFromEnv semantics). idle_ms of
+    // 0/garbage was already filtered above to the 30-min default, so a mis-
+    // configured env never kills the process.
+    let last_activity = std::sync::Arc::new(AtomicU64::new(now_ms()));
+    {
+        let la = std::sync::Arc::clone(&last_activity);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(200));
+            if now_ms().saturating_sub(la.load(Ordering::Relaxed)) >= idle_ms {
+                eprintln!("[nc-tools-mcp] idle {idle_ms}ms — exiting; clients restart on demand");
+                std::process::exit(0);
+            }
+        });
+    }
+
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let last_activity = Instant::now();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+        // a request arrived: mark activity so the idle watcher resets its clock
+        last_activity.store(now_ms(), Ordering::Relaxed);
         let msg: Value = match serde_json::from_str(trimmed) {
             Ok(m) => m,
             Err(_) => {
@@ -105,9 +162,5 @@ fn main() {
         };
         writeln!(stdout, "{resp}").ok();
         let _ = stdout.flush();
-        if last_activity.elapsed() > Duration::from_millis(idle_ms) {
-            eprintln!("[nc-tools-mcp] idle {idle_ms}ms — exiting; clients restart on demand");
-            std::process::exit(0);
-        }
     }
 }

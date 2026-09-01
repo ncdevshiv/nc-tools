@@ -8,16 +8,17 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
+import { SERVER_BIN } from './driver.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const serverPath = join(here, '..', 'oracle', 'mcp', 'server.mjs');
+const serverPath = SERVER_BIN;
 
 let root;
 let child;
 let pendingId = 0;
 
 function startServer() {
-  child = spawn(process.execPath, [serverPath, root], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child = spawn(serverPath, [root], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stderr.on('data', () => {}); // startup banner
 }
 
@@ -56,7 +57,7 @@ test('MCP tools/list returns the full kernel tool surface', async () => {
   await rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
   const resp = await rpc('tools/list', {});
   const names = resp.result.tools.map((t) => t.name);
-  assert.equal(names.length, 48);
+  assert.equal(names.length, 57);
   assert.ok(names.includes('patch.apply'));
   assert.ok(names.includes('proc.spawn'));
   assert.ok(names.includes('sys.journal'));

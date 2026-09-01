@@ -26,22 +26,25 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 48 tools; schema in `oracle/kernel/descriptors.mjs`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 57 tools; schema in the Rust kernel `rust/`, frozen export at `conformance/golden/tools.json`)
 
-- `fs.read`, `fs.readMany`, `fs.write`, `fs.writeMany`, `fs.append`,
-  `fs.copy`, `fs.list`, `fs.stat`, `fs.mkdir`, `fs.delete`, `fs.move`
+- `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
+  `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
+  `fs.delete`, `fs.move`
 - `patch.apply`, `patch.applyMany`
-- `search.grep`, `search.files`, `search.semantic`
-- `git.status`, `git.diff`, `git.add`, `git.commit`, `git.log`,
+- `search.grep`, `search.files`, `search.replace`, `search.semantic`
+- `code.symbols` (Rust/JS/TS/TSX/JSX/Python symbols)
+- `text.diff` (minimal unified diff)
+- `git.status`, `git.diff`, `git.add`, `git.blame`, `git.commit`, `git.log`,
   `git.branch`, `git.checkout`, `git.push`, `git.pull`
 - `proc.spawn`, `proc.start`, `proc.status`, `proc.readOutput`, `proc.stop`,
-  `proc.list`, `proc.kill`
+  `proc.list`, `proc.kill`, `proc.runScript`, `proc.watch`
 - `test.run` (frameworks: `node`, `pytest`)
 - `pkg.add`, `pkg.list`, `pkg.scripts`, `pkg.runScript`
 - `net.http`, `net.probePort`
 - `env.get`, `env.set`, `env.list`
 - `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.journal`,
-  `sys.workspace`
+  `sys.workspace`, `sys.doctor`
 - `batch.execute`
 
 Behavioral invariants every implementation MUST honor:

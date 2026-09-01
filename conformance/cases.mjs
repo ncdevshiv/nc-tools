@@ -15,11 +15,11 @@ export const conformanceCases = [
     { type: 'mcp', method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'conformance', version: '1' } },
       expect: (res) => res.result.serverInfo.name === 'nc-tools' && res.result.protocolVersion === '2024-11-05' },
   ]),
-  caseTemplate('tool surface: exactly 48 tools with schemas', [
+  caseTemplate('tool surface: exactly 57 tools with schemas', [
     { type: 'mcp', method: 'tools/list', params: {},
       expect: (res) => {
         const tools = res.result.tools;
-        if (tools.length !== 48) throw new Error(`expected 48 tools, got ${tools.length}`);
+        if (tools.length !== 57) throw new Error(`expected 57 tools, got ${tools.length}`);
         for (const t of tools) {
           if (!t.inputSchema || t.inputSchema.type !== 'object') throw new Error(`${t.name} missing object inputSchema`);
           if (!t.description) throw new Error(`${t.name} missing description`);
@@ -200,6 +200,88 @@ export const conformanceCases = [
       expect: (r) => {
         const res = JSON.parse(r.result.content[0].text);
         return !res.error && typeof res.root === 'string' && res.root.length > 0;
+      } },
+  ]),
+  caseTemplate('fs.readRange windowed byte read', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'rr.txt', content: '0123456789\n' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.readRange', arguments: { path: 'rr.txt', byteOffset: 2, maxBytes: 4 } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return res.content === '2345' && res.byteOffset === 2 && res.byteLength === 4;
+      } },
+  ]),
+  caseTemplate('fs.tree returns structured entries', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.mkdir', arguments: { path: 'td/sub' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'td/a.txt', content: 'x' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.tree', arguments: { path: 'td' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return Array.isArray(res.entries) && res.entries.some((e) => e.path === 'a.txt');
+      } },
+  ]),
+  caseTemplate('code.symbols extracts named symbols', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'c.ts', content: 'class Foo {}\nfunction bar() {}\n' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'code.symbols', arguments: { path: 'c.ts' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return Array.isArray(res.symbols) && res.symbols.some((s) => s.name === 'Foo') && res.symbols.some((s) => s.name === 'bar');
+      } },
+  ]),
+  caseTemplate('text.diff produces unified hunk', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'd.old.txt', content: 'a\nb\nc\n' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'd.new.txt', content: 'a\nCHANGED\nc\n' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'text.diff', arguments: { path: 'd.old.txt', path2: 'd.new.txt' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return res.diff.includes('@@') && /-b/.test(res.diff) && /\+CHANGED/.test(res.diff);
+      } },
+  ]),
+  caseTemplate('search.replace dry-run reports matches only', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 's.js', content: 'const needle = 1;\nconst needle = 2;\n' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'search.replace', arguments: { pattern: 'needle', replacement: 'pin', path: 's.js' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return res.dryRun === true && res.totalMatches === 2 && res.files[0].changed === true;
+      } },
+  ]),
+  caseTemplate('proc.runScript executes inline source', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.runScript', arguments: { language: 'js', source: 'console.log("runscript-ok")' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return res.exitCode === 0 && res.stdout.includes('runscript-ok');
+      } },
+  ]),
+  caseTemplate('git.blame annotates every line', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.spawn', arguments: { cmd: 'git', args: ['init'] } },
+      expect: (r) => JSON.parse(r.result.content[0].text).exitCode === 0 },
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.spawn', arguments: { cmd: 'git', args: ['config', 'user.email', 'conform@nc-tools.local'] } },
+      expect: (r) => JSON.parse(r.result.content[0].text).exitCode === 0 },
+    { type: 'mcp', method: 'tools/call', params: { name: 'proc.spawn', arguments: { cmd: 'git', args: ['config', 'user.name', 'conformance'] } },
+      expect: (r) => JSON.parse(r.result.content[0].text).exitCode === 0 },
+    { type: 'mcp', method: 'tools/call', params: { name: 'fs.write', arguments: { path: 'blame.txt', content: 'one\ntwo\n' } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'git.add', arguments: { paths: ['blame.txt'] } },
+      expect: (r) => !r.result.isError },
+    { type: 'mcp', method: 'tools/call', params: { name: 'git.commit', arguments: { message: 'blame commit' } },
+      expect: (r) => !r.result.isError && typeof JSON.parse(r.result.content[0].text).sha === 'string' },
+    { type: 'mcp', method: 'tools/call', params: { name: 'git.blame', arguments: { path: 'blame.txt' } },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return Array.isArray(res.lines) && res.lines.length === 2 && res.lines[0].commit;
+      } },
+  ]),
+  caseTemplate('sys.doctor reports kernel inventory', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'sys.doctor', arguments: {} },
+      expect: (r) => {
+        const res = JSON.parse(r.result.content[0].text);
+        return typeof res.tools?.count === 'number' && res.tools.count === 57;
       } },
   ]),
 ];

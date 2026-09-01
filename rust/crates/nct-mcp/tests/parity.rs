@@ -1,7 +1,8 @@
 // Golden parity test: the Rust kernel's tool surface must structurally match
-// conformance/golden/tools.json — the frozen descriptor export of the JS
-// oracle (48 tools, same names, same descriptions, same input schemas).
-// A surface change without a deliberate golden update fails here.
+// conformance/golden/tools.json. Phase 2 regenerates that golden from the RUST
+// binary (the JS oracle is archived under oracle/), so the Rust kernel is the
+// source of truth — this test freezes the 57-tool surface and fails on any
+// un-committed surface change until `node tools/golden.mjs` is re-run.
 use serde_json::Value;
 
 fn golden_path() -> std::path::PathBuf {

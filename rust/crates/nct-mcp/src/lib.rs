@@ -6,6 +6,9 @@ use nct_core::{Kernel, ToolError};
 pub mod sysbatch;
 pub use sysbatch::register_sys_batch;
 
+pub mod doctor;
+pub use doctor::register_sys_doctor;
+
 pub const SERVER_NAME: &str = "nc-tools";
 pub const SERVER_VERSION: &str = "0.2.0";
 
@@ -26,5 +29,6 @@ pub fn build_kernel(workspace: std::path::PathBuf) -> Result<Kernel, ToolError> 
     #[cfg(feature = "semantic")]
     nct_semantic::register(&mut kernel);
     register_sys_batch(&mut kernel);
+    register_sys_doctor(&mut kernel);
     Ok(kernel)
 }

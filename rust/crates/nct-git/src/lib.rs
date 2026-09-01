@@ -2,6 +2,7 @@
 // Behavior-parity port of src/kernel/git.mjs: git is an external program; the
 // kernel's job is to turn its output into data. Each tool accepts `repo`
 // (default: the base dir) so remote agents can work on ANY repository.
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -23,6 +24,7 @@ pub const BRANCH_DESC: &str = "List branches (no args) or create one ({name}).";
 pub const CHECKOUT_DESC: &str = "Switch branches (or create with create=true).";
 pub const PUSH_DESC: &str = "Push to a remote (optionally sets upstream).";
 pub const PULL_DESC: &str = "Pull from a remote (ff-only by default — no surprise merge commits).";
+pub const BLAME_DESC: &str = "Per-line blame for a file: commit sha, author, timestamp, content, line number. Uses git blame --line-porcelain.";
 
 
 pub fn register(k: &mut Kernel) {
@@ -35,6 +37,7 @@ pub fn register(k: &mut Kernel) {
     k.register("git.checkout", CHECKOUT_DESC, nct_core::schema::schema_for::<CheckoutArgs>(), Arc::new(CheckoutHandler));
     k.register("git.push", PUSH_DESC, nct_core::schema::schema_for::<PushArgs>(), Arc::new(PushHandler));
     k.register("git.pull", PULL_DESC, nct_core::schema::schema_for::<PullArgs>(), Arc::new(PullHandler));
+    k.register("git.blame", BLAME_DESC, nct_core::schema::schema_for::<BlameArgs>(), Arc::new(BlameHandler));
 }
 
 use std::sync::Arc;
@@ -443,6 +446,74 @@ impl Handler for PullHandler {
             "remote": remote,
             "branch": a.branch,
             "output": output,
+        }))
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BlameArgs {
+    #[doc = "File to blame — relative to the repo base dir, or absolute"]
+    pub path: String,
+    #[doc = "Repo directory (default: base dir)"]
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub lineStart: Option<u64>,
+    #[serde(default)]
+    pub lineEnd: Option<u64>,
+}
+
+pub struct BlameHandler;
+impl Handler for BlameHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: BlameArgs = parse_args(args)?;
+        let r = in_repo(k, a.repo.as_deref())?;
+        let abs = resolve_checked(&k.root, &a.path)?;
+        if !abs.exists() {
+            return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such file: {}", a.path), json!({ "path": a.path })));
+        }
+        let rel = nct_core::helpers::rel_slash(&r, &abs);
+        let mut gargs: Vec<String> = vec!["blame".to_string(), "--line-porcelain".to_string()];
+        if let Some(s) = a.lineStart {
+            let e = a.lineEnd.unwrap_or(s);
+            gargs.push(format!("-L{s},{e}"));
+        }
+        gargs.push(rel.clone());
+        let raw = git(&r, &gargs.iter().map(|s| s.as_str()).collect::<Vec<_>>(), k)?;
+        let mut lines: Vec<Value> = Vec::new();
+        let mut cur: HashMap<String, String> = HashMap::new();
+        for l in raw.lines() {
+            if l.is_empty() {
+                continue;
+            }
+            if let Some(content) = l.strip_prefix('\t') {
+                lines.push(json!({
+                    "line": cur.get("final").and_then(|s| s.parse::<u64>().ok()),
+                    "commit": cur.get("commit"),
+                    "author": cur.get("author"),
+                    "time": cur.get("time").and_then(|s| s.parse::<u64>().ok()),
+                    "content": content,
+                }));
+                cur.clear();
+            } else if l.len() >= 40 && l.chars().take(40).all(|c| c.is_ascii_hexdigit()) {
+                let mut it = l.split_whitespace();
+                cur.insert("commit".to_string(), it.next().unwrap_or("").to_string());
+                it.next();
+                if let Some(f) = it.next() {
+                    cur.insert("final".to_string(), f.to_string());
+                }
+            } else if let Some(rest) = l.strip_prefix("author ") {
+                cur.insert("author".to_string(), rest.trim().to_string());
+            } else if let Some(rest) = l.strip_prefix("author-time ") {
+                cur.insert("time".to_string(), rest.trim().to_string());
+            }
+        }
+        Ok(json!({
+            "repo": r.display().to_string(),
+            "path": rel,
+            "lines": lines,
+            "total": lines.len(),
         }))
     }
 }

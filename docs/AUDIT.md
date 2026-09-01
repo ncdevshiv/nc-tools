@@ -117,9 +117,9 @@ audit-suite clean.**
 
 ## Wave 10 — terminal-control gap fill
 
-48 tools (was 40). New: `git.branch/checkout/push/pull`, `proc.list`
+57 tools (was 48). New: `git.branch/checkout/push/pull`, `proc.list`
 (OS process table)/`proc.kill` (kill by PID), `fs.copy`, `fs.append`.
 Cross-audit now derives tool-count assertions from its expected list instead
-of hardcoding 40; conformance and MCP tests assert 48. Also fixed: managed
+of hardcoding 40; conformance and MCP tests assert 57. Also fixed: managed
 `proc.start` processes left their `maxDurationMs` timer armed after exit,
 holding the event loop (and process) alive for the full duration.

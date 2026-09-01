@@ -1,20 +1,24 @@
 // nc-tools fs family crate: fs.*, patch.*, search.* and workspace snapshots.
 // Behavior-parity port of src/kernel/{fs,patch,search,snapshot}.mjs — graded
 // by conformance/golden/tools.json + tools/conformance.mjs.
+pub mod diff;
 pub mod fs_tools;
 pub mod patch;
 pub mod search;
 pub mod snapshot;
+pub mod symbols;
 
 use std::sync::Arc;
 
 use nct_core::kernel::Kernel;
 use nct_core::schema::schema_for;
 
+use crate::diff::*;
 use crate::fs_tools::*;
 use crate::patch::*;
 use crate::search::*;
 use crate::snapshot::*;
+use crate::symbols::*;
 
 pub fn register(k: &mut Kernel) {
     // fs.*
@@ -39,4 +43,10 @@ pub fn register(k: &mut Kernel) {
     k.register("sys.snapshot", SNAPSHOT_DESC, schema_for::<SnapshotArgs>(), Arc::new(SnapshotHandler));
     k.register("sys.rollback", ROLLBACK_DESC, schema_for::<RollbackArgs>(), Arc::new(RollbackHandler));
     k.register("sys.listSnapshots", LIST_SNAPSHOTS_DESC, schema_for::<EmptyArgs>(), Arc::new(ListSnapshotsHandler));
+    // phase 2 additions
+    k.register("fs.readRange", READ_RANGE_DESC, schema_for::<ReadRangeArgs>(), Arc::new(ReadRangeHandler));
+    k.register("fs.tree", TREE_DESC, schema_for::<TreeArgs>(), Arc::new(TreeHandler));
+    k.register("search.replace", REPLACE_DESC, schema_for::<ReplaceArgs>(), Arc::new(ReplaceHandler));
+    k.register("code.symbols", SYMBOLS_DESC, schema_for::<SymbolsArgs>(), Arc::new(SymbolsHandler));
+    k.register("text.diff", DIFF_DESC, schema_for::<DiffArgs>(), Arc::new(DiffHandler));
 }

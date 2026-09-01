@@ -10,9 +10,10 @@ import { join, dirname, basename } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { SERVER_BIN } from './driver.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const serverPath = join(here, '..', 'oracle', 'mcp', 'server.mjs');
+const serverPath = SERVER_BIN;
 const isWin = process.platform === 'win32';
 
 let root;
@@ -138,7 +139,7 @@ test('search.semantic accepts paths outside the base dir; missing paths fail fas
 
 test('MCP server with NCTOOLS_MCP_IDLE_MS=0 stays alive across requests', async () => {
   const root0 = mkdtempSync(join(tmpdir(), 'nctools-idle-'));
-  const child = spawn(process.execPath, [serverPath, root0], {
+  const child = spawn(serverPath, [root0], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, NCTOOLS_MCP_IDLE_MS: '0' },
   });
@@ -168,7 +169,7 @@ test('MCP server with NCTOOLS_MCP_IDLE_MS=0 stays alive across requests', async 
     // wait well past any hypothetical 0ms idle timer, then make a second call
     await new Promise((r) => setTimeout(r, 1500));
     const second = await rpc('tools/list', {});
-    assert.ok(second.result.tools.length >= 40);
+    assert.ok(second.result.tools.length >= 57);
   } finally {
     child.kill();
     rmSync(root0, { recursive: true, force: true });
