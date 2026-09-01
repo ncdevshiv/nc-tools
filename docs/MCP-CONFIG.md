@@ -12,6 +12,12 @@ Cursor-style MCP hosts, custom loops — can mount it with the config below.
 
 ## Ready-to-paste config
 
+**Stable install path (recommended over the target-dir path):** after
+`npm run build:rust`, run `npm run install:bin` → copies the release binary to
+`~/.local/bin/nc-tools-mcp.exe` (already on PATH) and verifies the installed
+copy serves the full tool surface. That path survives `cargo clean`, so
+client configs can point at it permanently. The configs below use it.
+
 ### ZCode (`config.json` → `mcp.servers`)
 
 ```json
@@ -20,7 +26,7 @@ Cursor-style MCP hosts, custom loops — can mount it with the config below.
     "servers": {
       "nc-tools": {
         "type": "stdio",
-        "command": "F:/nc-tools/rust/target/release/nc-tools-mcp.exe",
+        "command": "C:/Users/Ncdevshiv/.local/bin/nc-tools-mcp.exe",
         "args": ["F:/nc-tools"],
         "env": {
           "NCTOOLS_MCP_IDLE_MS": "1800000"
@@ -72,10 +78,15 @@ Cursor-style MCP hosts, custom loops — can mount it with the config below.
 - Qwen Code selects the stdio transport by the presence of `command` (no
   `type` field needed); the last `args` element is the workspace root the
   kernel anchors (the server reads `argv[1] || NCTOOLS_WORKSPACE || cwd`).
-- The old `npx --no-install nc-tools-mcp` form still works through the
-  archived JS oracle (`bin.nc-tools-mcp` → `oracle/mcp/server.mjs`), but the
-  static binary is preferred: it removes the Node/PATH dependency class
-  entirely.
+- **Qwen Edit only accepts `npx`/`uvx` as the command.** The npx form still
+  works and now routes to the STATIC kernel: `bin.nc-tools-mcp` →
+  `bin/nc-tools-mcp.mjs`, which execs the release binary (falling back to the
+  archived JS oracle only on a fresh checkout with no cargo build). For Qwen
+  specifically, run `bun add --global F:/nc-tools` with the app's BUNDLED bun
+  (`.../Qwen/resources/bun/bun.exe`) so `bun x nc-tools-mcp` resolves; the
+  app-store config `bun.exe x -y --no-install nc-tools-mcp <root>` is the
+  verified form. If the bun global lockfile develops a duplicate `nc-tools`
+  key (EBUSY on reinstall), dedupe `~/.bun/install/global/bun.lock` and retry.
 - Per-project pinning: drop a `.qwen/settings.json` in a repo with its own
   `<workspaceRoot>` in `args`.
 
@@ -89,11 +100,12 @@ env:     NCTOOLS_MCP_IDLE_MS=1800000
 
 ## What the agent sees
 
-- `tools/list` → **48 typed tools**: `fs.*` (incl. `append`/`copy`),
-  `patch.apply(Many)`, `search.grep/files/semantic`, `git.*` (incl.
-  `branch/checkout/push/pull`), `proc.spawn/start/status/readOutput/stop`
+- `tools/list` → **57 typed tools**: `fs.*` (incl. `append`/`copy`/`readRange`/`tree`),
+  `patch.apply(Many)`, `search.grep/files/replace/semantic`, `code.symbols`,
+  `text.diff`, `git.*` (incl. `branch/checkout/push/pull/blame`),
+  `proc.spawn/start/status/readOutput/stop/runScript/watch`
   (incl. `list`/`kill`), `test.run`, `pkg.*`, `net.http/probePort`, `env.*`,
-  `sys.snapshot/rollback/listSnapshots/journal/workspace`, `batch.execute`.
+  `sys.snapshot/rollback/listSnapshots/journal/workspace/doctor`, `batch.execute`.
 - Every result is structured JSON; every failure is
   `{error: {code, message, hint}}` — the agent never scrapes stdout.
 - `sys.journal` lets the agent read its own trail; `sys.snapshot`/`rollback`

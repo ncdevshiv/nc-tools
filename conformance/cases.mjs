@@ -284,4 +284,24 @@ export const conformanceCases = [
         return typeof res.tools?.count === 'number' && res.tools.count === 57;
       } },
   ]),
+  caseTemplate('search.semantic rejects empty query before model load', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'search.semantic', arguments: { query: '   ' } },
+      expect: (r) => {
+        const err = JSON.parse(r.result.content[0].text);
+        return err.error.code === 'ERR_BAD_INPUT' && /query/.test(err.error.message);
+      } },
+  ]),
+  caseTemplate('search.semantic validates path and topK before ranking', [
+    { type: 'mcp', method: 'tools/call', params: { name: 'search.semantic', arguments: { query: 'auth handling', path: 'conform-no-such-dir' } },
+      expect: (r) => {
+        // a missing dir is a clean structured error, never an embedding crash
+        const err = JSON.parse(r.result.content[0].text);
+        return err.error && typeof err.error.code === 'string';
+      } },
+    { type: 'mcp', method: 'tools/call', params: { name: 'search.semantic', arguments: { query: 'auth handling', topK: 0 } },
+      expect: (r) => {
+        const err = JSON.parse(r.result.content[0].text);
+        return err.error && typeof err.error.code === 'string';
+      } },
+  ]),
 ];

@@ -17,7 +17,11 @@ use nct_core::kernel::{parse_args, Handler, Kernel};
 use nct_core::paths::{is_reparse_point, resolve_checked};
 use nct_core::sha256_hex;
 
-pub const SEMANTIC_DESC: &str = "Neural-semantic search: ranks files by meaning-match to a natural-language query. Uses a local MiniLM transformer (all-MiniLM-L6-v2) — no API calls. Returns file, score, bytes.";
+pub const SEMANTIC_DESC: &str = "Locate code by MEANING, not exact text: ask where something is handled (e.g. 'where is journal write integrity validated?') and get files ranked by semantic relevance. Prefer this over search.grep when you do not know the exact identifier or wording — grep matches only literal regex. Runs a local MiniLM transformer (all-MiniLM-L6-v2) fully offline — no API calls; ranking is deterministic per content digest. Returns file, score, bytes; drill into top hits with search.grep or fs.read to pinpoint lines.";
+
+/// Generated/vendored dirs excluded from the semantic corpus (same class as
+/// fs.tree TREE_SKIP, plus common build/VCS noise).
+const SKIP_DIRS: &[&str] = &[".git", "node_modules", ".nc-tools", "target", "dist", "build", "vendor", ".venv", "__pycache__"];
 
 const MODEL_REPO: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const HF_BASE: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
@@ -54,6 +58,13 @@ impl Handler for SemanticHandler {
         let a: SemanticArgs = parse_args(args)?;
         if a.query.trim().is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "query must be a non-empty string"));
+        }
+        // The schema declares topK minimum 1 — enforce it here too, since
+        // schemars only describes the bound, it does not parse it.
+        if let Some(tk) = a.topK {
+            if tk < 1 {
+                return Err(ToolError::new("ERR_BAD_INPUT", "topK must be >= 1"));
+            }
         }
         // Validate the path BEFORE touching the model: a missing dir must not
         // require the embedding pipeline to be up (and must not index a typo).
@@ -188,7 +199,10 @@ fn walk_text_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     entries.sort();
     for full in entries {
         let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        if name == ".git" || name == "node_modules" || name == ".nc-tools" {
+        // Same generated-dir class fs.tree/search.replace skip — indexing
+        // cargo/target or node_modules artifacts drowns real hits in
+        // fingerprint noise (proven: top-5 all rust/target/.fingerprint).
+        if SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
         let Ok(lm) = fs::symlink_metadata(&full) else { continue };
@@ -236,15 +250,21 @@ impl Embedder {
         }
     }
 
-    fn init(cache_dir: PathBuf) -> Result<Embedder, String> {
-        // fetch every contract file on first use (idempotent, cached)
+    fn init(cache_dir: PathBuf) -> Result<Embedder, String> {        // fetch every contract file on first use (idempotent, cached)
         let mut paths = Vec::new();
         for name in MODEL_FILES {
             paths.push(ensure_file(&cache_dir, name)?);
         }
         let (config_path, tokenizer_path, weights_path) = (paths[0].clone(), paths[1].clone(), paths[2].clone());
 
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| e.to_string())?;
+        let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| e.to_string())?;
+        // tokenizer.json ships with a baked-in padding config (observed: every
+        // encode() came back padded with 128 [PAD]=0 ids). Mean-pooling over
+        // those pads puts every vector in the same PAD-dominated direction —
+        // all pairwise cosines inflated to 0.7+ and ranking destroyed. Kill
+        // both; window control is done explicitly in embed().
+        tokenizer.with_padding(None);
+        tokenizer.with_truncation(None).map_err(|e| e.to_string())?;
         let config_raw = fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
         let config: candle_transformers::models::bert::Config =
             serde_json::from_str(&config_raw).map_err(|e| e.to_string())?;

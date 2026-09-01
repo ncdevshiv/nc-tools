@@ -5,3 +5,6 @@ benchmark/results/
 
 # scratch run logs (dot-prefixed, written by verification runs)
 .*.log
+
+# golden regen temp artifact
+conformance/golden/.golden.tmp.json

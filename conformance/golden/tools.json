@@ -1222,7 +1222,7 @@
     },
     {
       "name": "search.semantic",
-      "description": "Neural-semantic search: ranks files by meaning-match to a natural-language query. Uses a local MiniLM transformer (all-MiniLM-L6-v2) — no API calls. Returns file, score, bytes.",
+      "description": "Locate code by MEANING, not exact text: ask where something is handled (e.g. 'where is journal write integrity validated?') and get files ranked by semantic relevance. Prefer this over search.grep when you do not know the exact identifier or wording — grep matches only literal regex. Runs a local MiniLM transformer (all-MiniLM-L6-v2) fully offline — no API calls; ranking is deterministic per content digest. Returns file, score, bytes; drill into top hits with search.grep or fs.read to pinpoint lines.",
       "inputSchema": {
         "type": "object",
         "required": [

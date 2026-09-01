@@ -6,7 +6,7 @@
 // Phase 2: the golden is regenerated from the trusted RUST binary (the JS
 // oracle is archived under oracle/), so the Rust kernel is the source of truth.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,16 +16,20 @@ const outDir = join(repoRoot, 'conformance', 'golden');
 mkdirSync(outDir, { recursive: true });
 
 const binName = process.platform === 'win32' ? 'nc-tools-mcp.exe' : 'nc-tools-mcp';
-// Prefer the debug binary (always freshly rebuilt by `cargo build -p nct-mcp`);
-// release is the deploy artifact but may be stale w.r.t. an uncommitted edit.
+// Pick whichever binary is NEWER: a stale debug binary silently regenerating
+// the golden from old code is worse than a stale release one (the release
+// rebuild is what `npm run build:rust` refreshes). Report which one was used.
 const candidates = [
   join(repoRoot, 'rust', 'target', 'debug', binName),
   join(repoRoot, 'rust', 'target', 'release', binName),
 ];
-const bin = candidates.find((p) => existsSync(p));
+const bin = candidates
+  .filter((p) => existsSync(p))
+  .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
 if (!bin) {
-  throw new Error('Rust binary not found — run `cargo build -p nct-mcp` in rust/ first');
+  throw new Error('Rust binary not found — run `npm run build:rust` or `cargo build -p nct-mcp` in rust/ first');
 }
+console.log(`golden source binary: ${bin}`);
 
 const tmp = join(outDir, '.golden.tmp.json');
 execFileSync(bin, ['--dump-tools', tmp], { cwd: repoRoot, stdio: ['ignore', 'ignore', 'inherit'] });
