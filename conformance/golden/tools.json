@@ -1,6 +1,6 @@
 {
   "generatedFrom": "rust/nct-mcp (build_kernel)",
-  "toolCount": 57,
+  "toolCount": 60,
   "tools": [
     {
       "name": "batch.execute",
@@ -629,14 +629,53 @@
       }
     },
     {
-      "name": "net.http",
-      "description": "Perform an HTTP request. Returns status, headers, body (capped), duration. Replaces curl/wget.",
+      "name": "net.fetch",
+      "description": "Read a web page as CLEAN MARKDOWN for an agent: main-content extraction discards nav/ads/boilerplate, returns title, links, token estimate, and extraction confidence. SSRF-guarded by default (private/loopback targets refused; allowPrivate to reach internal hosts), ETag-revalidated cache (set refresh to force), and Accept: text/markdown negotiation for sites that serve it. Prefer over net.http whenever you want page CONTENT, not raw protocol bytes.",
       "inputSchema": {
         "type": "object",
         "required": [
           "url"
         ],
         "properties": {
+          "allowPrivate": {
+            "description": "Allow private/loopback targets (for local dev servers); default blocks them",
+            "type": "boolean"
+          },
+          "maxTokens": {
+            "description": "Estimate token cap for the markdown (truncates output)",
+            "minimum": 100,
+            "type": "integer",
+            "maximum": 200000
+          },
+          "refresh": {
+            "description": "Bypass the cache and revalidate with the server",
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "minimum": 100,
+            "type": "integer",
+            "maximum": 120000
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "net.http",
+      "description": "Perform a raw HTTP request. Returns status, headers, body (capped), duration, redirect chain. blockPrivate=true refuses private/loopback targets. Replaces curl/wget; use net.fetch when you want readable page content.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "blockPrivate": {
+            "description": "Refuse private/loopback/link-local targets (SSRF guard); default false to keep raw-curl semantics",
+            "type": "boolean"
+          },
           "body": {
             "type": "string"
           },
@@ -687,6 +726,65 @@
             "minimum": 100,
             "type": "integer",
             "maximum": 10000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "net.robots",
+      "description": "Check what a site allows an agent to fetch: robots.txt isAllowed for a URL (RFC 9309 longest-match), crawl-delay, sitemap URLs, and llms.txt discovery (the site's own curated agent index). Fetch this before crawling or fetching many pages from one host.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "allowPrivate": {
+            "description": "Allow private/loopback targets (for local dev servers)",
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "minimum": 100,
+            "type": "integer",
+            "maximum": 120000
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "net.search",
+      "description": "Search the WEB keylessly: fans the query across free engines (DuckDuckGo Lite, Mojeek, Wikipedia, Hacker News), fuses results with reciprocal-rank fusion, then RERANKS them locally with a MiniLM transformer (same offline neural stack as search.semantic) so the best answer ranks first without any API key. Returns title, url, snippet, engines, score. Use for anything outside the workspace; pair with net.fetch to read the top hits.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "engines": {
+            "description": "Comma-separated engine names (hn, wikipedia, ddg, mojeek) or auto for all",
+            "type": "string"
+          },
+          "maxResults": {
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 25
+          },
+          "query": {
+            "type": "string"
+          },
+          "rerank": {
+            "description": "Local neural rerank after fusion (default true; falls back to fusion order if the model is unavailable)",
+            "type": "boolean"
+          },
+          "timeoutMs": {
+            "minimum": 100,
+            "type": "integer",
+            "maximum": 30000
           }
         },
         "additionalProperties": false

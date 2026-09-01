@@ -2,14 +2,20 @@
 name = "nct-net"
 version.workspace = true
 edition.workspace = true
-description = "nc-tools net.* tool family (HTTP, port probing)"
+description = "nc-tools net.* tool family (HTTP, fetch+extract, search, robots, port probing)"
 
 [dependencies]
 nct-core = { path = "../nct-core" }
+nct-semantic = { path = "../nct-semantic" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 ureq = { workspace = true }
+scraper = { workspace = true }
+url = { workspace = true }
+encoding_rs = { workspace = true }
+indexmap = { workspace = true }
+chrono = { workspace = true }
 
 [lints]
 workspace = true

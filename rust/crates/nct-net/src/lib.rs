@@ -1,6 +1,5 @@
-// net.* — typed network operations: HTTP requests and port probing.
-// Behavior-parity port of src/kernel/net.mjs: replaces curl/wget/nc
-// one-liners with structured results.
+// net.* — typed network operations: hardened HTTP, agent-grade fetch+extract,
+// keyless federated search, robots/llms.txt, and port probing.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -11,12 +10,21 @@ use serde_json::{json, Value};
 use nct_core::errors::ToolError;
 use nct_core::kernel::{parse_args, Handler, Kernel};
 
-pub const HTTP_DESC: &str = "Perform an HTTP request. Returns status, headers, body (capped), duration. Replaces curl/wget.";
+pub mod cache;
+pub mod engines;
+pub mod extract;
+pub mod fetch;
+pub mod httpx;
+pub mod robots;
+pub mod ssrf;
+
+pub const HTTP_DESC: &str = "Perform a raw HTTP request. Returns status, headers, body (capped), duration, redirect chain. blockPrivate=true refuses private/loopback targets. Replaces curl/wget; use net.fetch when you want readable page content.";
 pub const PROBE_DESC: &str = "Check whether a TCP port is open. Replaces nc/netstat probing.";
 
 pub fn register(k: &mut Kernel) {
     k.register("net.http", HTTP_DESC, nct_core::schema::schema_for::<HttpArgs>(), std::sync::Arc::new(HttpHandler));
     k.register("net.probePort", PROBE_DESC, nct_core::schema::schema_for::<ProbeArgs>(), std::sync::Arc::new(ProbeHandler));
+    fetch::register(k);
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq)]
@@ -44,6 +52,9 @@ pub struct HttpArgs {
     #[serde(default)]
     #[schemars(range(min = 100, max = 120000))]
     pub timeoutMs: Option<u64>,
+    #[doc = "Refuse private/loopback/link-local targets (SSRF guard); default false to keep raw-curl semantics"]
+    #[serde(default)]
+    pub blockPrivate: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -71,6 +82,12 @@ impl Handler for HttpHandler {
             Method::Head => "HEAD",
         }
         .to_string();
+        // blockPrivate=true resolves the host and refuses private targets
+        // BEFORE the request (raw-curl semantics preserved by default;
+        // per-redirect-hop validation lives in net.fetch).
+        if a.blockPrivate.unwrap_or(false) {
+            ssrf::assert_public(&a.url)?;
+        }
         if !(a.url.starts_with("http://") || a.url.starts_with("https://")) {
             return Err(ToolError::with_hint("ERR_BAD_INPUT", "url must be an http(s) URL", json!({ "got": a.url })));
         }

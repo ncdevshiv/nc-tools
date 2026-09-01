@@ -19,8 +19,11 @@ Tool discipline:
 - LONG-RUNNING programs (servers, watchers) use proc.start and give you a handleId —
   then proc.status / proc.readOutput / proc.stop. One-shot programs use proc.spawn.
 - test.run returns structured pass/fail counts and failing test identities (node, pytest).
-- pkg.* installs/lists packages and runs npm scripts; net.http makes HTTP requests;
-  net.probePort checks TCP ports; env.set/get manage the session environment.
+- pkg.* installs/lists packages and runs npm scripts; env.set/get manage the session
+  environment. net.http makes raw HTTP requests; net.fetch reads a URL as clean
+  markdown (SSRF-guarded, cached); net.robots checks site permissions + llms.txt;
+  net.search searches the web keylessly and reranks results with local neural
+  embeddings; net.probePort checks TCP ports.
 - Prefer patch.apply for edits: exact-match search/replace. Include enough context to be unique.
 - fs.read returns a digest (hash+mtime). If the digest matches what you already saw, the file
   is unchanged — do not re-read it.

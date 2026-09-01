@@ -23,12 +23,12 @@ test('binary exists and is a real MCP server', () => {
   assert.ok(existsSync(SERVER_BIN), `no server binary at ${SERVER_BIN}`);
 });
 
-test('initialize handshake + tools/list is the full 57-tool surface', async () => {
+test('initialize handshake + tools/list is the full 60-tool surface', async () => {
   const root = tmp();
   try {
     await withKernel(root, async (k) => {
       const tools = await k.listTools();
-      assert.equal(tools.length, 57);
+      assert.equal(tools.length, 60);
       assert.ok(tools.every((t) => t.inputSchema && t.inputSchema.type === 'object' && t.description));
       for (const n of ['fs.readRange','fs.tree','search.replace','code.symbols','text.diff','proc.runScript','proc.watch','git.blame','sys.doctor','test.run']) {
         assert.ok(tools.some((t) => t.name === n), `missing tool: ${n}`);
@@ -189,13 +189,13 @@ test('git.blame annotates every line of a committed file', async () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('sys.doctor reports the 57-tool inventory', async () => {
+test('sys.doctor reports the 60-tool inventory', async () => {
   const root = tmp();
   try {
     await withKernel(root, async (k) => {
       const r = await k.call('sys.doctor', {});
       assert.equal(r.ok, true);
-      assert.equal(r.result.tools.count, 57);
+      assert.equal(r.result.tools.count, 60);
       assert.ok(r.result.tools.names.includes('text.diff'));
       assert.ok(typeof r.result.limits.spawnTimeoutMs === 'number');
     });

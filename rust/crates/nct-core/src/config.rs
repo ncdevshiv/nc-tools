@@ -39,6 +39,12 @@ pub struct Limits {
     pub proc_handle_output_bytes: usize,
     /// net.http body cap
     pub net_max_body: usize,
+    /// net.fetch cache TTL (ms) — 0 disables freshness (always revalidate)
+    pub net_fetch_ttl_ms: u64,
+    /// net.search per-engine timeout
+    pub net_engine_timeout_ms: u64,
+    /// net.search politeness: minimum interval between hits to one engine
+    pub net_search_politeness_ms: u64,
     /// git/pkg child process timeout
     pub child_timeout_ms: u64,
     /// pkg.runScript stdout tail
@@ -69,6 +75,9 @@ impl Default for Limits {
             proc_max_duration_ms: 3_600_000,
             proc_handle_output_bytes: 2_000_000,
             net_max_body: 2_000_000,
+            net_fetch_ttl_ms: 3_600_000,
+            net_engine_timeout_ms: 10_000,
+            net_search_politeness_ms: 750,
             child_timeout_ms: 300_000,
             script_stdout_tail: 100_000,
             list_depth: 8,

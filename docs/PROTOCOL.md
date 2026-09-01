@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 57 tools; schema in the Rust kernel `rust/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 60 tools; schema in the Rust kernel `rust/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
@@ -41,7 +41,9 @@ internal architecture, or data structures beyond the observable contract.
   `proc.list`, `proc.kill`, `proc.runScript`, `proc.watch`
 - `test.run` (frameworks: `node`, `pytest`)
 - `pkg.add`, `pkg.list`, `pkg.scripts`, `pkg.runScript`
-- `net.http`, `net.probePort`
+- `net.http`, `net.probePort`, `net.fetch`, `net.robots`, `net.search`
+  (wave W-Net-1: agent-grade fetch+extract, robots/llms.txt, keyless federated
+  search with local neural rerank — see docs/INTERNET-TOOLS.md)
 - `env.get`, `env.set`, `env.list`
 - `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.journal`,
   `sys.workspace`, `sys.doctor`
