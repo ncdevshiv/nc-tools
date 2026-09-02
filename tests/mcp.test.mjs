@@ -57,7 +57,7 @@ test('MCP tools/list returns the full kernel tool surface', async () => {
   await rpc('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '0' } });
   const resp = await rpc('tools/list', {});
   const names = resp.result.tools.map((t) => t.name);
-  assert.equal(names.length, 60);
+  assert.equal(names.length, 62);
   assert.ok(names.includes('patch.apply'));
   assert.ok(names.includes('proc.spawn'));
   assert.ok(names.includes('sys.journal'));

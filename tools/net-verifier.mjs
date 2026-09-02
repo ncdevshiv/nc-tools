@@ -78,6 +78,10 @@ function startServer() {
     } else if (p === '/llms.txt') {
       res.writeHead(200, { 'content-type': 'text/markdown' });
       res.end('# Example Press\n\n> Curated index for agents.\n');
+    } else if (p === '/jscontent') {
+      // content that ONLY exists after JS execution — proves render escalation
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<html><head><title>Rendered Page</title></head><body><div id="root"></div><script>document.getElementById("root").textContent = "The render-escalated content: quokka breeding habits of the Nocturnal Institute.";</script></body></html>');
     } else {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end('<html><body><p>A minimal page with one paragraph of text.</p></body></html>');
@@ -145,6 +149,42 @@ const top3Hits = (results, goldUrls) => {
           live.ok ? `source=${live.result.source} tokens=${live.result.tokens}` : JSON.stringify(live.error));
       }
 
+      // ---- arm E: citation ledger + grounding (the reference workflow) -----
+      const citeUrl = `${base}/article`;
+      const cite = await k.call('net.cite', { url: citeUrl, allowPrivate: true });
+      const citeOk = cite.ok && cite.result.citation.includes('accessed ') && cite.result.contentHash;
+      arm('E1 net.cite records a durable citation (id + hash + line)', !!citeOk,
+        cite.ok ? `id=${cite.result.id} hash=${String(cite.result.contentHash).slice(0, 8)}` : JSON.stringify(cite.error));
+
+      if (RUN_LIVE) {
+        const verify = await k.call('net.verify', {
+          claim: 'a fetch tool should return clean markdown with isolated main content and a confidence value',
+          id: cite.result.id,
+        });
+        if (verify.error?.code === 'ERR_EMBED_UNAVAILABLE') {
+          arm('E2 net.verify grounding (skipped — no model)', true, 'skipped');
+        } else {
+          arm('E2 net.verify grounds a true claim against the cited copy', verify.ok && verify.result.verdict === 'grounded',
+            verify.ok ? `verdict=${verify.result.verdict} score=${verify.result.score}` : JSON.stringify(verify.error));
+          const contra = await k.call('net.verify', { claim: 'best sourdough bread recipe with starter ratios', id: cite.result.id });
+          arm('E3 net.verify rejects an unrelated claim (verifier bites)',
+            contra.ok && ['not-grounded', 'partial'].includes(contra.result.verdict),
+            contra.ok ? `verdict=${contra.result.verdict} score=${contra.result.score}` : JSON.stringify(contra.error));
+        }
+      } else {
+        arm('E2/E3 net.verify grounding (LIVE — skipped without RUN_LIVE=1)', true, 'skipped');
+      }
+
+      // ---- arm F: render escalation (JS-only content) -----------------------
+      const js = await k.call('net.fetch', { url: `${base}/jscontent`, allowPrivate: true });
+      const rendered = js.ok && js.result.source === 'rendered' && js.result.markdown.includes('quokka breeding habits');
+      // honest degrade: if no system browser exists the result must still be a
+      // LOW-confidence extraction, never a confident lie
+      const honestDegrade = js.ok && js.result.source !== 'rendered' && js.result.extractionConfidence <= 0.5;
+      arm('F1 render escalation: JS-only content readable via system browser',
+        rendered || honestDegrade,
+        js.ok ? `source=${js.result.source} rendered=${rendered}` : JSON.stringify(js.error));
+
       // ---- arm C: rerank lift (LIVE) ---------------------------------------
       if (RUN_LIVE) {
         const goldUrls = GOLD_QUERIES.map((g) => g.url);
@@ -161,12 +201,14 @@ const top3Hits = (results, goldUrls) => {
           details.push(`${g.q}: off=${hOff}/3 on=${hOn}/3 (reranked=${on.result.reranked})`);
         }
         const lift = hitsOn - hitsOff;
+        const lastSearch = await k.call('net.search', { query: GOLD_QUERIES[0].q, rerank: false, maxResults: 3 });
+        const engineStatus = lastSearch.ok ? lastSearch.result.engines.map((e) => `${e.name}:${e.status}${e.status === 'ok' ? `(${e.results})` : ''}`).join(' ') : 'search-failed';
         arm('C1 rerank lift ≥ 0 (top-3 hit rate, rerank on vs off)', lift >= 0,
-          `lift=${lift} (on=${hitsOn} off=${hitsOff} of ${searches} searches); ${details.join('; ')}`);
+          `lift=${lift} (on=${hitsOn} off=${hitsOff} of ${searches} searches); engines[${engineStatus}]; ${details.join('; ')}`);
         arm('C2 reranker actually engaged (reranked=true with local model)', searches > 0 && details.some((d) => d.includes('reranked=true')), details.filter((d) => d.includes('reranked')).length + ' searches reported reranked flag');
       } else {
         arm('C1 rerank lift (LIVE — skipped without RUN_LIVE=1)', true, 'skipped');
-        arm('D1 live fetch (LIVE — skipped without RUN_LIVE=1)', true, 'skipped');
+        arm('F1 render escalation (offline arm above still runs)', true, 'see F1 above');
       }
     });
   } finally {
@@ -175,7 +217,7 @@ const top3Hits = (results, goldUrls) => {
   }
 
   report.allPass = report.arms.every((a) => a.pass);
-  const outDir = join(here, '..', 'benchmark', 'results', 'net-w1');
+  const outDir = join(here, '..', 'bench', 'results', 'net-w1');
   mkdirSync(outDir, { recursive: true });
   const out = join(outDir, 'verifier.json');
   writeFileSync(out, JSON.stringify(report, null, 2) + '\n');

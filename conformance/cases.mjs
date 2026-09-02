@@ -15,11 +15,11 @@ export const conformanceCases = [
     { type: 'mcp', method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'conformance', version: '1' } },
       expect: (res) => res.result.serverInfo.name === 'nc-tools' && res.result.protocolVersion === '2024-11-05' },
   ]),
-  caseTemplate('tool surface: exactly 60 tools with schemas', [
+  caseTemplate('tool surface: exactly 62 tools with schemas', [
     { type: 'mcp', method: 'tools/list', params: {},
       expect: (res) => {
         const tools = res.result.tools;
-        if (tools.length !== 60) throw new Error(`expected 60 tools, got ${tools.length}`);
+        if (tools.length !== 62) throw new Error(`expected 62 tools, got ${tools.length}`);
         for (const t of tools) {
           if (!t.inputSchema || t.inputSchema.type !== 'object') throw new Error(`${t.name} missing object inputSchema`);
           if (!t.description) throw new Error(`${t.name} missing description`);
@@ -281,7 +281,7 @@ export const conformanceCases = [
     { type: 'mcp', method: 'tools/call', params: { name: 'sys.doctor', arguments: {} },
       expect: (r) => {
         const res = JSON.parse(r.result.content[0].text);
-        return typeof res.tools?.count === 'number' && res.tools.count === 60;
+        return typeof res.tools?.count === 'number' && res.tools.count === 62;
       } },
   ]),
   caseTemplate('search.semantic rejects empty query before model load', [

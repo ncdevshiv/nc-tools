@@ -2,6 +2,7 @@
 // template + parse strategy), pure parse functions per engine (unit-tested
 // offline against committed fixtures), RRF fusion + URL dedupe. A failing
 // engine degrades to a per-engine error entry — it never fails the call.
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -23,18 +24,32 @@ pub enum EngineKind {
     DdgLite,
     /// Mojeek (HTML)
     Mojeek,
+    /// Brave Search API (GET, X-Subscription-Token)
+    Brave,
+    /// Tavily search API (POST JSON)
+    Tavily,
+    /// Serper Google search API (POST JSON)
+    Serper,
 }
 
 pub struct EngineDef {
     pub name: &'static str,
     pub kind: EngineKind,
+    /// Env var carrying the API key (keyed engines only run when set)
+    pub key_env: Option<&'static str>,
 }
 
 pub const ENGINES: &[EngineDef] = &[
-    EngineDef { name: "hn", kind: EngineKind::Hn },
-    EngineDef { name: "wikipedia", kind: EngineKind::Wikipedia },
-    EngineDef { name: "ddg", kind: EngineKind::DdgLite },
-    EngineDef { name: "mojeek", kind: EngineKind::Mojeek },
+    EngineDef { name: "hn", kind: EngineKind::Hn, key_env: None },
+    EngineDef { name: "wikipedia", kind: EngineKind::Wikipedia, key_env: None },
+    EngineDef { name: "ddg", kind: EngineKind::DdgLite, key_env: None },
+    EngineDef { name: "mojeek", kind: EngineKind::Mojeek, key_env: None },
+    // keyed engines — the recall fix for navigational queries (the keyless
+    // HTML scrapers get challenge-walled); they join "auto" only when their
+    // env key is present
+    EngineDef { name: "brave", kind: EngineKind::Brave, key_env: Some("NCTOOLS_BRAVE_KEY") },
+    EngineDef { name: "tavily", kind: EngineKind::Tavily, key_env: Some("NCTOOLS_TAVILY_KEY") },
+    EngineDef { name: "serper", kind: EngineKind::Serper, key_env: Some("NCTOOLS_SERPER_KEY") },
 ];
 
 pub fn engine_by_name(name: &str) -> Option<&'static EngineDef> {
@@ -51,6 +66,10 @@ pub fn endpoint(engine: &EngineDef, query: &str, limit: usize) -> String {
         }
         EngineKind::DdgLite => format!("https://lite.duckduckgo.com/lite/?q={q}"),
         EngineKind::Mojeek => format!("https://www.mojeek.com/search?q={q}"),
+        EngineKind::Brave => format!("https://api.search.brave.com/res/v1/web/search?q={q}&count={limit}"),
+        // POST endpoints: the path is the endpoint; query rides in the body
+        EngineKind::Tavily => "https://api.tavily.com/search".to_string(),
+        EngineKind::Serper => "https://google.serper.dev/search".to_string(),
     }
 }
 
@@ -70,6 +89,9 @@ pub fn parse(engine: &EngineDef, body: &str, limit: usize) -> Result<Vec<RawResu
         EngineKind::Wikipedia => parse_wikipedia(body, limit)?,
         EngineKind::DdgLite => parse_ddg_lite(body, limit),
         EngineKind::Mojeek => parse_mojeek(body, limit),
+        EngineKind::Brave => parse_brave(body, limit)?,
+        EngineKind::Tavily => parse_tavily(body, limit)?,
+        EngineKind::Serper => parse_serper(body, limit)?,
     };
     Ok(results.into_iter().take(limit).collect())
 }
@@ -195,6 +217,66 @@ fn parse_mojeek(body: &str, limit: usize) -> Vec<RawResult> {
         .collect()
 }
 
+fn parse_brave(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
+    let v: Value = serde_json::from_str(body)
+        .map_err(|e| ToolError::new("ERR_ENGINE", format!("brave returned invalid json: {e}")))?;
+    let mut out = Vec::new();
+    if let Some(results) = v["web"]["results"].as_array() {
+        for r in results {
+            let title = r["title"].as_str().unwrap_or_default().trim().to_string();
+            let url = r["url"].as_str().unwrap_or_default().to_string();
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            out.push(RawResult { title, url, snippet: r["description"].as_str().unwrap_or_default().to_string() });
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_tavily(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
+    let v: Value = serde_json::from_str(body)
+        .map_err(|e| ToolError::new("ERR_ENGINE", format!("tavily returned invalid json: {e}")))?;
+    let mut out = Vec::new();
+    if let Some(results) = v["results"].as_array() {
+        for r in results {
+            let title = r["title"].as_str().unwrap_or_default().trim().to_string();
+            let url = r["url"].as_str().unwrap_or_default().to_string();
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            out.push(RawResult { title, url, snippet: r["content"].as_str().unwrap_or_default().to_string() });
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_serper(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
+    let v: Value = serde_json::from_str(body)
+        .map_err(|e| ToolError::new("ERR_ENGINE", format!("serper returned invalid json: {e}")))?;
+    let mut out = Vec::new();
+    if let Some(results) = v["organic"].as_array() {
+        for r in results {
+            let title = r["title"].as_str().unwrap_or_default().trim().to_string();
+            let url = r["link"].as_str().unwrap_or_default().to_string();
+            if title.is_empty() || url.is_empty() {
+                continue;
+            }
+            out.push(RawResult { title, url, snippet: r["snippet"].as_str().unwrap_or_default().to_string() });
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ---- fusion -----------------------------------------------------------------
 
 /// Tracking-query params stripped during URL normalization (dedupe keys).
@@ -283,7 +365,46 @@ pub fn fuse(lists: &[(String, Vec<RawResult>)]) -> Vec<FusedResult> {
     fused
 }
 
-// ---- politeness -------------------------------------------------------------
+// ---- engine health (circuit breaker) ----------------------------------------
+
+/// Consecutive failures before an engine is skipped for the rest of the
+/// process. Keyed engines rarely break silently; scrapers break constantly.
+const UNHEALTHY_THRESHOLD: u32 = 3;
+
+struct Health {
+    consecutive_errors: u32,
+    last_error: Option<String>,
+}
+
+fn health_map() -> std::sync::MutexGuard<'static, HashMap<String, Health>> {
+    static MAP: std::sync::LazyLock<Mutex<HashMap<String, Health>>> =
+        std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    MAP.lock().unwrap()
+}
+
+pub fn engine_key_present(engine: &EngineDef) -> bool {
+    engine
+        .key_env
+        .map(|name| std::env::var(name).map(|v| !v.trim().is_empty()).unwrap_or(false))
+        .unwrap_or(true)
+}
+
+pub fn engine_healthy(name: &str) -> bool {
+    let map = health_map();
+    map.get(name).map(|h| h.consecutive_errors < UNHEALTHY_THRESHOLD).unwrap_or(true)
+}
+
+pub fn engine_mark(name: &str, ok: bool, error: Option<String>) {
+    let mut map = health_map();
+    let h = map.entry(name.to_string()).or_insert(Health { consecutive_errors: 0, last_error: None });
+    if ok {
+        h.consecutive_errors = 0;
+        h.last_error = None;
+    } else {
+        h.consecutive_errors += 1;
+        h.last_error = error;
+    }
+}
 
 /// Per-host minimum interval — one token of politeness, persisted per process.
 /// Search engines are the hosts we hammer; static Mutex keeps it trivial and
@@ -316,15 +437,35 @@ fn politeness_gate(host: &str, min_interval_ms: u64) {
 /// Fetch + parse one engine. Network failure or bad parse degrades to Err —
 /// the caller records it per-engine and keeps going.
 pub fn run_engine(engine: &EngineDef, query: &str, limit: usize, timeout_ms: u64, politeness_ms: u64) -> Result<Vec<RawResult>, ToolError> {
+    let api_key = engine.key_env.and_then(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()));
+    if engine.key_env.is_some() && api_key.is_none() {
+        return Err(ToolError::with_hint(
+            "ERR_NO_KEY",
+            format!("engine {} requires an API key", engine.name),
+            json!({ "engine": engine.name, "env": engine.key_env }),
+        ));
+    }
     politeness_gate(engine.name, politeness_ms);
-    let endpoint = endpoint(engine, query, limit);
-    let parsed_url = crate::ssrf::parse_http_url(&endpoint)?;
-    let outcome = crate::httpx::fetch(
-        crate::httpx::FetchOpts::get(parsed_url)
-            .timeout(timeout_ms)
-            .guard(false) // engine endpoints are compile-time constants, not user URLs
-            .max_body(1_000_000),
-    )?;
+    let mut opts = match engine.kind {
+        EngineKind::Tavily => crate::httpx::FetchOpts::post_json(
+            crate::ssrf::parse_http_url(&endpoint(engine, query, limit))?,
+            json!({ "api_key": api_key, "query": query, "max_results": limit, "search_depth": "basic" }),
+        ),
+        EngineKind::Serper => crate::httpx::FetchOpts::post_json(
+            crate::ssrf::parse_http_url(&endpoint(engine, query, limit))?,
+            json!({ "q": query, "num": limit }),
+        )
+        .header("X-API-KEY", api_key.as_deref().unwrap_or_default()),
+        _ => {
+            let mut o = crate::httpx::FetchOpts::get(crate::ssrf::parse_http_url(&endpoint(engine, query, limit))?);
+            if engine.kind == EngineKind::Brave {
+                o = o.header("X-Subscription-Token", api_key.as_deref().unwrap_or_default()).header("Accept", "application/json");
+            }
+            o
+        }
+    };
+    opts = opts.timeout(timeout_ms).guard(false).max_body(1_000_000);
+    let outcome = crate::httpx::fetch(opts)?;
     if !outcome.ok {
         return Err(ToolError::with_hint(
             "ERR_ENGINE",
@@ -454,6 +595,45 @@ mod tests {
         // book hit twice, one with tracking param — normalized to one entry
         assert!(fused[1].url.starts_with("https://doc.rust-lang.org/book"));
         assert!(!fused[1].url.contains("utm_"));
+    }
+
+    #[test]
+    #[test]
+    fn keyed_engine_fixtures_parse() {
+        let brave = r#"{"web":{"results":[{"title":"Rust","url":"https://www.rust-lang.org/","description":"Official site"}]}}"#;
+        let rs = parse(engine_by_name("brave").unwrap(), brave, 10).unwrap();
+        assert_eq!(rs[0].url, "https://www.rust-lang.org/");
+        assert_eq!(rs[0].snippet, "Official site");
+
+        let tavily = r#"{"results":[{"title":"Rust","url":"https://www.rust-lang.org/","content":"A language"}]}"#;
+        let rs = parse(engine_by_name("tavily").unwrap(), tavily, 10).unwrap();
+        assert_eq!(rs[0].snippet, "A language");
+
+        let serper = r#"{"organic":[{"title":"Rust","link":"https://www.rust-lang.org/","snippet":"Empowering everyone"}]}"#;
+        let rs = parse(engine_by_name("serper").unwrap(), serper, 10).unwrap();
+        assert_eq!(rs[0].url, "https://www.rust-lang.org/");
+    }
+
+    #[test]
+    fn circuit_breaker_opens_and_resets() {
+        engine_mark("unit-test-engine", true, None);
+        for i in 0..3 {
+            engine_mark("unit-test-engine", false, Some(format!("err{i}")));
+        }
+        assert!(!engine_healthy("unit-test-engine"), "3 consecutive errors must open the breaker");
+        engine_mark("unit-test-engine", true, None);
+        assert!(engine_healthy("unit-test-engine"), "success must reset the breaker");
+    }
+
+    #[test]
+    fn key_presence_gate() {
+        let brave = engine_by_name("brave").unwrap();
+        // this test process has no NCTOOLS_BRAVE_KEY — presence must be false
+        // unless the environment actually carries it
+        let expected = std::env::var("NCTOOLS_BRAVE_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false);
+        assert_eq!(engine_key_present(brave), expected);
+        let hn = engine_by_name("hn").unwrap();
+        assert!(engine_key_present(hn), "keyless engines are always usable");
     }
 
     #[test]

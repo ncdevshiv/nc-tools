@@ -11,10 +11,12 @@ use nct_core::errors::ToolError;
 use nct_core::kernel::{parse_args, Handler, Kernel};
 
 pub mod cache;
+pub mod cite;
 pub mod engines;
 pub mod extract;
 pub mod fetch;
 pub mod httpx;
+pub mod render;
 pub mod robots;
 pub mod ssrf;
 
@@ -25,6 +27,7 @@ pub fn register(k: &mut Kernel) {
     k.register("net.http", HTTP_DESC, nct_core::schema::schema_for::<HttpArgs>(), std::sync::Arc::new(HttpHandler));
     k.register("net.probePort", PROBE_DESC, nct_core::schema::schema_for::<ProbeArgs>(), std::sync::Arc::new(ProbeHandler));
     fetch::register(k);
+    cite::register(k);
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq)]

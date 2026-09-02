@@ -18,7 +18,7 @@ use crate::httpx;
 use crate::robots;
 use crate::ssrf;
 
-pub const FETCH_DESC: &str = "Read a web page as CLEAN MARKDOWN for an agent: main-content extraction discards nav/ads/boilerplate, returns title, links, token estimate, and extraction confidence. SSRF-guarded by default (private/loopback targets refused; allowPrivate to reach internal hosts), ETag-revalidated cache (set refresh to force), and Accept: text/markdown negotiation for sites that serve it. Prefer over net.http whenever you want page CONTENT, not raw protocol bytes.";
+pub const FETCH_DESC: &str = "Read a web page as CLEAN MARKDOWN for an agent: main-content extraction discards nav/ads/boilerplate, returns title, links, token estimate, and extraction confidence. SSRF-guarded by default (private/loopback targets refused; allowPrivate to reach internal hosts), ETag-revalidated cache (set refresh to force), Accept: text/markdown negotiation, and automatic headless re-render through the system browser when a JS-heavy page extracts as empty. Prefer over net.http whenever you want page CONTENT, not raw protocol bytes.";
 pub const ROBOTS_DESC: &str = "Check what a site allows an agent to fetch: robots.txt isAllowed for a URL (RFC 9309 longest-match), crawl-delay, sitemap URLs, and llms.txt discovery (the site's own curated agent index). Fetch this before crawling or fetching many pages from one host.";
 pub const SEARCH_DESC: &str = "Search the WEB keylessly: fans the query across free engines (DuckDuckGo Lite, Mojeek, Wikipedia, Hacker News), fuses results with reciprocal-rank fusion, then RERANKS them locally with a MiniLM transformer (same offline neural stack as search.semantic) so the best answer ranks first without any API key. Returns title, url, snippet, engines, score. Use for anything outside the workspace; pair with net.fetch to read the top hits.";
 
@@ -47,14 +47,25 @@ pub struct FetchArgs {
     #[serde(default)]
     #[schemars(range(min = 100, max = 200000))]
     pub maxTokens: Option<u64>,
+    #[doc = "Re-render JS-heavy pages through the system browser's headless mode when extraction looks empty (default true; no-op when no browser is installed)"]
+    #[serde(default)]
+    pub render: Option<bool>,
 }
 
 pub struct FetchHandler;
 
 impl Handler for FetchHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
-        let a: FetchArgs = parse_args(args)?;
-        let allow_private = a.allowPrivate.unwrap_or(false);
+        fetch_content(k, args)
+    }
+}
+
+/// The full fetch pipeline, shared by net.fetch, net.cite, and net.verify:
+/// SSRF guard → cache (hit / revalidate) → markdown negotiation → extract →
+/// (render escalation) → cache store → journal provenance.
+pub fn fetch_content(k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+    let a: FetchArgs = parse_args(args)?;
+    let allow_private = a.allowPrivate.unwrap_or(false);
         let timeout = a.timeoutMs.unwrap_or(30_000);
         let started = std::time::Instant::now();
 
@@ -110,7 +121,30 @@ impl Handler for FetchHandler {
             (outcome.body.clone(), None, Vec::new(), 1.0, "markdown-negotiated".to_string())
         } else if content_type.starts_with("text/html") || content_type.contains("html") {
             let ex = extract::extract(&outcome.body, &outcome.final_url)?;
-            (ex.markdown, ex.title, ex.links, ex.confidence, "extracted".to_string())
+            // Render escalation: JS-heavy pages come back as near-empty shells
+            // with near-zero confidence. Re-render through the system browser's
+            // headless mode before giving the agent a useless extraction.
+            let text_len = ex.markdown.chars().count();
+            let weak = text_len < 400 && ex.confidence < 0.5;
+            let rendered = if weak && a.render.unwrap_or(true) {
+                match crate::render::render_dom(outcome.final_url.as_str(), allow_private, timeout) {
+                    Ok(dom) => {
+                        let ex2 = extract::extract(&dom, &outcome.final_url)?;
+                        if ex2.markdown.chars().count() > text_len * 3 {
+                            Some((ex2.markdown, ex2.title, ex2.links, ex2.confidence, "rendered".to_string()))
+                        } else {
+                            None // render didn't help — keep the honest low-confidence result
+                        }
+                    }
+                    Err(_) => None, // no browser / render failed — degrade, don't fail
+                }
+            } else {
+                None
+            };
+            match rendered {
+                Some((md, t, l, c, s)) => (md, t, l, c, s),
+                None => (ex.markdown, ex.title, ex.links, ex.confidence, "extracted".to_string()),
+            }
         } else if content_type.starts_with("application/json") {
             (format!("```json\n{}\n```", outcome.body.trim()), None, Vec::new(), 1.0, "json".to_string())
         } else if content_type.starts_with("text/plain") {
@@ -176,7 +210,6 @@ impl Handler for FetchHandler {
             "sid": k.sid,
         }));
         Ok(result)
-    }
 }
 
 fn cached_result(entry: &cache::CacheEntry, state: &str, started: std::time::Instant, max_tokens: Option<u64>) -> Value {
@@ -330,7 +363,13 @@ impl Handler for SearchHandler {
         let timeout = a.timeoutMs.unwrap_or(k.cfg.limits.net_engine_timeout_ms);
 
         let selected: Vec<&engines::EngineDef> = match a.engines.as_deref() {
-            None | Some("auto") | Some("") => engines::ENGINES.iter().collect(),
+            // auto = every healthy engine we can actually use: keyless engines
+            // always, keyed engines only when their env key is present. The
+            // circuit breaker drops engines that failed 3x this process.
+            None | Some("auto") | Some("") => engines::ENGINES
+                .iter()
+                .filter(|e| engines::engine_key_present(e) && engines::engine_healthy(e.name))
+                .collect(),
             Some(list) => {
                 let mut out = Vec::new();
                 for name in list.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
@@ -357,20 +396,24 @@ impl Handler for SearchHandler {
             match engines::run_engine(engine, &query, fetch_limit, timeout, politeness) {
                 Ok(results) => {
                     let n = results.len();
+                    engines::engine_mark(engine.name, true, None);
                     lists.push((engine.name.to_string(), results));
                     engine_reports.push(json!({ "name": engine.name, "status": "ok", "results": n }));
                 }
-                Err(e) => engine_reports.push(json!({
-                    "name": engine.name, "status": "error",
-                    "error": { "code": e.code, "message": e.message },
-                })),
+                Err(e) => {
+                    engines::engine_mark(engine.name, false, Some(e.message.clone()));
+                    engine_reports.push(json!({
+                        "name": engine.name, "status": "error",
+                        "error": { "code": e.code, "message": e.message },
+                    }));
+                }
             }
         }
         if lists.is_empty() {
             return Err(ToolError::with_hint(
                 "ERR_ENGINE",
                 "all search engines failed",
-                json!({ "engines": engine_reports, "hint": "check network access; engines are also rate-limit protected" }),
+                json!({ "engines": engine_reports, "hint": "check network access; engines are also rate-limit protected; keyed engines need their env key set" }),
             ));
         }
 

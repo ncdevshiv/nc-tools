@@ -18,6 +18,8 @@ pub struct FetchOpts {
     pub max_redirects: usize,
     pub guard_private: bool,
     pub headers: Vec<(String, String)>,
+    /// JSON body for POST engines (Tavily/Serper)
+    pub json_body: Option<Value>,
     /// If-None-Match for cache revalidation
     pub if_none_match: Option<String>,
     pub if_modified_since: Option<String>,
@@ -46,6 +48,7 @@ impl FetchOpts {
             max_redirects: 10,
             guard_private: false,
             headers: Vec::new(),
+            json_body: None,
             if_none_match: None,
             if_modified_since: None,
         }
@@ -66,6 +69,13 @@ impl FetchOpts {
     pub fn header(mut self, k: &str, v: &str) -> FetchOpts {
         self.headers.push((k.to_string(), v.to_string()));
         self
+    }
+    /// POST with a JSON body (keyed search engines).
+    pub fn post_json(url: url::Url, body: Value) -> FetchOpts {
+        let mut o = FetchOpts::get(url);
+        o.method = "POST".into();
+        o.json_body = Some(body);
+        o
     }
     pub fn revalidate(mut self, etag: Option<String>, modified: Option<String>) -> FetchOpts {
         self.if_none_match = etag;
@@ -107,7 +117,11 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             req = req.set("If-Modified-Since", modified);
         }
 
-        let result = req.call();
+        let result = if let Some(body) = &opts.json_body {
+            req.send_json(body.clone())
+        } else {
+            req.call()
+        };
         let response = match result {
             Ok(r) => r,
             Err(ureq::Error::Status(_code, r)) => r, // 4xx/5xx are data here

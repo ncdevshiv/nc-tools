@@ -1,6 +1,6 @@
 {
   "generatedFrom": "rust/nct-mcp (build_kernel)",
-  "toolCount": 60,
+  "toolCount": 62,
   "tools": [
     {
       "name": "batch.execute",
@@ -629,8 +629,30 @@
       }
     },
     {
+      "name": "net.cite",
+      "description": "Record a durable, machine-checkable citation: net.cite {url} stores id + title + content hash + a ready-to-paste citation line (content itself lives in the fetch cache, so the quote survives link rot); net.cite {id} re-checks a stored source (unchanged / changed / dead); net.cite {} lists the ledger. Pair with net.verify to confirm a claim is actually grounded before citing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "allowPrivate": {
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Citation id to re-check (unchanged / changed / dead); omit to list the ledger",
+            "type": "string"
+          },
+          "url": {
+            "description": "URL to cite (records the source); omit to list the ledger",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
       "name": "net.fetch",
-      "description": "Read a web page as CLEAN MARKDOWN for an agent: main-content extraction discards nav/ads/boilerplate, returns title, links, token estimate, and extraction confidence. SSRF-guarded by default (private/loopback targets refused; allowPrivate to reach internal hosts), ETag-revalidated cache (set refresh to force), and Accept: text/markdown negotiation for sites that serve it. Prefer over net.http whenever you want page CONTENT, not raw protocol bytes.",
+      "description": "Read a web page as CLEAN MARKDOWN for an agent: main-content extraction discards nav/ads/boilerplate, returns title, links, token estimate, and extraction confidence. SSRF-guarded by default (private/loopback targets refused; allowPrivate to reach internal hosts), ETag-revalidated cache (set refresh to force), Accept: text/markdown negotiation, and automatic headless re-render through the system browser when a JS-heavy page extracts as empty. Prefer over net.http whenever you want page CONTENT, not raw protocol bytes.",
       "inputSchema": {
         "type": "object",
         "required": [
@@ -649,6 +671,10 @@
           },
           "refresh": {
             "description": "Bypass the cache and revalidate with the server",
+            "type": "boolean"
+          },
+          "render": {
+            "description": "Re-render JS-heavy pages through the system browser's headless mode when extraction looks empty (default true; no-op when no browser is installed)",
             "type": "boolean"
           },
           "timeoutMs": {
@@ -785,6 +811,31 @@
             "minimum": 100,
             "type": "integer",
             "maximum": 30000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "net.verify",
+      "description": "Check whether a CLAIM is actually grounded in a web page (anti-hallucination before citing): fetches (or reads the cached copy of a cited source), chunks the content, embeds claim and chunks with the local MiniLM, and returns grounded / partial / not-grounded with the best-matching span. Needs the local embedding model; net.cite {id} is the model-free health check.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "claim"
+        ],
+        "properties": {
+          "allowPrivate": {
+            "type": "boolean"
+          },
+          "claim": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
           }
         },
         "additionalProperties": false
