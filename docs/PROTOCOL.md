@@ -2,8 +2,8 @@
 
 This document is the contract for *any* reimplementation of the nc-tools
 kernel — Rust, Go, Python, Java, or a different JS runtime — that claims to
-be a compatible nc-tools implementation. The reference implementation is the archived JS oracle under
-`oracle/`; the **primary implementation is Rust** (`rust/`). A port must pass
+be a compatible nc-tools implementation. The primary (and only shipped)
+implementation is the Rust workspace in this repo (`crates/`). A port must pass
 the conformance suite (`tools/conformance.mjs`) without modification.
 
 ## 1. Scope
@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 60 tools; schema in the Rust kernel `rust/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 60 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
@@ -163,7 +163,7 @@ A direct binding calls `kernel.call(tool, args)` and receives
 args from env `NCTOOLS_CONFORMANCE_CMD`, cwd = a fresh temp workspace),
 drives it over MCP stdio, and checks:
 
-1. exact tool count (48) and all tool names present;
+1. exact tool count (60) and all tool names present;
 2. every tool has a JSON-Schema `inputSchema` and non-empty `description`;
 3. initialization handshake shape;
 4. required error codes, byte-exact, on the failure cases listed in

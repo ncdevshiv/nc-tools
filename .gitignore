@@ -1,10 +1,17 @@
+# build artifacts
+/target/
 node_modules/
-.nc-tools/
-.env.bench
-benchmark/results/
 
-# scratch run logs (dot-prefixed, written by verification runs)
+# local machine config & secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# local run artifacts (results are reproducible; transcripts stay local)
+bench/results/
+.nc-tools/
 .*.log
+.test.out.log
 
 # golden regen temp artifact
 conformance/golden/.golden.tmp.json

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { Kernel } from './driver.mjs';
 import { SERVER_BIN } from './driver.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -126,7 +126,7 @@ test('MCP server auto-sleeps after idle timeout and exits', async () => {
   await rpc('tools/call', { name: 'sys.workspace', arguments: {} });
 
   // Generous budget: the Rust binary needs ~4s cold start (vs ~1.5s for the
-  // archived JS oracle) before the 1.5s idle window even begins, so a fixed
+  // the historical JS implementation) before the 1.5s idle window even begins, so a fixed
   // 8s wait flaked under load. The assertion is "exits by itself", not speed.
   const exited = await new Promise((res) => {
     const timer = setTimeout(() => res(false), 20_000);

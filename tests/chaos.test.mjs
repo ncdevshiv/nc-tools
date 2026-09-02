@@ -1,10 +1,13 @@
-// Wave-3 tests: snapshot/rollback round-trips and chaos fault injection.
+// Wave-3 tests: snapshot/rollback round-trips. (The chaos fault-injection
+// probes were JS-oracle-era: they exercised the in-process hook API of the
+// archived JS kernel, which the Rust-only kernel does not expose. The chaos
+// experiment harness is archived in git history.)
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { Kernel } from './driver.mjs';
 
 let root;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'nc-w3-')); });
@@ -45,6 +48,7 @@ test('sys.listSnapshots shows taken snapshots', async () => {
   await k.call('sys.snapshot', { label: 's1' });
   const l = await k.call('sys.listSnapshots', {});
   assert.equal(l.result.total, 1);
+  assert.equal(l.result.snapshots.length, 1);
   assert.equal(l.result.snapshots[0].files, 1);
 });
 
@@ -57,58 +61,3 @@ test('rollback of unknown snapshot returns structured error with available list'
   assert.ok(bad.error.hint.available.length >= 1);
 });
 
-test('kernel hooks inject journaled transient failures (chaos premise)', async () => {
-  const k = new Kernel(root);
-  let calls = 0;
-  k.hooks.push((tool, args) => {
-    if (tool !== 'test.run') return null;
-    calls += 1;
-    if (calls <= 2) return { code: 'ERR_FLAKY', message: 'transient failure', hint: { retryRecommended: true } };
-    return null;
-  });
-  write('t.test.mjs', `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('ok', () => assert.equal(1, 1));\n`);
-  const r1 = await k.call('test.run', { framework: 'node' });
-  assert.equal(r1.ok, false);
-  assert.equal(r1.error.code, 'ERR_FLAKY');
-  const r2 = await k.call('test.run', { framework: 'node' });
-  assert.equal(r2.ok, false);
-  assert.equal(r2.error.code, 'ERR_FLAKY');
-  const r3 = await k.call('test.run', { framework: 'node' });
-  assert.equal(r3.ok, true);
-  assert.equal(r3.result.passed, 1);
-  // all three injected/real events are in the journal
-  const flakeEvents = k.journal.readAll().filter((e) => e.kind === 'tool.result' && e.error?.code === 'ERR_FLAKY');
-  assert.equal(flakeEvents.length, 2);
-});
-
-test('chaos can flake bash-mode test invocations (proc.spawn --test)', async () => {
-  const k = new Kernel(root);
-  let calls = 0;
-  k.hooks.push((tool, args) => {
-    const isTestRun = tool === 'proc.spawn' && JSON.stringify(args?.args ?? []).includes('--test');
-    if (!isTestRun) return null;
-    calls += 1;
-    if (calls <= 1) return { code: 'ERR_FLAKY', message: 'transient: runner lock', hint: { retryRecommended: true } };
-    return null;
-  });
-  write('t.test.mjs', `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('ok', () => assert.equal(1, 1));\n`);
-  const r1 = await k.call('proc.spawn', { cmd: 'node', args: ['--test', 't.test.mjs'] });
-  assert.equal(r1.ok, false);
-  assert.equal(r1.error.code, 'ERR_FLAKY');
-  const r2 = await k.call('proc.spawn', { cmd: 'node', args: ['--test', 't.test.mjs'] });
-  assert.equal(r2.ok, true);
-  assert.equal(r2.result.exitCode, 0);
-});
-
-test('hooks do not intercept unrelated tools', async () => {
-  const k = new Kernel(root);
-  let intercepted = 0;
-  k.hooks.push((tool, args) => {
-    if (tool === 'test.run') { intercepted += 1; return { code: 'ERR_FLAKY', message: 'x' }; }
-    return null;
-  });
-  write('a.txt', 'hi');
-  const w = await k.call('fs.write', { path: 'b.txt', content: 'yo' });
-  assert.equal(w.ok, true);
-  assert.equal(intercepted, 0);
-});

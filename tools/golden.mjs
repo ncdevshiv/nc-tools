@@ -20,8 +20,8 @@ const binName = process.platform === 'win32' ? 'nc-tools-mcp.exe' : 'nc-tools-mc
 // the golden from old code is worse than a stale release one (the release
 // rebuild is what `npm run build:rust` refreshes). Report which one was used.
 const candidates = [
-  join(repoRoot, 'rust', 'target', 'debug', binName),
-  join(repoRoot, 'rust', 'target', 'release', binName),
+  join(repoRoot, 'target', 'debug', binName),
+  join(repoRoot, 'target', 'release', binName),
 ];
 const bin = candidates
   .filter((p) => existsSync(p))

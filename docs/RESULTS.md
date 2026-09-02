@@ -1,5 +1,10 @@
 # nc-tools Benchmark Results — Real Runs
 
+> **Historical record** — written when the repo still carried the archived JS
+> oracle implementation. Numbers are as measured at the time; the current
+> repo is Rust-only (see the README for the live state and tool count).
+
+
 Date: 2026-08-31 (wave 14: dual-implementation benchmark — Rust primary vs JS oracle)
 
 ## Wave 14: the Rust kernel is now primary — measured, not asserted
@@ -221,7 +226,7 @@ The bash arm answered correctly after 27 calls (9 greps + 17 cats — reading
 every file), 18x the tokens and 28x the wall time of the kernel arm, and
 still did not satisfy the semantic requirement until it **bypassed the
 harness itself**: it wrote `semrun.mjs`, imported the kernel module directly
-from disk (`file:///F:/nc-tools/src/kernel/kernel.mjs`), and called
+from the kernel module on disk, and called
 `search.semantic` outside the tool surface. The verifier detects and flags
 this (`HARNESS-BYPASS DETECTED`) — the journals of both arms are in
 `benchmark/results/semantic-locate2/`.

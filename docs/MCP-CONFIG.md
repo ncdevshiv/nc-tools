@@ -1,22 +1,29 @@
 # Connecting any MCP agent to nc-tools
 
-The kernel ships as a standard MCP **stdio** server in two byte-compatible
-implementations. **Use the Rust binary — it is the primary artifact**: one
-static executable, no Node, no npx, no PATH shims, instant cold start.
+The kernel ships as a standard MCP **stdio** server: one static Rust executable,
+no runtime dependencies, no PATH shims, instant cold start.
 
-Build it once: `cargo build --release --manifest-path rust/Cargo.toml -p nct-mcp`
-→ `rust/target/release/nc-tools-mcp.exe` (the JS oracle server
-`oracle/mcp/server.mjs` remains available as a fallback and is the conformance
-oracle). Any MCP-capable agent — ZCode, Claude Desktop/Cli Code, Zed,
-Cursor-style MCP hosts, custom loops — can mount it with the config below.
+Build it once from the repo root:
+
+```bash
+cargo build --release -p nct-mcp
+# → target/release/nc-tools-mcp       (Linux/macOS)
+# → target/release/nc-tools-mcp.exe   (Windows)
+```
+
+Recommended: install it to a stable path that survives `cargo clean`:
+
+```bash
+npm run install:bin     # copies the release binary to ~/.local/bin and verifies it
+```
+
+Any MCP-capable agent — ZCode, Claude Desktop, Zed, Cursor-style MCP hosts,
+custom loops — can mount it with the config below.
 
 ## Ready-to-paste config
 
-**Stable install path (recommended over the target-dir path):** after
-`npm run build:rust`, run `npm run install:bin` → copies the release binary to
-`~/.local/bin/nc-tools-mcp.exe` (already on PATH) and verifies the installed
-copy serves the full tool surface. That path survives `cargo clean`, so
-client configs can point at it permanently. The configs below use it.
+Replace `/path/to/nc-tools-mcp` with your built (or installed) binary path and
+`/path/to/workspace` with the directory the kernel should anchor.
 
 ### ZCode (`config.json` → `mcp.servers`)
 
@@ -26,8 +33,8 @@ client configs can point at it permanently. The configs below use it.
     "servers": {
       "nc-tools": {
         "type": "stdio",
-        "command": "C:/Users/Ncdevshiv/.local/bin/nc-tools-mcp.exe",
-        "args": ["F:/nc-tools"],
+        "command": "/path/to/nc-tools-mcp",
+        "args": ["/path/to/workspace"],
         "env": {
           "NCTOOLS_MCP_IDLE_MS": "1800000"
         },
@@ -53,58 +60,38 @@ client configs can point at it permanently. The configs below use it.
 {
   "mcpServers": {
     "nc-tools": {
-      "command": "F:/nc-tools/rust/target/release/nc-tools-mcp.exe",
-      "args": ["F:/nc-tools"],
+      "command": "/path/to/nc-tools-mcp",
+      "args": ["/path/to/workspace"],
       "env": { "NCTOOLS_MCP_IDLE_MS": "1800000" }
     }
   }
 }
 ```
 
-### Qwen Code (`~/.qwen/settings.json` — user scope)
+### npx-only hosts (Qwen Edit and friends)
 
-```json
-{
-  "mcpServers": {
-    "nc-tools": {
-      "command": "F:/nc-tools/rust/target/release/nc-tools-mcp.exe",
-      "args": ["F:/nc-cli"],
-      "env": { "NCTOOLS_MCP_IDLE_MS": "1800000" }
-    }
-  }
-}
-```
-
-- Qwen Code selects the stdio transport by the presence of `command` (no
-  `type` field needed); the last `args` element is the workspace root the
-  kernel anchors (the server reads `argv[1] || NCTOOLS_WORKSPACE || cwd`).
-- **Qwen Edit only accepts `npx`/`uvx` as the command.** The npx form still
-  works and now routes to the STATIC kernel: `bin.nc-tools-mcp` →
-  `bin/nc-tools-mcp.mjs`, which execs the release binary (falling back to the
-  archived JS oracle only on a fresh checkout with no cargo build). For Qwen
-  specifically, run `bun add --global F:/nc-tools` with the app's BUNDLED bun
-  (`.../Qwen/resources/bun/bun.exe`) so `bun x nc-tools-mcp` resolves; the
-  app-store config `bun.exe x -y --no-install nc-tools-mcp <root>` is the
-  verified form. If the bun global lockfile develops a duplicate `nc-tools`
-  key (EBUSY on reinstall), dedupe `~/.bun/install/global/bun.lock` and retry.
-- Per-project pinning: drop a `.qwen/settings.json` in a repo with its own
-  `<workspaceRoot>` in `args`.
+Some hosts only accept `npx`/`uvx` as the launch command. This repo's
+`package.json` exposes a `bin` shim (`bin/nc-tools-mcp.mjs`) that locates and
+execs the static binary — from the repo's `target/release/`, then
+`~/.local/bin`. After `npm install` (or a global install of this package),
+`npx nc-tools-mcp /path/to/workspace` works.
 
 ### Generic MCP host (any tool that takes command+args)
 
 ```
-command: F:/nc-tools/rust/target/release/nc-tools-mcp.exe
-args:    F:/nc-tools
+command: /path/to/nc-tools-mcp
+args:    /path/to/workspace
 env:     NCTOOLS_MCP_IDLE_MS=1800000
 ```
 
 ## What the agent sees
 
-- `tools/list` → **57 typed tools**: `fs.*` (incl. `append`/`copy`/`readRange`/`tree`),
+- `tools/list` → **60 typed tools**: `fs.*` (incl. `append`/`copy`/`readRange`/`tree`),
   `patch.apply(Many)`, `search.grep/files/replace/semantic`, `code.symbols`,
   `text.diff`, `git.*` (incl. `branch/checkout/push/pull/blame`),
   `proc.spawn/start/status/readOutput/stop/runScript/watch`
-  (incl. `list`/`kill`), `test.run`, `pkg.*`, `net.http/probePort`, `env.*`,
+  (incl. `list`/`kill`), `test.run`, `pkg.*`,
+  `net.http/probePort/fetch/robots/search`, `env.*`,
   `sys.snapshot/rollback/listSnapshots/journal/workspace/doctor`, `batch.execute`.
 - Every result is structured JSON; every failure is
   `{error: {code, message, hint}}` — the agent never scrapes stdout.
@@ -113,8 +100,7 @@ env:     NCTOOLS_MCP_IDLE_MS=1800000
 - `search.semantic` is fully self-contained in the Rust binary (candle +
   all-MiniLM-L6-v2, pure Rust, local); the first use downloads the model into
   the cache dir. Set `NCTOOLS_MODEL_CACHE` to a shared dir to avoid
-  re-downloads across servers. (The archived JS oracle needs
-  `@xenova/transformers` — it is installed in `F:/nc-tools/node_modules`.)
+  re-downloads across servers.
 
 ## Parallel agents: yes, and here's what must be true
 
@@ -132,27 +118,16 @@ same workspace**. Two facts make this safe, and both are tested
    result, not a crash or corruption.
 
 Recommended per-agent layout anyway:
-- Agents *working on different tasks* → separate workspaces
-  (`server.mjs <workspaceA>` / `<workspaceB>`) — zero contention, each gets
-  its own journal.
+- Agents *working on different tasks* → separate workspaces — zero
+  contention, each gets its own journal.
 - Agents *collaborating on one workspace* → same workspace, one shared
-  journal, file-level writes are atomic (each `fs.write` is a single syscall
-  of one file).
-
-## Direct binding (no MCP host needed)
-
-```js
-// JS oracle kernel (primary kernel is Rust: rust/target/release/nc-tools-mcp.exe)
-import { Kernel } from './oracle/kernel/kernel.mjs';
-const k = new Kernel('F:/nc-tools');
-const out = await k.call('search.grep', { pattern: 'ERR_' });
-console.log(out.result);
-```
+  journal, file-level writes are atomic.
 
 ## Quick check
 
 ```bash
-node F:/nc-tools/oracle/mcp/server.mjs F:/nc-tools
-# other terminal:
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' | node F:/nc-tools/oracle/mcp/server.mjs F:/nc-tools
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' | /path/to/nc-tools-mcp /tmp
 ```
+
+Expect an `initialize` response with `serverInfo.name == "nc-tools"`, then a
+`tools/list` with 60 entries.

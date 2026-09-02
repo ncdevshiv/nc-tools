@@ -1,7 +1,12 @@
 # Phase 2 — Rust-Only Live System
 
-**Status:** Implementation complete, compile + parity green. The JS oracle is
-archived under `oracle/`; the live server is the Rust binary.
+> **Historical record** — written when the repo still carried the archived JS
+> oracle implementation. Numbers are as measured at the time; the current
+> repo is Rust-only (see the README for the live state and tool count).
+
+
+**Status:** Historical wave report (2026-09). superseded by the current
+Rust-only layout described in the README; kept for the audit trail.
 
 ## Goal
 
@@ -16,7 +21,7 @@ this report.
    invokes the built Rust binary (`nc-tools-mcp --dump-tools <out>`) instead of
    importing the JS descriptors. `nct-mcp/src/main.rs` gained a `--dump-tools`
    flag for this. `conformance/golden/tools.json` now carries
-   `"generatedFrom": "rust/nct-mcp (build_kernel)"` and **57 tools**.
+   `"generatedFrom": "nct-mcp (build_kernel)"` and **57 tools**.
 2. **JS oracle frozen.** The oracle is no longer the source of truth; the Rust
    kernel's `descriptors()` is. The golden parity test
    (`nct-mcp/tests/parity.rs`) now freezes the Rust surface and fails on any
@@ -74,7 +79,7 @@ Total resident tool surface: **57** (was 48).
 - Port `conformance/cases.mjs` to drive the Rust binary and add cases for the
   new tools; run the conformance suite against the Rust server.
 - Update `tools/crossaudit.mjs` and `tools/audit.mjs` hygiene scans for the
-  Rust-primary layout with `oracle/` archived.
+  Rust-primary layout with the JS implementation archived.
 - Port `tests/` to drive the Rust binary (some in-process-hook tests cannot
   cross the MCP boundary and need a driver harness).
 - Run the real-world benchmark (real clone, cargo builds, git, patch+rollback,

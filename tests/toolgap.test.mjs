@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { Kernel } from './driver.mjs';
 
 let root;
 let remote;

@@ -5,8 +5,14 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Kernel } from './driver.mjs';
+
+// Shared model cache: the repo's .nc-tools/model-cache (gitignored), set
+// BEFORE any server spawn so the embedder downloads once across all runs.
+process.env.NCTOOLS_MODEL_CACHE ||=
+  join(dirname(fileURLToPath(import.meta.url)), '..', '.nc-tools', 'model-cache');
 
 let root;
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'nc-sem-')); });
@@ -25,8 +31,8 @@ test('search.semantic finds files by meaning, not by string', async (t) => {
 
   let out;
   try {
-    // NCTOOLS_MODEL_CACHE is set by the test runner env; fallback to workspace cache
-    out = await k.call('search.semantic', { query: 'how are customer payments and credit card charges handled?', topK: 3, cacheDir: join(tmpdir(), 'nctools-model-cache') });
+    // shared machine cache so the model downloads once, not per test run
+    out = await k.call('search.semantic', { query: 'how are customer payments and credit card charges handled?', topK: 3 });
   } catch (e) {
     if (e.error?.code === 'ERR_EMBED_UNAVAILABLE') {
       t.skip(`embedding model unavailable on this machine/network: ${e.error.message}`);
@@ -51,7 +57,7 @@ test('search.semantic ranks unrelated content lower', async (t) => {
   const k = new Kernel(root);
   let out;
   try {
-    out = await k.call('search.semantic', { query: 'establish a database connection', topK: 2, cacheDir: join(tmpdir(), 'nctools-model-cache') });
+    out = await k.call('search.semantic', { query: 'establish a database connection', topK: 2 });
   } catch (e) {
     if (e.error?.code === 'ERR_EMBED_UNAVAILABLE') { t.skip('no model'); return; }
     throw e;

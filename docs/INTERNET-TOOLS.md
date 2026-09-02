@@ -58,7 +58,7 @@ Nobody in the open-source field combines all of: keyless operation, neural (loca
 
 ## 4. Target architecture
 
-Five layers over the existing kernel. Rust (`nct-net` crate) is primary; oracle mjs mirrors for conformance; golden shape + committed HTML fixtures make tests deterministic offline; live tests behind `RUN_LIVE=1` (spider's pattern).
+Five layers over the existing kernel. Rust (`nct-net` crate) is the implementation; golden shape + committed HTML fixtures make tests deterministic offline; live tests behind `RUN_LIVE=1` (spider's pattern).
 
 ```
 L4  INTELLIGENCE   net.research   net.watch   net.verify          (composite, semantic)

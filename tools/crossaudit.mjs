@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = join(here, '..');
 const binName = process.platform === 'win32' ? 'nc-tools-mcp.exe' : 'nc-tools-mcp';
-const serverPath = join(REPO, 'rust', 'target', 'release', binName);
+const serverPath = join(REPO, 'target', 'release', binName);
 const workspace = process.argv[2] || REPO;
 
 const findings = []; // {check, status: 'PASS'|'FAIL'|'INFO', evidence}
@@ -127,10 +127,10 @@ function connect(root) {
 
     // ---- 3. codebase hygiene via the tools themselves (no direct reads) ------
     // cross-check the docs claim against code surfaced through search
-    const todo = await call('search.grep', { pattern: '\\bTODO\\b|\\bFIXME\\b|\\bXXX\\b', path: 'rust/crates', maxResults: 50 });
-    report('no TODO/FIXME/XXX in rust/crates/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
-    const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'rust/crates', maxResults: 50 });
-    report('no placeholder/not-implemented markers in rust/crates/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
+    const todo = await call('search.grep', { pattern: '\\bTODO\\b|\\bFIXME\\b|\\bXXX\\b', path: 'crates', maxResults: 50 });
+    report('no TODO/FIXME/XXX in crates/', !todo.isError && todo.result.total === 0 ? 'PASS' : 'FAIL', `total=${todo.result.total}`);
+    const mock = await call('search.grep', { pattern: '\\bplaceholder\\b|\\bnot implemented\\b|\\bto-implement\\b', path: 'crates', maxResults: 50 });
+    report('no placeholder/not-implemented markers in crates/', !mock.isError && mock.result.total === 0 ? 'PASS' : 'FAIL', `total=${mock.result.total}`);
     // docs claim check
     const doc = await call('search.grep', { pattern: `${expected.length} tools`, path: 'docs' });
     report(`docs claim "${expected.length} tools" present`, !doc.isError && doc.result.total >= 1 ? 'PASS' : 'INFO', `hits=${doc.result.total}`);

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const SKIP_DIRS = new Set(['node_modules', '.git', '.nc-tools', 'benchmark', 'coverage', 'target', 'oracle']);
+const SKIP_DIRS = new Set(['node_modules', '.git', '.nc-tools', 'bench', 'coverage', 'target']);
 const SCAN_EXT = new Set(['.mjs', '.js', '.cjs', '.ts', '.json', '.md', '.rs', '.toml']);
 
 // Patterns that indicate unfinished/fake work in shipped source.

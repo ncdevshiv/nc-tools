@@ -1,4 +1,4 @@
-// Rust end-to-end tests: drive rust/target/release/nc-tools-mcp over MCP stdio
+// Rust end-to-end tests: drive target/release/nc-tools-mcp over MCP stdio
 // via the driver harness. Covers the 10 Phase-2 tools plus the behavioral
 // contracts the phase depends on (case-insensitive paths, single-file search,
 // proc bounds, git.status dot-dir filtering, underscored aliases).

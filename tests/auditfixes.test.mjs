@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Kernel } from '../oracle/kernel/kernel.mjs';
+import { Kernel } from './driver.mjs';
 import { SERVER_BIN } from './driver.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));

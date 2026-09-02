@@ -1,5 +1,10 @@
 # Cross-Audit Report — nc-tools audited through its own MCP server
 
+> **Historical record** — written when the repo still carried the archived JS
+> oracle implementation. Numbers are as measured at the time; the current
+> repo is Rust-only (see the README for the live state and tool count).
+
+
 Date: 2026-08-31 · Tool: `node tools/crossaudit.mjs` · Result: **20/20 PASS**
 (re-run after fixes; the pre-fix run was 15/17 with 2 real defects found)
 
@@ -11,7 +16,7 @@ mutated.
 
 ## Connection check: your configured MCP server
 
-- Config (`config.json` → `mcp.servers.nc-tools`): `node F:/nc-tools/src/mcp/server.mjs F:/nc-tools`, `NCTOOLS_MCP_IDLE_MS=1800000`.
+- Config (`config.json` → `mcp.servers.nc-tools`): `<path-to>/nc-tools-mcp <workspace>`, `NCTOOLS_MCP_IDLE_MS=1800000`.
 - zcode log events: `connect.started → connection.created → lease.acquired → server.connected`, **no `mcp.server.failed` for nc-tools**. (The `mcp.server.failed` warnings in the log are for the *remote* `document-skills:image_search` server — "official MCP rejected the current credential" — unrelated to nc-tools.)
 - Direct handshake probe: `initialize` → `{"name":"nc-tools","version":"0.1.0"}`, protocol `2024-11-05`, `tools/list` → 40 tools. **Connected and healthy.**
 
@@ -71,7 +76,7 @@ the live MCP, all fixed + regression-tested (`tests/auditfixes.test.mjs`):
    (deepest existing ancestor) and re-verifies it stays inside the root; all
    walkers (`fs.list`, `search.grep/files`, `search.semantic`,
    `sys.snapshot/rollback`) skip reparse points that leave the workspace.
-2. **Case-sensitive jail compare (Windows).** `F:/NC-TOOLS/…` and
+2. **Case-sensitive jail compare (Windows).** `/ROOT/…` (uppercase) and
    `f:/nc-tools/…` were falsely rejected as escapes; comparisons are now
    case-folded on win32.
 3. **`search.files` crashed `ERR_INTERNAL ENOTDIR` on single-file paths** — the
@@ -109,7 +114,7 @@ cycle-safety mechanism.
 
 ```bash
 node tools/crossaudit.mjs            # audits the repo
-node tools/crossaudit.mjs F:/some/dir  # audits any workspace via its MCP server
+node tools/crossaudit.mjs /some/dir  # audits any workspace via its MCP server
 ```
 
 Status after fixes: **73/73 unit tests, 14/14 conformance, 20/20 cross-audit,

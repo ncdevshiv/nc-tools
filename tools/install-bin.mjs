@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
 const exe = process.platform === 'win32' ? 'nc-tools-mcp.exe' : 'nc-tools-mcp';
-const src = join(repoRoot, 'rust', 'target', 'release', exe);
+const src = join(repoRoot, 'target', 'release', exe);
 const destDir = join(process.env.USERPROFILE || process.env.HOME, '.local', 'bin');
 const dest = join(destDir, exe);
 

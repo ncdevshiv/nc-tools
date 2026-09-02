@@ -108,44 +108,39 @@ Rules:
 
 ## 6. MCP binding
 
-The MCP binding is implemented twice, byte-compatible on the wire. The
-**primary server is the Rust binary** (`cargo build --release -p nct-mcp` →
-`rust/target/release/nc-tools-mcp.exe`); the **archived JS server**
-(`oracle/mcp/server.mjs`) remains the conformance oracle. Both speak MCP stdio
+The MCP binding is implemented once, in Rust. The server is the repo's
+primary artifact: `cargo build --release -p nct-mcp` →
+`target/release/nc-tools-mcp(.exe)`. It speaks MCP stdio
 (JSON-RPC 2.0, protocol revision `2024-11-05`): `initialize`, `tools/list`,
 `tools/call`. Every kernel tool is exposed with its JSON schema; results are
-returned as structured JSON content. Any MCP client (Claude Code, Zed, custom
-loops) can mount either with no code changes.
+returned as structured JSON content. Any MCP client (ZCode, Claude, Zed,
+custom loops) can mount it with no code changes.
 
 ## 7. Agent loop (reference implementation)
 
-`oracle/agent/agent.mjs` (archived JS oracle; also ported in
-`rust/crates/nct-agent`): a minimal, harness-agnostic agent that receives a
+`crates/nct-agent`: a minimal, harness-agnostic agent that receives a
 system prompt, a task, and the tool surface, and loops model tool-calls to
 tool execution until it emits a final answer. No terminal. Model access is an
 OpenAI-compatible chat-completions endpoint (works with any provider).
 
 ## 8. Benchmark
 
-`benchmark/` — the behavioral and efficiency layer.
+`bench/` — the behavioral and efficiency layer.
 
-- **Tasks** (`benchmark/tasks/*.json`): each has `id`, `instruction`, `setup`
-  (files to create), `verify` (a JS predicate over the workspace + journal).
-  Categories: `edit`, `create`, `investigate`, `refactor`, `fix`.
-- **Harness** (`benchmark/harness.mjs`): for each task × model: fresh
-  workspace → setup → run agent → run verifier → record transcript JSON.
+- **Tasks** (`bench/tasks.mjs`, `bench/tier3.mjs`): each has `id`,
+  `instruction`, `setup` (files to create), `verify` (a predicate over the
+  workspace + journal). Categories: `edit`, `create`, `investigate`,
+  `refactor`, `fix`.
+- **Harness** (`bench/harness.mjs`): for each task × model: fresh
+  workspace → setup → run the `nct-agent` binary → run verifier → record
+  transcript JSON.
 - **Metrics** per run: solved (verifier verdict), tool calls, tokens
   (prompt+completion from API usage), wall time, error-tool-call ratio.
 - **Verifier is real**: it inspects the resulting workspace with the same
   kernel tools and returns pass/fail with evidence. No self-report.
-
-## 8b. Rust implementation (nct-rs)
-
-`rust/` is a complete second implementation of this spec in Rust. The JS
-implementation is the **oracle**: `conformance/golden/tools.json` (frozen
-descriptor export) and `tools/conformance.mjs` (black-box protocol cases)
-grade the Rust binary — same names, same error codes, same journal format,
-same result shapes.
+- **Verifiers themselves are validated** (`bench/validate-verifiers.mjs`):
+  untouched workspace must fail, canonical solution must pass, wrong
+  solution must be rejected — machine-proven, not asserted.
 
 - `cargo build --release -p nct-mcp` produces a single static `nc-tools-mcp`
   binary (no Node, no npx, no shims — the Windows launcher/PATH class of
@@ -154,7 +149,7 @@ same result shapes.
   the advertised schema and the accepted input are the same type, so
   schema/behavior drift is a compile-time impossibility. The golden parity
   test (`cargo test -p nct-mcp --test parity`) locks the generated surface to
-  the frozen JS descriptors.
+  the frozen golden descriptors (`conformance/golden/tools.json`).
 - Crate layout is the module map: `nct-core` (errors, config, paths, journal,
   kernel), `nct-fs` (fs/patch/search/snapshots), `nct-git`, `nct-proc`
   (proc/pkg/test/env), `nct-net`, `nct-semantic` (candle MiniLM, local), and
@@ -164,8 +159,7 @@ same result shapes.
   `sid` on every event, `parentSeq` reserved for batch lineage.
 - `search.semantic` embeds with all-MiniLM-L6-v2 via candle (pure Rust, no
   API calls); the model downloads once into the cache dir, mean-pooled and
-  L2-normalized identically to the JS pipeline, sharing the same
-  `semantic-index.jsonl` cache format.
+  L2-normalized, sharing the same `semantic-index.jsonl` cache format.
 
 Run: `NCTOOLS_CONFORMANCE_CMD="<path to nc-tools-mcp.exe>" node tools/conformance.mjs`
 

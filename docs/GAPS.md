@@ -1,5 +1,10 @@
 # Tool-Surface Gap Analysis — what's missing and why it matters
 
+> **Historical record** — written when the repo still carried the archived JS
+> oracle implementation. Numbers are as measured at the time; the current
+> repo is Rust-only (see the README for the live state and tool count).
+
+
 Date: 2026-08-31 (wave 14). Evidence: `node tools/usage-audit.mjs` over all
 219 journals on disk (218 benchmark runs + dogfooding; 4,703 tool calls),
 plus the golden tool list as the coverage baseline.
