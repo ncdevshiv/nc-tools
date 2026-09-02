@@ -39,8 +39,8 @@ impl Handler for DiffHandler {
             return Err(err_no_path(&a.path2));
         }
         let ctx = (a.context.unwrap_or(3) as usize).min(50);
-        let al = fs::read_to_string(&left).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
-        let bl = fs::read_to_string(&right).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        let al = fs::read_to_string(&left).map_err(ToolError::from)?;
+        let bl = fs::read_to_string(&right).map_err(ToolError::from)?;
         let diff = build_diff(&al, &bl, ctx);
         let hunks = diff.matches("\n@@").count() + usize::from(diff.starts_with("@@"));
         Ok(json!({

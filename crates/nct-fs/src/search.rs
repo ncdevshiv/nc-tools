@@ -365,7 +365,7 @@ impl Handler for ReplaceHandler {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if fs::metadata(&base)?.is_dir() {
             walk_files_ext(&base, 0, &mut candidates)
-                .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                .map_err(ToolError::from)?;
         } else {
             candidates.push(base.clone());
         }
@@ -404,7 +404,7 @@ impl Handler for ReplaceHandler {
             let replaced = expand_replacement(&re, &content, &a.replacement);
             let changed = replaced != content;
             if !dry_run && changed {
-                fs::write(&f, replaced.as_bytes()).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                fs::write(&f, replaced.as_bytes()).map_err(ToolError::from)?;
             }
             total_matches += count;
             files.push(json!({

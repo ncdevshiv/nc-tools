@@ -185,7 +185,7 @@ fn run_pytest(k: &Kernel, path: Option<&str>, timeout_ms: Option<u64>) -> Result
             json!({ "exitCode": out.status.code(), "stderrTail": tail_str(&stderr, 300) }),
         ));
     }
-    let xml = std::fs::read_to_string(&junit).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    let xml = std::fs::read_to_string(&junit).map_err(ToolError::from)?;
     let _ = std::fs::remove_file(&junit);
     let parsed = parse_junit_xml(&xml, "pytest")?;
     if parsed["total"].as_u64() == Some(0) {

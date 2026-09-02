@@ -252,7 +252,7 @@ impl Handler for ScriptsHandler {
         if !pj.exists() {
             return Err(ToolError::with_hint("ERR_NOT_FOUND", "no package.json in workspace", json!({ "path": "package.json" })));
         }
-        let raw = std::fs::read_to_string(&pj).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        let raw = std::fs::read_to_string(&pj).map_err(ToolError::from)?;
         let parsed: Value = serde_json::from_str(&raw)
             .map_err(|e| ToolError::new("ERR_PARSE", format!("package.json is not valid JSON: {e}")))?;
         Ok(json!({ "scripts": parsed.get("scripts").cloned().unwrap_or_else(|| json!({})) }))

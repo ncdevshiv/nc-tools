@@ -110,30 +110,66 @@ On error, `ok` is `false`, `error` is `{code, message, hint?}` and
 
 ## 5. Error taxonomy
 
+The registry in `crates/nct-core/src/errors.rs` (`codes::ALL`) is the single
+source of truth; a byte-match test enforces that this table and the registry
+list exactly the same set, in both directions. Every row below starts with
+exactly one code (combined rows are not parseable by the gate).
+
 | Code | Meaning |
 |---|---|
-| `ERR_NOT_FOUND` | path or file missing (hint: `nearestExisting` files) |
+| `ERR_BAD_INPUT` | argument validation failure (hint: `missing` / `expected` field where extractable) |
+| `ERR_BAD_EDIT` | edit arguments invalid before matching (e.g. empty oldText) |
 | `ERR_BAD_PATH` | empty / non-path value |
-| `ERR_BAD_INPUT` | argument validation failure |
-| `ERR_IS_DIRECTORY` | used a directory where a file is required |
-| `ERR_REFUSED` | explicitly refused operation (e.g. root delete, batch nesting) |
-| `ERR_UNKNOWN_TOOL` | tool not in surface (hint: `available` list) |
-| `PATCH_NO_MATCH` | edit oldText not found (hint: nearest candidate lines) |
-| `PATCH_AMBIGUOUS` | edit matches more than expected |
-| `ERR_GIT` | git command failed (hint: stderr) |
-| `ERR_NOT_A_REPO` | workspace has no .git |
-| `ERR_SPAWN` / `ERR_CMD_NOT_FOUND` | process spawn issues |
-| `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
-| `ERR_PROC_NOT_FOUND` | no process with that pid (proc.kill) |
-| `ERR_TEST_PARSE` | runner produced no structured report |
-| `ERR_NO_TESTS` | runner discovered zero tests (hint: check the path/patterns) |
-| `ERR_NET` / `ERR_TIMEOUT` | network request failures |
-| `ERR_UNKNOWN_SNAPSHOT` | snapshot id unknown (hint: available) |
 | `ERR_BAD_REGEX` | invalid search pattern |
-| `ERR_NETWORK` / `ERR_PKG` | package manager failures |
+| `ERR_CMD_NOT_FOUND` | spawned command not found (hint: binary + PATH note) |
+| `ERR_EMBED_UNAVAILABLE` | local embedding model not loaded (semantic rerank/grounding) |
+| `ERR_ENGINE` | text-extraction/rerank engine failure |
+| `ERR_GIT` | git command failed (hint: stderr) |
+| `ERR_GIT_SPAWN` | git binary could not be spawned |
+| `ERR_INTERNAL` | unclassified internal defect (io/serde kinds with no specific code) |
+| `ERR_IS_DIRECTORY` | used a directory where a file is required |
+| `ERR_NET` | network request failure |
+| `ERR_NETWORK` | package-manager network failure |
+| `ERR_NOT_A_REPO` | workspace has no .git |
+| `ERR_NOT_FOUND` | path or file missing (hint: `nearestExisting` files) |
+| `ERR_NO_KEY` | required API key absent from env (names the `NCTOOLS_*_KEY` var) |
+| `ERR_NO_TESTS` | runner discovered zero tests (hint: check the path/patterns) |
+| `ERR_PANIC` | tool handler panicked; kernel caught it — server survives, error is retryable |
+| `ERR_PARSE` | runner produced no structured report / response body unparseable |
+| `ERR_PERMISSION` | OS denied access (file/dir permission; io PermissionDenied) |
+| `ERR_PKG` | package manager operation failed (hint: captured stderr) |
+| `ERR_PROC_NOT_FOUND` | no process with that pid (proc.kill) |
+| `ERR_REFUSED` | explicitly refused operation (e.g. root delete, batch nesting) |
+| `ERR_RENDER` | headless render attempt failed |
+| `ERR_RENDER_UNAVAILABLE` | no system browser available for render escalation |
+| `ERR_SPAWN` | process spawn failed for a reason other than missing command |
+| `ERR_SSRF_BLOCKED` | request to private/loopback/metadata target refused (fail-closed) |
+| `ERR_TEST_PARSE` | test runner output could not be parsed |
+| `ERR_TIMEOUT` | operation exceeded its budget (request, spawn, or wait) |
+| `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
+| `ERR_UNKNOWN_SNAPSHOT` | snapshot id unknown (hint: available) |
+| `ERR_UNKNOWN_TOOL` | tool not in surface (hint: `available` list, `didYouMean` nearest name, `retryWith` canonical MCP wire name) |
+| `PATCH_AMBIGUOUS` | edit matches more than expected |
+| `PATCH_NO_MATCH` | edit oldText not found (hint: nearest candidate lines) |
 
 Every error must have exactly these fields: `code`, `message`, optional
 `hint` (JSON object). Codes must match byte-for-byte.
+
+### 5.1 Self-healing reminders
+
+Errors carry remediation, not just diagnosis:
+
+- `ERR_UNKNOWN_TOOL` teaches the fix in one turn: when the sent name is close
+  to a registered tool (Levenshtein over the normalized wire form), the hint
+  names it (`didYouMean`) and a retryable MCP wire name (`retryWith`, e.g.
+  `mcp__nc-tools__fs_read`); the message states the accepted wire forms.
+  Case-only slips (`FS_READ`) resolve without error.
+- `ERR_PANIC` proves crash safety: a panicking handler never kills the server;
+  the panic message is the root cause in `error.message`, and subsequent
+  calls on the same connection succeed.
+- io errors surface their specific kind (`NotFound` → `ERR_NOT_FOUND`,
+  `PermissionDenied` → `ERR_PERMISSION`, `TimedOut` → `ERR_TIMEOUT`,
+  `ConnectionRefused` → `ERR_REFUSED`) rather than a blanket internal code.
 
 ## 6. Transport bindings
 

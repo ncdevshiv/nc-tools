@@ -280,7 +280,7 @@ pub fn read_impl(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64>
             json!({ "path": path }),
         ));
     }
-    let raw = fs::read_to_string(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    let raw = fs::read_to_string(&abs).map_err(ToolError::from)?;
     let lines: Vec<&str> = raw.split('\n').collect();
     let total_lines = lines.len() as u64;
     let off = offset.unwrap_or(1).max(1).saturating_sub(1);
@@ -342,7 +342,7 @@ pub fn write_resolved(path: &str, abs: &Path, content: &str) -> Result<Value, To
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(abs, content).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    fs::write(abs, content).map_err(ToolError::from)?;
     Ok(json!({
         "path": path,
         "bytes": content.len(),
@@ -406,7 +406,7 @@ impl Handler for AppendHandler {
             .create(true)
             .append(true)
             .open(&abs)
-            .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            .map_err(ToolError::from)?;
         f.write_all(a.content.as_bytes())?;
         Ok(json!({ "path": a.path, "bytes": a.content.len(), "created": !existed, "appended": true }))
     }
@@ -437,14 +437,14 @@ impl Handler for CopyHandler {
 /// Recursive copy mirroring Node cpSync {recursive:true} (probed): merge into
 /// existing dirs, overwrite existing files, never follow reparse points.
 fn copy_any(from: &Path, to: &Path) -> Result<(), ToolError> {
-    let meta = fs::symlink_metadata(from).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    let meta = fs::symlink_metadata(from).map_err(ToolError::from)?;
     if meta.is_symlink() || is_reparse_point(from) {
         return Ok(()); // skipped, as Node cpSync skips junctions
     }
     if meta.is_dir() {
         fs::create_dir_all(to)?;
         let mut entries: Vec<PathBuf> = fs::read_dir(from)
-            .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+            .map_err(ToolError::from)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .collect();
@@ -461,7 +461,7 @@ fn copy_any(from: &Path, to: &Path) -> Result<(), ToolError> {
                 format!("ERR_FS_CP_NON_DIR_TO_DIR: cannot copy {} onto a directory", from.display()),
             ));
         }
-        fs::copy(from, to).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        fs::copy(from, to).map_err(ToolError::from)?;
         Ok(())
     }
 }
@@ -490,7 +490,7 @@ fn list_walk(
     out: &mut Vec<Value>,
 ) -> Result<(), ToolError> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
-        .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+        .map_err(ToolError::from)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .collect();
@@ -550,7 +550,7 @@ impl Handler for MkdirHandler {
         if a.recursive.unwrap_or(true) {
             fs::create_dir_all(&abs)?;
         } else {
-            fs::create_dir(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            fs::create_dir(&abs).map_err(ToolError::from)?;
         }
         Ok(json!({ "path": a.path, "created": !existed }))
     }
@@ -617,7 +617,7 @@ impl Handler for MoveHandler {
         if let Some(parent) = to_abs.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::rename(&from_abs, &to_abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        fs::rename(&from_abs, &to_abs).map_err(ToolError::from)?;
         Ok(json!({ "from": a.from, "to": a.to, "moved": true }))
     }
 }
@@ -664,18 +664,18 @@ impl Handler for ReadRangeHandler {
         }
         use std::io::{Read, Seek, SeekFrom};
         let max_bytes = a.maxBytes.unwrap_or(65_536) as usize;
-        let mut f = fs::File::open(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        let mut f = fs::File::open(&abs).map_err(ToolError::from)?;
         // 1-based line number where the window starts: count newlines in [0, offset).
         let mut start_line: u64 = 1;
         if offset > 0 {
-            f.seek(SeekFrom::Start(0)).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            f.seek(SeekFrom::Start(0)).map_err(ToolError::from)?;
             let mut remaining = offset as usize;
             let mut buf = [0u8; 65_536];
             while remaining > 0 {
                 let take = remaining.min(buf.len());
                 let n = f
                     .read(&mut buf[..take])
-                    .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                    .map_err(ToolError::from)?;
                 if n == 0 {
                     break;
                 }
@@ -683,13 +683,13 @@ impl Handler for ReadRangeHandler {
                 remaining -= n;
             }
         }
-        f.seek(SeekFrom::Start(offset)).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        f.seek(SeekFrom::Start(offset)).map_err(ToolError::from)?;
         let mut window = vec![0u8; max_bytes];
         let mut filled = 0usize;
         while filled < max_bytes {
             let n = f
                 .read(&mut window[filled..])
-                .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                .map_err(ToolError::from)?;
             if n == 0 {
                 break;
             }
@@ -786,7 +786,7 @@ fn tree_walk(
         return Ok(());
     }
     let mut kids: Vec<PathBuf> = fs::read_dir(dir)
-        .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+        .map_err(ToolError::from)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .collect();

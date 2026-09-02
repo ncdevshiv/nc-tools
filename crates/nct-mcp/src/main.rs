@@ -138,6 +138,24 @@ fn main() {
         .unwrap_or(30 * 60 * 1000);
     eprintln!("[nc-tools-mcp] serving workspace: {}", workspace.display());
 
+    // Panic hook: any escape from the boundary (or from the loop itself)
+    // leaves a located breadcrumb on stderr — timestamp, panic site, message
+    // — instead of Rust's default thread dump. Panics inside tool handlers
+    // never reach this; kernel.rs converts them to ERR_PANIC results.
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "opaque panic payload".to_string());
+        eprintln!("[nc-tools-mcp] PANIC at {loc}: {msg}");
+    }));
+
     // Idle auto-exit: a background watcher exits the process after `idle_ms`
     // of no requests, so a dormant agent frees the process even while the main
     // loop is blocked on stdin (server.mjs idleMsFromEnv semantics). idle_ms of

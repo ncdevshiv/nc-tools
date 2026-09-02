@@ -20,3 +20,7 @@ pub use session::SessionEnv;
 
 /// Windows creation flag to hide child console windows (node windowsHide:true).
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// MCP server name — single source for the serverInfo handshake and for the
+/// `mcp__<server>__<tool>` wire-form reminders in unknown-tool errors.
+pub const MCP_SERVER_NAME: &str = "nc-tools";

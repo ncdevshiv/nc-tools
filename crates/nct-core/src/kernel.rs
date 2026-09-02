@@ -31,10 +31,32 @@ pub trait Handler: Send + Sync {
 
 /// Typed deserialization helper for handlers: args must match the tool's
 /// declared input schema; failures surface as ERR_BAD_INPUT with the
-/// serde path-precise message.
+/// serde path-precise message plus a field-level hint (`missing` /
+/// `unknownField` / `expected`) so the agent can fix the call in one turn.
 pub fn parse_args<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, ToolError> {
-    serde_json::from_value::<T>(args.clone())
-        .map_err(|e| ToolError::new("ERR_BAD_INPUT", format!("invalid arguments: {e}")))
+    serde_json::from_value::<T>(args.clone()).map_err(|e| {
+        let msg = e.to_string();
+        let mut hint = serde_json::Map::new();
+        for (marker, key) in
+            [("missing field `", "missing"), ("unknown field `", "unknownField")]
+        {
+            if let Some(i) = msg.find(marker) {
+                let rest = &msg[i + marker.len()..];
+                if let Some(end) = rest.find('`') {
+                    hint.insert(key.to_string(), json!(rest[..end].to_string()));
+                    break;
+                }
+            }
+        }
+        if let Some(i) = msg.find("expected ") {
+            let expected = msg[i + "expected ".len()..].trim_end();
+            if !expected.is_empty() {
+                hint.insert("expected".to_string(), json!(expected));
+            }
+        }
+        let err = ToolError::new(crate::errors::codes::BAD_INPUT, format!("invalid arguments: {msg}"));
+        if hint.is_empty() { err } else { err.with_value_hint(hint) }
+    })
 }
 
 /// Fault-injection hook (chaos harness): returns Some(error) to inject a
@@ -89,7 +111,7 @@ impl Kernel {
     }
 
     pub fn add_hook(&mut self, hook: Hook) {
-        self.hooks.lock().unwrap().push(hook);
+        self.hooks.lock().unwrap_or_else(|p| p.into_inner()).push(hook);
     }
 
     pub fn list_tools(&self) -> Vec<String> {
@@ -110,9 +132,19 @@ impl Kernel {
         if self.tools.contains_key(name) {
             return name.to_string();
         }
+        // Case only slipped by the caller (FS_READ): tool names are lowercase.
+        let lower = name.to_lowercase();
+        if self.tools.contains_key(&lower) {
+            return lower;
+        }
         let normalized = name.replace("__", ".").replace('_', ".");
         if self.tools.contains_key(&normalized) {
             return normalized;
+        }
+        // Case slipped through the underscore normalization too (FS_READ).
+        let norm_lower = normalized.to_lowercase();
+        if self.tools.contains_key(&norm_lower) {
+            return norm_lower;
         }
         let bytes = normalized.as_bytes();
         for i in 0..bytes.len() {
@@ -120,6 +152,10 @@ impl Kernel {
                 let rest = &normalized[i + 1..];
                 if self.tools.contains_key(rest) {
                     return rest.to_string();
+                }
+                let rest_lower = rest.to_lowercase();
+                if self.tools.contains_key(&rest_lower) {
+                    return rest_lower;
                 }
             }
         }
@@ -176,19 +212,122 @@ impl Kernel {
 
     fn dispatch(&self, tool_name: &str, args: &Value) -> Result<Value, ToolError> {
         let Some(entry) = self.tools.get(tool_name) else {
-            return Err(ToolError::with_hint(
-                "ERR_UNKNOWN_TOOL",
-                format!("Unknown tool: {tool_name}"),
-                json!({ "available": self.list_tools() }),
-            ));
+            return Err(self.unknown_tool_error(tool_name));
         };
-        for hook in self.hooks.lock().unwrap().iter() {
-            if let Some(injected) = hook(tool_name, args) {
-                return Err(injected);
+        // The hooks guard MUST be dropped before the handler runs: handlers
+        // legitimately re-enter dispatch (batch sub-calls, composite tools) —
+        // holding the lock across the call deadlocks them.
+        {
+            let hooks = self.hooks.lock().unwrap_or_else(|p| p.into_inner());
+            for hook in hooks.iter() {
+                if let Some(injected) = hook(tool_name, args) {
+                    return Err(injected);
+                }
             }
         }
-        entry.handler.call(self, args)
+        // Panic boundary: a handler bug must surface as a structured,
+        // retryable error (ERR_PANIC) — never kill the server process, which
+        // over stdio would strand the agent with a dead pipe and no code.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry.handler.call(self, args))) {
+            Ok(result) => result,
+            Err(payload) => Err(panic_error(tool_name, payload.as_ref())),
+        }
     }
+
+    /// Unknown-tool error with remediation: the full surface, the closest
+    /// name when the sent one looks like a typo, and the accepted wire forms
+    /// — enough for a calling agent to fix its next attempt in one turn.
+    fn unknown_tool_error(&self, sent: &str) -> ToolError {
+        let mut hint = json!({ "available": self.list_tools() });
+        let mut message = format!("Unknown tool: {sent}");
+        let normalized = sent.to_lowercase().replace("__", ".").replace(['_', '-'], ".");
+        let mut best: Option<(&str, usize)> = None;
+        for name in self.tools.keys() {
+            let d = levenshtein(&normalized, name);
+            if best.is_none_or(|(_, bd)| d < bd) {
+                best = Some((name, d));
+            }
+        }
+        if let Some((name, d)) = best {
+            let threshold = std::cmp::max(2, name.len() / 3);
+            if d <= threshold {
+                let mcp = format!("mcp__{}__{}", crate::MCP_SERVER_NAME, name.replace('.', "_"));
+                message.push_str(&format!(
+                    " — did you mean '{name}'? Accepted wire forms: '{name}', '{}', '{mcp}'",
+                    name.replace('.', "_")
+                ));
+                hint["didYouMean"] = json!(name);
+                hint["retryWith"] = json!(mcp);
+            }
+        }
+        // Server-prefixed wire form with no tool after the prefix (the
+        // `mcp__nc-tools=` class): the fix is the format itself, not a guess.
+        // Any non-alphanumeric is a separator here — stray `=`/`:` must not
+        // fuse with the last token.
+        const SERVER_HEADS: [&str; 7] = ["mcp", "nc", "tools", "tool", "nctools", "kernel", "server"];
+        let clean: String = normalized
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '.' })
+            .collect();
+        let tokens: Vec<&str> = clean.split('.').filter(|t| !t.is_empty()).collect();
+        let server_only = !tokens.is_empty() && tokens.iter().all(|t| SERVER_HEADS.contains(t));
+        if server_only {
+            message.push_str(&format!(
+                " — no tool name after the server prefix; use mcp__{}__<toolname> \
+                 (dots become underscores), e.g. mcp__{}__fs_read or mcp__{}__net_fetch",
+                crate::MCP_SERVER_NAME, crate::MCP_SERVER_NAME, crate::MCP_SERVER_NAME
+            ));
+            hint["wireForm"] = json!(format!("mcp__{}__<toolname>", crate::MCP_SERVER_NAME));
+            hint["examples"] = json!([
+                format!("mcp__{}__fs_read", crate::MCP_SERVER_NAME),
+                format!("mcp__{}__net_fetch", crate::MCP_SERVER_NAME),
+                format!("mcp__{}__batch_execute", crate::MCP_SERVER_NAME),
+            ]);
+        } else if hint.get("didYouMean").is_none() {
+            message.push_str(
+                " — pick a name from hint.available; MCP clients may render it as \
+                 mcp__<server>__<name> or <name> with dots as underscores",
+            );
+        }
+        ToolError::with_hint(crate::errors::codes::UNKNOWN_TOOL, message, hint)
+    }
+}
+
+/// A caught panic becomes a first-class ToolError: code, the panic message
+/// itself (the exact root cause), and a note that the server survived.
+fn panic_error(tool: &str, payload: &(dyn std::any::Any + Send)) -> ToolError {
+    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "opaque panic payload".to_string()
+    };
+    ToolError::with_hint(
+        crate::errors::codes::PANIC,
+        format!("tool '{tool}' panicked: {msg}"),
+        json!({
+            "tool": tool,
+            "note": "internal defect, server recovered; stderr log has the location; retry or use another tool"
+        }),
+    )
+}
+
+/// Levenshtein edit distance, two-row DP, for did-you-mean suggestions.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let sub = prev[j - 1] + usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = usize::min(usize::min(prev[j] + 1, cur[j - 1] + 1), sub);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 /// Short session id from time+pid — stable per server process, no external rng.
@@ -254,5 +393,69 @@ mod tests {
             let resolved = k.resolve_tool(sent);
             assert_eq!(resolved, sent, "unknown name must not be mis-resolved: {sent}");
         }
+    }
+
+    #[test]
+    fn resolve_tool_accepts_case_slips() {
+        let k = kernel_with_tools();
+        assert_eq!(k.resolve_tool("FS_READ"), "fs.read");
+        assert_eq!(k.resolve_tool("Fs.Read"), "fs.read");
+        assert_eq!(k.resolve_tool("fs_READ"), "fs.read");
+        // mcp render + case combined: head stripped, remainder case-fixed
+        assert_eq!(k.resolve_tool("MCP__NC-TOOLS__GIT__STATUS"), "git.status");
+        // resolving must be exact-tool, not fuzzy: readx ≠ read, any case
+        assert_eq!(k.resolve_tool("FS_READX"), "FS_READX");
+    }
+
+    struct Panicky;
+    impl Handler for Panicky {
+        fn call(&self, _k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
+            panic!("injected boom: root cause proof");
+        }
+    }
+
+    #[test]
+    fn panicking_handler_becomes_err_panic_and_kernel_survives() {
+        let mut k = kernel_with_tools();
+        k.register("boom.tool", "d", json!({}), Arc::new(Panicky));
+        let out = k.call("boom.tool", &json!({}));
+        assert!(!out.ok);
+        let e = out.error.expect("panic must produce an error");
+        assert_eq!(e.code, "ERR_PANIC", "got: {e:?}");
+        assert!(e.message.contains("injected boom: root cause proof"), "panic message must be the root cause: {}", e.message);
+        // the kernel must still be fully functional afterwards
+        assert!(k.call("fs.read", &json!({})).result.is_some() || k.call("fs.read", &json!({})).error.is_some());
+        let names = k.list_tools();
+        assert!(names.contains(&"boom.tool".to_string()));
+    }
+
+    #[test]
+    fn unknown_tool_error_carries_did_you_mean_and_retry() {
+        let k = kernel_with_tools();
+        let out = k.call("fs.rea", &json!({}));
+        let e = out.error.expect("must error");
+        assert_eq!(e.code, "ERR_UNKNOWN_TOOL");
+        assert!(e.message.contains("did you mean 'fs.read'"), "message: {}", e.message);
+        assert_eq!(e.hint.as_ref().unwrap()["didYouMean"], json!("fs.read"));
+        assert_eq!(e.hint.as_ref().unwrap()["retryWith"], json!("mcp__nc-tools__fs_read"));
+        // garbage far from any name must NOT guess
+        let junk = k.call("zzzzzz", &json!({}));
+        assert!(junk.error.unwrap().hint.as_ref().unwrap().get("didYouMean").is_none());
+    }
+
+    #[test]
+    fn server_prefixed_name_without_tool_teaches_wire_form() {
+        let k = kernel_with_tools();
+        for sent in ["mcp__nc-tools=", "mcp__nc-tools", "nc-tools", "mcp__nc-tools:"] {
+            let out = k.call(sent, &json!({}));
+            let e = out.error.expect("must error");
+            assert_eq!(e.code, "ERR_UNKNOWN_TOOL");
+            let hint = e.hint.as_ref().unwrap();
+            assert_eq!(hint["wireForm"], json!("mcp__nc-tools__<toolname>"), "sent: {sent}");
+            assert!(hint["examples"].as_array().map_or(false, |a| !a.is_empty()), "sent: {sent}");
+            assert!(hint.get("didYouMean").is_none(), "must not guess a tool: {sent}");
+        }
+        // a real tool behind the prefix is unaffected (resolves, no error)
+        assert_eq!(k.resolve_tool("mcp__nc-tools__fs__read"), "fs.read");
     }
 }

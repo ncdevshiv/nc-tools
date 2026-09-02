@@ -93,7 +93,7 @@ fn apply_impl(root: &std::path::Path, abs: &std::path::Path, path: &str, edits: 
     if meta.is_none() || is_dir {
         return Err(crate::fs_tools::err_no_file(path, abs, root));
     }
-    let src = fs::read_to_string(abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    let src = fs::read_to_string(abs).map_err(ToolError::from)?;
     let lines: Vec<&str> = src.split('\n').collect();
 
     let mut applied = Vec::new();
@@ -124,7 +124,7 @@ fn apply_impl(root: &std::path::Path, abs: &std::path::Path, path: &str, edits: 
         out = out.replace(&edit.oldText, &edit.newText);
         applied.push(json!({ "index": i, "replacements": count }));
     }
-    fs::write(abs, &out).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    fs::write(abs, &out).map_err(ToolError::from)?;
     Ok(json!({ "path": path, "applied": applied, "bytes": out.len() }))
 }
 

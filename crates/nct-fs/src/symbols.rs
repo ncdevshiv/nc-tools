@@ -43,7 +43,7 @@ impl Handler for SymbolsHandler {
             files.push(base.clone());
         } else {
             walk_files_ext(&base, 0, &mut files)
-                .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                .map_err(ToolError::from)?;
         }
         let rust_pats = compile(&[
             ("fn", r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"#),

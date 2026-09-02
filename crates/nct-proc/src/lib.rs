@@ -724,7 +724,7 @@ impl Handler for RunScriptHandler {
                     nct_core::now_ms(),
                     ext
                 ));
-                std::fs::write(&tmp, src).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                std::fs::write(&tmp, src).map_err(ToolError::from)?;
                 (tmp, true)
             }
             (None, Some(p)) => {
