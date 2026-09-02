@@ -96,6 +96,13 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
 
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_millis(opts.timeout_ms))
+        // socket-level read timeout: the agent-level timeout does NOT cover
+        // body reads — a response with no content-length/transfer-encoding
+        // ("read until close") blocks read_to_string forever on a keep-alive
+        // socket (observed live: en.wikipedia.org article pages). The read
+        // timeout turns that hang into a structured ERR_TIMEOUT.
+        .timeout_read(Duration::from_millis(opts.timeout_ms.min(20_000)))
+        .timeout_connect(Duration::from_secs(10))
         .redirects(0)
         .user_agent("nc-tools/1.0 (+agent; net.fetch)")
         .build();

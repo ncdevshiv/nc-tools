@@ -170,6 +170,12 @@ impl Handler for CiteHandler {
                     "markdown": body,
                 });
                 append_source(&k.root, &entry)?;
+                // citing is stronger evidence of usefulness than a bare read
+                let host = url::Url::parse(url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+                if !host.is_empty() {
+                    let mut auth = crate::authority::AuthorityStore::load(&k.root);
+                    auth.bump(&host, 3);
+                }
                 let _ = k.journal.append("net.cite", json!({ "id": id, "url": url, "hash": content_hash, "stale": stale, "sid": k.sid }));
             }
             return Ok(json!({

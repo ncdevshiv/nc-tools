@@ -10,14 +10,18 @@ use serde_json::{json, Value};
 use nct_core::errors::ToolError;
 use nct_core::kernel::{parse_args, Handler, Kernel};
 
+pub mod authority;
 pub mod cache;
 pub mod cite;
 pub mod engines;
 pub mod extract;
 pub mod fetch;
+pub mod fleet;
 pub mod httpx;
 pub mod render;
 pub mod robots;
+pub mod routing;
+pub mod sources;
 pub mod ssrf;
 
 pub const HTTP_DESC: &str = "Perform a raw HTTP request. Returns status, headers, body (capped), duration, redirect chain. blockPrivate=true refuses private/loopback targets. Replaces curl/wget; use net.fetch when you want readable page content.";

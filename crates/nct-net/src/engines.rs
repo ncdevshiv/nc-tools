@@ -30,6 +30,23 @@ pub enum EngineKind {
     Tavily,
     /// Serper Google search API (POST JSON)
     Serper,
+    /// Bing web search RSS (keyless)
+    BingRss,
+    /// Google News RSS (keyless)
+    GnewsRss,
+    /// StackExchange API (keyless)
+    StackExchange,
+    /// OpenAlex academic works API (keyless)
+    OpenAlex,
+    /// arXiv Atom API (keyless)
+    Arxiv,
+    /// npm registry search (keyless)
+    Npm,
+    /// crates.io search API (keyless)
+    Crates,
+    /// SearXNG public instance (runtime-discovered fleet; run via the fleet
+    /// path in SearchHandler, not through run_engine)
+    Searxng,
 }
 
 pub struct EngineDef {
@@ -37,19 +54,39 @@ pub struct EngineDef {
     pub kind: EngineKind,
     /// Env var carrying the API key (keyed engines only run when set)
     pub key_env: Option<&'static str>,
+    /// Primary intent class this source serves (routing hint, not a hard gate)
+    pub intent: Intent,
+}
+
+/// Query intent classes for local routing (W-Net-2b).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Intent {
+    General,
+    News,
+    HowTo,
+    Academic,
+    Package,
 }
 
 pub const ENGINES: &[EngineDef] = &[
-    EngineDef { name: "hn", kind: EngineKind::Hn, key_env: None },
-    EngineDef { name: "wikipedia", kind: EngineKind::Wikipedia, key_env: None },
-    EngineDef { name: "ddg", kind: EngineKind::DdgLite, key_env: None },
-    EngineDef { name: "mojeek", kind: EngineKind::Mojeek, key_env: None },
+    EngineDef { name: "hn", kind: EngineKind::Hn, key_env: None, intent: Intent::General },
+    EngineDef { name: "wikipedia", kind: EngineKind::Wikipedia, key_env: None, intent: Intent::General },
+    EngineDef { name: "ddg", kind: EngineKind::DdgLite, key_env: None, intent: Intent::General },
+    EngineDef { name: "mojeek", kind: EngineKind::Mojeek, key_env: None, intent: Intent::General },
     // keyed engines — the recall fix for navigational queries (the keyless
     // HTML scrapers get challenge-walled); they join "auto" only when their
     // env key is present
-    EngineDef { name: "brave", kind: EngineKind::Brave, key_env: Some("NCTOOLS_BRAVE_KEY") },
-    EngineDef { name: "tavily", kind: EngineKind::Tavily, key_env: Some("NCTOOLS_TAVILY_KEY") },
-    EngineDef { name: "serper", kind: EngineKind::Serper, key_env: Some("NCTOOLS_SERPER_KEY") },
+    EngineDef { name: "brave", kind: EngineKind::Brave, key_env: Some("NCTOOLS_BRAVE_KEY"), intent: Intent::General },
+    EngineDef { name: "tavily", kind: EngineKind::Tavily, key_env: Some("NCTOOLS_TAVILY_KEY"), intent: Intent::General },
+    EngineDef { name: "serper", kind: EngineKind::Serper, key_env: Some("NCTOOLS_SERPER_KEY"), intent: Intent::General },
+    // W-Net-2b keyless source wave — all live-validated 2026-09-02
+    EngineDef { name: "bing-rss", kind: EngineKind::BingRss, key_env: None, intent: Intent::General },
+    EngineDef { name: "gnews", kind: EngineKind::GnewsRss, key_env: None, intent: Intent::News },
+    EngineDef { name: "stackexchange", kind: EngineKind::StackExchange, key_env: None, intent: Intent::HowTo },
+    EngineDef { name: "openalex", kind: EngineKind::OpenAlex, key_env: None, intent: Intent::Academic },
+    EngineDef { name: "arxiv", kind: EngineKind::Arxiv, key_env: None, intent: Intent::Academic },
+    EngineDef { name: "npm", kind: EngineKind::Npm, key_env: None, intent: Intent::Package },
+    EngineDef { name: "crates", kind: EngineKind::Crates, key_env: None, intent: Intent::Package },
 ];
 
 pub fn engine_by_name(name: &str) -> Option<&'static EngineDef> {
@@ -58,8 +95,12 @@ pub fn engine_by_name(name: &str) -> Option<&'static EngineDef> {
 
 /// The endpoint for one engine query (GET form-encoded).
 pub fn endpoint(engine: &EngineDef, query: &str, limit: usize) -> String {
+    endpoint_str(engine.kind, query, limit)
+}
+
+fn endpoint_str(kind: EngineKind, query: &str, limit: usize) -> String {
     let q = urlencode(query);
-    match engine.kind {
+    match kind {
         EngineKind::Hn => format!("https://hn.algolia.com/api/v1/search?query={q}&hitsPerPage={limit}"),
         EngineKind::Wikipedia => {
             format!("https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={q}&format=json&srlimit={limit}&origin=*")
@@ -70,6 +111,22 @@ pub fn endpoint(engine: &EngineDef, query: &str, limit: usize) -> String {
         // POST endpoints: the path is the endpoint; query rides in the body
         EngineKind::Tavily => "https://api.tavily.com/search".to_string(),
         EngineKind::Serper => "https://google.serper.dev/search".to_string(),
+        EngineKind::BingRss => format!("https://www.bing.com/search?q={q}&format=rss&count={limit}"),
+        EngineKind::GnewsRss => {
+            format!("https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en")
+        }
+        EngineKind::StackExchange => {
+            format!("https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q={q}&site=stackoverflow&pagesize={limit}&filter=withbody")
+        }
+        EngineKind::OpenAlex => {
+            format!("https://api.openalex.org/works?search={q}&per-page={limit}&mailto=nc-tools@localhost.dev")
+        }
+        EngineKind::Arxiv => {
+            format!("https://export.arxiv.org/api/query?search_query=all:{q}&max_results={limit}&sortBy=relevance")
+        }
+        EngineKind::Searxng => String::new(), // fleet path builds its own URLs
+        EngineKind::Npm => format!("https://registry.npmjs.org/-/v1/search?text={q}&size={limit}"),
+        EngineKind::Crates => format!("https://crates.io/api/v1/crates?q={q}&per_page={limit}"),
     }
 }
 
@@ -84,7 +141,11 @@ pub struct RawResult {
 /// Parse one engine's response body. Pure: same body → same results (the
 /// offline unit tests live at the bottom of this file, fed by fixtures).
 pub fn parse(engine: &EngineDef, body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
-    let results = match engine.kind {
+    parse_by_kind(engine.kind, body, limit)
+}
+
+fn parse_by_kind(kind: EngineKind, body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
+    let results = match kind {
         EngineKind::Hn => parse_hn(body, limit)?,
         EngineKind::Wikipedia => parse_wikipedia(body, limit)?,
         EngineKind::DdgLite => parse_ddg_lite(body, limit),
@@ -92,6 +153,13 @@ pub fn parse(engine: &EngineDef, body: &str, limit: usize) -> Result<Vec<RawResu
         EngineKind::Brave => parse_brave(body, limit)?,
         EngineKind::Tavily => parse_tavily(body, limit)?,
         EngineKind::Serper => parse_serper(body, limit)?,
+        EngineKind::BingRss | EngineKind::GnewsRss => super::sources::parse_rss(body, limit),
+        EngineKind::StackExchange => super::sources::parse_stackexchange(body, limit)?,
+        EngineKind::OpenAlex => super::sources::parse_openalex(body, limit)?,
+        EngineKind::Arxiv => super::sources::parse_arxiv(body, limit),
+        EngineKind::Searxng => super::sources::parse_searxng(body, limit)?,
+        EngineKind::Npm => super::sources::parse_npm(body, limit)?,
+        EngineKind::Crates => super::sources::parse_crates(body, limit)?,
     };
     Ok(results.into_iter().take(limit).collect())
 }
@@ -434,31 +502,44 @@ fn politeness_gate(host: &str, min_interval_ms: u64) {
     }
 }
 
+/// Named-dispatch wrapper so parallel workers can run an engine by name+kind.
+/// Engine names are 'static literals in ENGINES — resolve to the static def.
+pub fn run_engine_named(name: &str, kind: EngineKind, query: &str, limit: usize, timeout_ms: u64, politeness_ms: u64) -> Result<Vec<RawResult>, ToolError> {
+    let key_env = engine_by_name(name).and_then(|e| e.key_env);
+    run_engine_fields(name, kind, key_env, query, limit, timeout_ms, politeness_ms)
+}
+
 /// Fetch + parse one engine. Network failure or bad parse degrades to Err —
 /// the caller records it per-engine and keeps going.
 pub fn run_engine(engine: &EngineDef, query: &str, limit: usize, timeout_ms: u64, politeness_ms: u64) -> Result<Vec<RawResult>, ToolError> {
-    let api_key = engine.key_env.and_then(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()));
-    if engine.key_env.is_some() && api_key.is_none() {
+    run_engine_fields(engine.name, engine.kind, engine.key_env, query, limit, timeout_ms, politeness_ms)
+}
+
+/// Field-level entry point — parallel workers pass name/kind directly without
+/// needing a 'static EngineDef. `name` must be one of the static engine names.
+pub fn run_engine_fields(name: &str, kind: EngineKind, key_env: Option<&'static str>, query: &str, limit: usize, timeout_ms: u64, politeness_ms: u64) -> Result<Vec<RawResult>, ToolError> {
+    let api_key = key_env.and_then(|env| std::env::var(env).ok().filter(|v| !v.trim().is_empty()));
+    if key_env.is_some() && api_key.is_none() {
         return Err(ToolError::with_hint(
             "ERR_NO_KEY",
-            format!("engine {} requires an API key", engine.name),
-            json!({ "engine": engine.name, "env": engine.key_env }),
+            format!("engine {name} requires an API key"),
+            json!({ "engine": name, "env": key_env }),
         ));
     }
-    politeness_gate(engine.name, politeness_ms);
-    let mut opts = match engine.kind {
+    politeness_gate(name, politeness_ms);
+    let mut opts = match kind {
         EngineKind::Tavily => crate::httpx::FetchOpts::post_json(
-            crate::ssrf::parse_http_url(&endpoint(engine, query, limit))?,
+            crate::ssrf::parse_http_url(&endpoint_str(kind, query, limit))?,
             json!({ "api_key": api_key, "query": query, "max_results": limit, "search_depth": "basic" }),
         ),
         EngineKind::Serper => crate::httpx::FetchOpts::post_json(
-            crate::ssrf::parse_http_url(&endpoint(engine, query, limit))?,
+            crate::ssrf::parse_http_url(&endpoint_str(kind, query, limit))?,
             json!({ "q": query, "num": limit }),
         )
         .header("X-API-KEY", api_key.as_deref().unwrap_or_default()),
         _ => {
-            let mut o = crate::httpx::FetchOpts::get(crate::ssrf::parse_http_url(&endpoint(engine, query, limit))?);
-            if engine.kind == EngineKind::Brave {
+            let mut o = crate::httpx::FetchOpts::get(crate::ssrf::parse_http_url(&endpoint_str(kind, query, limit))?);
+            if kind == EngineKind::Brave {
                 o = o.header("X-Subscription-Token", api_key.as_deref().unwrap_or_default()).header("Accept", "application/json");
             }
             o
@@ -469,11 +550,11 @@ pub fn run_engine(engine: &EngineDef, query: &str, limit: usize, timeout_ms: u64
     if !outcome.ok {
         return Err(ToolError::with_hint(
             "ERR_ENGINE",
-            format!("engine {} returned HTTP {}", engine.name, outcome.status),
-            json!({ "engine": engine.name, "status": outcome.status }),
+            format!("engine {name} returned HTTP {}", outcome.status),
+            json!({ "engine": name, "status": outcome.status }),
         ));
     }
-    parse(engine, &outcome.body, limit)
+    parse_by_kind(kind, &outcome.body, limit)
 }
 
 // ---- text helpers -----------------------------------------------------------

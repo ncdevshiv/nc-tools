@@ -792,7 +792,16 @@
         ],
         "properties": {
           "engines": {
-            "description": "Comma-separated engine names (hn, wikipedia, ddg, mojeek) or auto for all",
+            "description": "Comma-separated engine names, \"all\" for every healthy source, \"auto\" (default) for intent-routed selection",
+            "type": "string"
+          },
+          "fetchTop": {
+            "description": "Auto-read the top N results (0-3) and attach their markdown (progressive disclosure; costs one fetch each)",
+            "maximum": 3,
+            "type": "integer"
+          },
+          "intent": {
+            "description": "Force an intent: general | news | howto | academic | package (default auto-classified locally)",
             "type": "string"
           },
           "maxResults": {
@@ -804,7 +813,7 @@
             "type": "string"
           },
           "rerank": {
-            "description": "Local neural rerank after fusion (default true; falls back to fusion order if the model is unavailable)",
+            "description": "Local neural rerank after fusion, with authority boost (default true; falls back to fusion order if the model is unavailable)",
             "type": "boolean"
           },
           "timeoutMs": {

@@ -11,7 +11,9 @@ use serde_json::{json, Value};
 use nct_core::errors::ToolError;
 use nct_core::kernel::{parse_args, Handler, Kernel};
 
+use crate::authority::AuthorityStore;
 use crate::cache;
+use crate::routing;
 use crate::engines;
 use crate::extract;
 use crate::httpx;
@@ -200,6 +202,13 @@ pub fn fetch_content(k: &Kernel, args: &Value) -> Result<Value, ToolError> {
             "contentHash": nct_core::sha256_hex(body_store.as_bytes())[..16].to_string(),
             "fetchMs": outcome.duration_ms,
         });
+        // authority learning: a successful read proves this domain served the
+        // agent — future searches rank it a little higher
+        let host = outcome.final_url.host_str().unwrap_or_default().to_string();
+        if !host.is_empty() {
+            let mut auth = AuthorityStore::load(&k.root);
+            auth.bump(&host, 1);
+        }
         let _ = k.journal.append("net.fetch", json!({
             "url": a.url,
             "finalUrl": outcome.final_url.to_string(),
@@ -329,28 +338,35 @@ fn robots_result(root_url: &str, target: url::Url, allow_private: bool, timeout:
     Ok(robots::report(&robots, engines::AGENT_TOKEN, &target, llms_txt, None))
 }
 
-// ---- net.search --------------------------------------------------------------
+// ---- net.search (W-Net-2b): intent routing → parallel fan-out → RRF fusion →
+// MiniLM rerank with authority boost → optional progressive disclosure.
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchArgs {
     pub query: String,
-    #[doc = "Comma-separated engine names (hn, wikipedia, ddg, mojeek) or auto for all"]
+    #[doc = "Comma-separated engine names, \"all\" for every healthy source, \"auto\" (default) for intent-routed selection"]
     #[serde(default)]
     pub engines: Option<String>,
+    #[doc = "Force an intent: general | news | howto | academic | package (default auto-classified locally)"]
+    #[serde(default)]
+    pub intent: Option<String>,
     #[serde(default)]
     #[schemars(range(min = 1, max = 25))]
     pub maxResults: Option<u64>,
-    #[doc = "Local neural rerank after fusion (default true; falls back to fusion order if the model is unavailable)"]
+    #[doc = "Local neural rerank after fusion, with authority boost (default true; falls back to fusion order if the model is unavailable)"]
     #[serde(default)]
     pub rerank: Option<bool>,
     #[serde(default)]
     #[schemars(range(min = 100, max = 30000))]
     pub timeoutMs: Option<u64>,
+    #[doc = "Auto-read the top N results (0-3) and attach their markdown (progressive disclosure; costs one fetch each)"]
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 3))]
+    pub fetchTop: Option<u64>,
 }
 
 pub struct SearchHandler;
-
 impl Handler for SearchHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: SearchArgs = parse_args(args)?;
@@ -361,75 +377,198 @@ impl Handler for SearchHandler {
         let limit = a.maxResults.unwrap_or(10) as usize;
         let fetch_limit = (limit * 2).max(10);
         let timeout = a.timeoutMs.unwrap_or(k.cfg.limits.net_engine_timeout_ms);
+        let started = std::time::Instant::now();
 
-        let selected: Vec<&engines::EngineDef> = match a.engines.as_deref() {
-            // auto = every healthy engine we can actually use: keyless engines
-            // always, keyed engines only when their env key is present. The
-            // circuit breaker drops engines that failed 3x this process.
-            None | Some("auto") | Some("") => engines::ENGINES
-                .iter()
-                .filter(|e| engines::engine_key_present(e) && engines::engine_healthy(e.name))
-                .collect(),
-            Some(list) => {
-                let mut out = Vec::new();
-                for name in list.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
-                    match engines::engine_by_name(&name) {
-                        Some(e) => out.push(e),
-                        None => {
-                            return Err(ToolError::with_hint(
-                                "ERR_BAD_INPUT",
-                                format!("unknown engine: {name}"),
-                                json!({ "known": engines::ENGINES.iter().map(|e| e.name).collect::<Vec<_>>() }),
-                            ))
-                        }
-                    }
+        // ---- intent routing --------------------------------------------------
+        let embedder = nct_semantic::Embedder::get(model_cache_dir(k)).ok();
+        let (intent, intent_method) = match a.intent.as_deref().map(|s| s.to_lowercase()) {
+            Some(s) if !s.is_empty() && s != "auto" => {
+                let parsed = match s.as_str() {
+                    "news" => engines::Intent::News,
+                    "howto" | "how-to" | "qa" => engines::Intent::HowTo,
+                    "academic" => engines::Intent::Academic,
+                    "package" => engines::Intent::Package,
+                    _ => engines::Intent::General,
+                };
+                (parsed, "forced")
+            }
+            _ => {
+                if a.engines.as_deref().map(|s| s != "auto" && !s.is_empty()).unwrap_or(false) {
+                    // explicit engine list skips routing
+                    (engines::Intent::General, "bypassed")
+                } else {
+                    routing::classify(&query, embedder)
                 }
-                out
             }
         };
 
-        let started = std::time::Instant::now();
+        // ---- source selection --------------------------------------------------
+        // "all" = every healthy source (no routing); "auto"/none = intent-routed;
+        // anything else = explicit comma list.
+        let explicit = a.engines.as_deref().map(|s| !s.is_empty() && s != "auto" && s != "all").unwrap_or(false);
+        let want_all = a.engines.as_deref() == Some("all");
+        let selected: Vec<&engines::EngineDef> = if explicit {
+            let mut out = Vec::new();
+            for name in a.engines.as_deref().unwrap().split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
+                match engines::engine_by_name(&name) {
+                    Some(e) => out.push(e),
+                    None => {
+                        return Err(ToolError::with_hint(
+                            "ERR_BAD_INPUT",
+                            format!("unknown engine: {name}"),
+                            json!({ "known": engines::ENGINES.iter().map(|e| e.name).collect::<Vec<_>>() }),
+                        ))
+                    }
+                }
+            }
+            out
+        } else if want_all {
+            // everything healthy: full fan-out, no routing
+            engines::ENGINES
+                .iter()
+                .filter(|e| !matches!(e.kind, engines::EngineKind::Searxng) && engines::engine_key_present(e) && engines::engine_healthy(e.name))
+                .collect()
+        } else {
+            // auto: intent-routed priority list, filtered to usable engines
+            routing::sources_for(intent)
+                .iter()
+                .filter_map(|name| engines::engine_by_name(name))
+                .filter(|e| engines::engine_healthy(e.name))
+                .filter(|e| e.key_env.is_none() || engines::engine_key_present(e))
+                .collect()
+        };
+        if selected.is_empty() {
+            return Err(ToolError::with_hint(
+                "ERR_ENGINE",
+                "no usable search sources for this query",
+                json!({ "intent": format!("{intent:?}"), "hint": "all routed sources are unhealthy or unkeyed; pass engines:\"all\" or set NCTOOLS_BRAVE_KEY" }),
+            ));
+        }
+        let planned: Vec<String> = selected.iter().map(|e| e.name.to_string()).collect();
+
+        // ---- parallel fan-out --------------------------------------------------
         let politeness = k.cfg.limits.net_search_politeness_ms;
+        let parallel = k.cfg.limits.net_parallel_fanout;
+        let query_shared = query.clone();
+        let mut handles = Vec::new();
+        for engine in selected {
+            let q = query_shared.clone();
+            let e_name = engine.name.to_string();
+            let kind = engine.kind;
+            let fetch_limit = fetch_limit;
+            let timeout = timeout;
+            let politeness = politeness;
+            // EngineKind is Copy; the worker reconstructs a static-name EngineDef
+            // (all engine names are 'static literals in ENGINES) — no leak, no
+            // clone of the registry.
+            if parallel {
+                handles.push(std::thread::spawn(move || -> (String, Result<Vec<engines::RawResult>, ToolError>) {
+                    let r = engines::run_engine_named(&e_name, kind, &q, fetch_limit, timeout, politeness);
+                    (e_name, r)
+                }));
+            } else {
+                let r = engines::run_engine_named(&e_name, kind, &query_shared, fetch_limit, timeout, politeness);
+                handles.push(std::thread::spawn(move || (e_name, r)));
+            }
+        }
         let mut engine_reports: Vec<Value> = Vec::new();
         let mut lists: Vec<(String, Vec<engines::RawResult>)> = Vec::new();
-        for engine in selected {
-            match engines::run_engine(engine, &query, fetch_limit, timeout, politeness) {
+        let mut source_dropped: Vec<Value> = Vec::new();
+        for h in handles {
+            let (name, result) = match h.join() {
+                Ok(x) => x,
+                Err(_) => {
+                    engine_reports.push(json!({ "name": "?", "status": "error", "error": { "code": "ERR_ENGINE", "message": "worker thread panicked" } }));
+                    continue;
+                }
+            };
+            match result {
                 Ok(results) => {
                     let n = results.len();
-                    engines::engine_mark(engine.name, true, None);
-                    lists.push((engine.name.to_string(), results));
-                    engine_reports.push(json!({ "name": engine.name, "status": "ok", "results": n }));
+                    engines::engine_mark(&name, true, None);
+                    lists.push((name.clone(), results));
+                    engine_reports.push(json!({ "name": name, "status": "ok", "results": n }));
                 }
                 Err(e) => {
-                    engines::engine_mark(engine.name, false, Some(e.message.clone()));
+                    engines::engine_mark(&name, false, Some(e.message.clone()));
                     engine_reports.push(json!({
-                        "name": engine.name, "status": "error",
+                        "name": name, "status": "error",
                         "error": { "code": e.code, "message": e.message },
                     }));
+                }
+            }
+        }
+        // searxng fleet: one additional parallel-style attempt (fleet has its
+        // own rotation and health), included as a regular fused source
+        if !explicit || want_all {
+            if routing::sources_for(intent).contains(&"searxng") || want_all {
+                match crate::fleet::search(&query, fetch_limit, timeout) {
+                    Ok((member, results)) => {
+                        lists.push(("searxng".to_string(), results.clone()));
+                        engine_reports.push(json!({ "name": "searxng", "status": "ok", "results": results.len(), "member": member }));
+                    }
+                    Err(e) => engine_reports.push(json!({
+                        "name": "searxng", "status": "error",
+                        "error": { "code": e.code, "message": e.message },
+                    })),
                 }
             }
         }
         if lists.is_empty() {
             return Err(ToolError::with_hint(
                 "ERR_ENGINE",
-                "all search engines failed",
-                json!({ "engines": engine_reports, "hint": "check network access; engines are also rate-limit protected; keyed engines need their env key set" }),
+                "all search sources failed",
+                json!({ "engines": engine_reports, "hint": "check network access; keyed engines need their env key; the searxng fleet refreshes every 30 min" }),
             ));
         }
 
+        // ---- fusion + rerank + authority --------------------------------------
+        // ---- per-source relevance validation -------------------------------
+        // Keyless sources degrade SILENTLY (Bing RSS served Roblox/India-Post
+        // results for a rust query — live-observed 2026-09-02). The local
+        // embedder scores every source's top result against the query and
+        // drops sources whose output is semantically unrelated. Without a
+        // model, skip validation (fusion still dedupes).
+        let validated_lists = if let Some(embedder) = embedder {
+            let q_vec = embedder.embed(&query)?;
+            let mut kept: Vec<(String, Vec<engines::RawResult>)> = Vec::new();
+            let mut dropped: Vec<Value> = Vec::new();
+            for (name, results) in lists.iter() {
+                let probe = results.first().map(|r| format!("{} {}", r.title, r.snippet));
+                let score = match probe {
+                    Some(text) if !text.trim().is_empty() => {
+                        let v = embedder.embed(&text).unwrap_or_default();
+                        if v.len() == q_vec.len() { dot(&q_vec, &v) } else { 0.0 }
+                    }
+                    _ => 0.0,
+                };
+                if results.is_empty() || score >= 0.25 {
+                    kept.push((name.clone(), results.clone()));
+                } else {
+                    dropped.push(json!({ "engine": name, "topScore": round4(score), "reason": "results unrelated to query (source degraded)" }));
+                }
+            }
+            source_dropped = dropped;
+            kept
+        } else {
+            Vec::new()
+        };
+        let lists = if validated_lists.is_empty() { lists } else { validated_lists };
         let fused = engines::fuse(&lists);
         let rerank_enabled = a.rerank.unwrap_or(true);
+        let authority = AuthorityStore::load(&k.root);
+        let authority_influence = k.cfg.limits.net_authority_influence;
 
-        // Local neural rerank: query embedding vs title+snippet embedding.
-        // Falls back to fusion order when the model can't load (honest flag).
         let (results, reranked) = if rerank_enabled {
-            match nct_semantic::Embedder::get(model_cache_dir(k)) {
-                Ok(embedder) => {
+            match embedder {
+                Some(embedder) => {
                     let q = embedder.embed(&query)?;
-                    // rerank text = title + snippet + HOST. The host is a real
-                    // ranking signal a human uses (rust-lang.org outranks a
-                    // 2011 blog comment on the same words); without it, HN
-                    // comment pages tie with official sites.
+                    let query_words: std::collections::HashSet<String> = query
+                        .to_lowercase()
+                        .split(|c: char| !c.is_alphanumeric())
+                        .filter(|w| w.len() > 2)
+                        .map(String::from)
+                        .collect();
                     let mut scored: Vec<(f64, usize, engines::FusedResult)> = fused
                         .into_iter()
                         .enumerate()
@@ -438,6 +577,7 @@ impl Handler for SearchHandler {
                                 .ok()
                                 .and_then(|u| u.host_str().map(|h| h.replace("www.", "")))
                                 .unwrap_or_default();
+                            let auth = authority.score(&host);
                             let text = format!(
                                 "{}. {} {}",
                                 f.title,
@@ -446,34 +586,119 @@ impl Handler for SearchHandler {
                             );
                             let v = embedder.embed(&text).unwrap_or_default();
                             let cos = if v.len() == q.len() { dot(&q, &v) } else { 0.0 };
-                            (cos, i, f)
+                            // URL↔query token overlap: official pages usually carry
+                            // the query's distinctive words in host/path ("async-book",
+                            // "pep-0634"). Bounded small — a tie-breaker, not a ruler.
+                            let url_words: std::collections::HashSet<String> = url::Url::parse(&f.url)
+                                .map(|u| {
+                                    format!("{}{}", u.host_str().unwrap_or_default(), u.path())
+                                        .to_lowercase()
+                                        .split(|c: char| !c.is_alphanumeric())
+                                        .filter(|w| w.len() > 2)
+                                        .map(String::from)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let overlap = if query_words.is_empty() {
+                                0.0
+                            } else {
+                                query_words.iter().filter(|w| url_words.contains(*w)).count() as f64
+                                    / query_words.len() as f64
+                            };
+                            let score = (cos + authority_influence * auth + 0.15 * overlap).min(1.0);
+                            (score, i, f, cos)
                         })
+                        .map(|(score, i, f, _)| (score, i, f))
                         .collect();
                     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
                     let out: Vec<Value> = scored
                         .into_iter()
                         .take(limit)
-                        .map(|(cos, _, f)| fused_json(&f, Some(round4(cos))))
+                        .map(|(score, _, f)| {
+                            let host = url::Url::parse(&f.url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+                            let mut v = fused_json(&f, Some(round4(score)));
+                            v["authority"] = json!(round4(authority.score(&host)));
+                            v
+                        })
                         .collect();
                     (out, true)
                 }
-                Err(_) => (fused.iter().take(limit).map(|f| fused_json(f, None)).collect(), false),
+                None => {
+                    // no model: fusion order + authority bump (still better than raw concat)
+                    let mut with_auth: Vec<(f64, usize, engines::FusedResult)> = fused
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let host = url::Url::parse(&f.url).ok().and_then(|u| u.host_str().map(|h| h.replace("www.", ""))).unwrap_or_default();
+                            (f.rrf + authority_influence * authority.score(&host), i, f)
+                        })
+                        .collect();
+                    with_auth.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+                    let out: Vec<Value> = with_auth
+                        .into_iter()
+                        .take(limit)
+                        .map(|(score, _, f)| fused_json(&f, Some(round4(score))))
+                        .collect();
+                    (out, false)
+                }
             }
         } else {
             (fused.iter().take(limit).map(|f| fused_json(f, None)).collect(), false)
         };
 
+        // ---- progressive disclosure --------------------------------------------
+        let fetch_top = a.fetchTop.unwrap_or(0).min(3) as usize;
+        let mut final_results = results;
+        if fetch_top > 0 {
+            for i in 0..fetch_top.min(final_results.len()) {
+                let url = final_results[i]["url"].as_str().unwrap_or_default().to_string();
+                if url.is_empty() {
+                    continue;
+                }
+                let fetch_args = json!({ "url": url });
+                match fetch_content(k, &fetch_args) {
+                    Ok(f) => {
+                        let md = f["markdown"].as_str().unwrap_or_default().chars().take(4000).collect::<String>();
+                        final_results[i]["content"] = json!(md);
+                    }
+                    Err(e) => {
+                        final_results[i]["contentError"] = json!(e.message);
+                    }
+                }
+            }
+        }
+
+        let duration = started.elapsed().as_millis() as u64;
+        let _ = k.journal.append("net.search", json!({
+            "query": query,
+            "intent": format!("{intent:?}"),
+            "intentMethod": intent_method,
+            "planned": planned,
+            "engaged": engine_reports.iter().filter(|e| e["status"] == "ok").map(|e| e["name"].clone()).collect::<Vec<_>>(),
+            "results": final_results.len(),
+            "reranked": reranked,
+            "authorityDomains": authority.total_tracked(),
+            "durationMs": duration,
+            "sid": k.sid,
+        }));
+
         Ok(json!({
             "query": query,
+            "intent": format!("{intent:?}").to_lowercase(),
+            "intentMethod": intent_method,
+            "planned": planned,
             "engines": engine_reports,
-            "results": results,
+            "sourcesDropped": source_dropped,
+            "results": final_results,
             "fusion": "rrf",
             "reranked": reranked,
-            "reranker": reranked.then_some("all-MiniLM-L6-v2 (local)"),
-            "durationMs": started.elapsed().as_millis() as u64,
+            "reranker": reranked.then_some("all-MiniLM-L6-v2 (local, +authority)"),
+            "authorityDomains": authority.total_tracked(),
+            "durationMs": duration,
         }))
     }
 }
+
 
 fn fused_json(f: &engines::FusedResult, score: Option<f64>) -> Value {
     let mut v = json!({
