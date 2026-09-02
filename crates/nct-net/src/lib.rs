@@ -18,6 +18,7 @@ pub mod extract;
 pub mod fetch;
 pub mod fleet;
 pub mod httpx;
+pub mod query;
 pub mod render;
 pub mod robots;
 pub mod routing;

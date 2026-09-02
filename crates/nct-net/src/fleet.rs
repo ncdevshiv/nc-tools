@@ -78,6 +78,7 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
     let mut last_err = None;
     for i in 0..3.min(members.len()) {
         let member = &members[(start_idx + i) % members.len()];
+        // JSON attempt (preferred — structured, cheap); HTML fallback on 429/403
         let url = format!(
             "{}{}search?q={}&format=json",
             member.base_url,
@@ -85,7 +86,8 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
             super::engines::urlencode(query)
         );
         let Ok(parsed) = super::ssrf::parse_http_url(&url) else { continue };
-        match super::httpx::fetch(super::httpx::FetchOpts::get(parsed).timeout(timeout_ms.min(PROBE_TIMEOUT_MS)).max_body(1_000_000)) {
+        let fetched = super::httpx::fetch(super::httpx::FetchOpts::get(parsed).timeout(timeout_ms.min(PROBE_TIMEOUT_MS)).max_body(1_000_000));
+        match fetched {
             Ok(outcome) if outcome.ok => match sources::parse_searxng(&outcome.body, limit) {
                 Ok(results) if !results.is_empty() => {
                     mark_health(&member.base_url, true, None);
@@ -99,6 +101,32 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
                 }
             },
             Ok(outcome) => {
+                // HTML fallback: many public instances 429/403 the JSON API
+                // but serve HTML to browsers. Parse the stable result markup.
+                if outcome.status == 429 || outcome.status == 403 {
+                    let html_url = format!(
+                        "{}{}search?q={}",
+                        member.base_url,
+                        if member.base_url.ends_with('/') { "" } else { "/" },
+                        super::engines::urlencode(query)
+                    );
+                    if let Ok(html_parsed) = super::ssrf::parse_http_url(&html_url) {
+                        if let Ok(html_outcome) = super::httpx::fetch(
+                            super::httpx::FetchOpts::get(html_parsed)
+                                .timeout(timeout_ms.min(PROBE_TIMEOUT_MS))
+                                .max_body(1_000_000)
+                                .header("Accept", "text/html")
+                        ) {
+                            if html_outcome.ok {
+                                let results = sources::parse_searxng_html(&html_outcome.body, &member.base_url, limit);
+                                if !results.is_empty() {
+                                    mark_health(&member.base_url, true, None);
+                                    return Ok((member.base_url.clone(), results));
+                                }
+                            }
+                        }
+                    }
+                }
                 let msg = format!("{}: HTTP {}", member.base_url, outcome.status);
                 mark_health(&member.base_url, false, Some(msg.clone()));
                 last_err = Some(msg);

@@ -281,6 +281,43 @@ pub fn parse_searxng(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolErr
     Ok(out)
 }
 
+/// SearXNG HTML fallback: most public instances 429 the JSON API but serve
+/// HTML to browsers. Parses the standard SearXNG result article h3 > a, with
+/// p.result-content for snippets — structures that are stable across themes.
+/// Only called when JSON 429s/403s (the fleet falls back to HTML explicitly).
+pub fn parse_searxng_html(body: &str, base_url: &str, limit: usize) -> Vec<RawResult> {
+    use scraper::{ElementRef, Selector};
+    let doc = scraper::Html::parse_document(body);
+    let sel = Selector::parse("article.result, div.result").unwrap_or_else(|_| Selector::parse("article").unwrap());
+    let title_sel = Selector::parse("h3 a, h3 > a, a.result-link").unwrap_or_else(|_| Selector::parse("h3 a").unwrap());
+    let snippet_sel = Selector::parse("p.result-content, p.content").unwrap_or_else(|_| Selector::parse("p").unwrap());
+    let link_sel = Selector::parse("a").unwrap();
+    let mut out = Vec::new();
+    for article in doc.select(&sel) {
+        let title_el = article.select(&title_sel).next().or_else(|| article.select(&link_sel).next());
+        let Some(a) = title_el else { continue };
+        let title = a.text().collect::<String>().trim().to_string();
+        let href = a.value().attr("href").unwrap_or_default().to_string();
+        if title.is_empty() || href.is_empty() { continue }
+        // searxng proxies external URLs via /search?q=… or returns the raw
+        // absolute URL — absolutize against the instance for proxy paths.
+        let url = if href.starts_with("http://") || href.starts_with("https://") {
+            href
+        } else {
+            let root = base_url.trim_end_matches('/').to_string();
+            if href.starts_with('/') {
+                format!("{root}{href}")
+            } else {
+                format!("{root}/{href}")
+            }
+        };
+        let snippet = article.select(&snippet_sel).next().map(|e| e.text().collect::<String>().trim().to_string()).unwrap_or_default();
+        out.push(RawResult { title, url, snippet });
+        if out.len() >= limit { break }
+    }
+    out
+}
+
 /// Extract candidate SearXNG instance URLs from the searx.space registry JSON.
 /// Keeps https instances whose last probe was 200, skips onion/i2p/ygg hosts.
 pub fn instances_from_searxspace(body: &str, max_candidates: usize) -> Vec<String> {
@@ -386,6 +423,33 @@ mod tests {
         let body = r#"{"results":[{"title":"Rust","url":"https://www.rust-lang.org/","content":"Official site","engines":["google","bing"]}]}"#;
         let rs = parse_searxng(body, 10).unwrap();
         assert_eq!(rs[0].url, "https://www.rust-lang.org/");
+    }
+
+    #[test]
+    fn searxng_html_fallback_parses_article_results() {
+        let body = r#"<html><body>
+        <article class="result">
+          <h3><a href="https://www.rust-lang.org/">Rust Programming Language</a></h3>
+          <p class="result-content">A language empowering everyone to build reliable and efficient software.</p>
+        </article>
+        <article class="result">
+          <h3><a href="https://doc.rust-lang.org/book/">The Rust Book</a></h3>
+          <p class="result-content">Learn Rust.</p>
+        </article>
+        </body></html>"#;
+        let rs = parse_searxng_html(body, "https://searx.example/", 10);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(rs[0].url, "https://www.rust-lang.org/");
+        assert_eq!(rs[0].title, "Rust Programming Language");
+        assert!(rs[0].snippet.contains("empowering everyone"));
+    }
+
+    #[test]
+    fn searxng_html_absolutizes_internal_links() {
+        let body = r#"<article class="result"><h3><a href="/search?url=https%3A%2F%2Fexample.org">Example</a></h3></article>"#;
+        let rs = parse_searxng_html(body, "https://searx.instance/", 10);
+        assert_eq!(rs.len(), 1);
+        assert!(rs[0].url.starts_with("https://searx.instance/"));
     }
 
     #[test]

@@ -99,7 +99,13 @@ pub fn endpoint(engine: &EngineDef, query: &str, limit: usize) -> String {
 }
 
 fn endpoint_str(kind: EngineKind, query: &str, limit: usize) -> String {
-    let q = urlencode(query);
+    // Bing RSS degrades on long natural queries (word-fragment matching →
+    // dictionaries); shorten to distinctive terms before hitting Bing.
+    // Other engines handle long queries natively.
+    let q = match kind {
+        EngineKind::BingRss => urlencode(crate::query::shorten_query(query).as_str()),
+        _ => urlencode(query),
+    };
     match kind {
         EngineKind::Hn => format!("https://hn.algolia.com/api/v1/search?query={q}&hitsPerPage={limit}"),
         EngineKind::Wikipedia => {
