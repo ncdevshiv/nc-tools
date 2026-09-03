@@ -1,7 +1,28 @@
 {
   "generatedFrom": "rust/nct-mcp (build_kernel)",
-  "toolCount": 72,
+  "toolCount": 75,
   "tools": [
+    {
+      "name": "agent.compact",
+      "description": "Record a compaction checkpoint for this agent: the agent is about to have its context summarized, so it writes a durable marker (id, agentId, ts, summary, nextHint) that agent.resume later follows to reconstruct the identity + state. This is the explicit continuation handshake — a crash/compaction for THIS agent is recorded so a later prompt in the same thread can resume cleanly instead of starting anonymous.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "summary"
+        ],
+        "properties": {
+          "nextHint": {
+            "description": "Optional hint for the next step (e.g. the next file to touch). Returned on resume verbatim.",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Short summary of what this agent did / where it left off (the checkpoint's durable record). Saved as-is and returned on resume.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     {
       "name": "agent.heartbeat",
       "description": "Update this agent's roster entry: lastSeen, status (idle|working|blocked|done), and the current task summary. Other agents see this via agent.status/agent.list. Cheap — call it between steps so the roster stays live.",
@@ -89,6 +110,21 @@
       }
     },
     {
+      "name": "agent.peers",
+      "description": "List agents across OTHER workspaces from the GLOBAL index (~/.nc-tools/agents.jsonl, override with NCTOOLS_AGENT_HOME). Agents register here too, so you can discover who else is working on a different project and coordinate with them. Filter by {workspace} to narrow. Cross-process + cross-machine-user.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "workspace": {
+            "description": "Narrow to agents last seen in this workspace path (substring match).",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
       "name": "agent.post",
       "description": "Post a message to the inter-agent noticeboard. {to} may be an agentId for a direct message or omitted for a broadcast. {kind} is note|question|request|handoff|bug|hold|resume — other agents can filter by it. Messages persist in .nc-tools/agent-messages.jsonl.",
       "inputSchema": {
@@ -114,7 +150,7 @@
     },
     {
       "name": "agent.register",
-      "description": "Register (or resume) this agent's identity in the workspace roster. With {agentId} restores a known identity (the crash/compaction continuation path — a client that remembers who it was keeps its identity and history). Without it, resumes this session's agent or mints `agent-<n>` (chronological). Returns {agentId, name, role, createdAt, resumed}. Call agent.status to see who else is working here.",
+      "description": "Register (or resume) this agent's identity in the workspace roster AND the global (cross-workspace) index. With {agentId} restores a known identity (the crash/compaction continuation path — a client that remembers who it was keeps its identity and history). Without it, resumes this session's agent or mints `agent-<n>` (chronological). Returns {agentId, name, role, createdAt, resumed}. Call agent.status to see who else is working here; agent.peers to see agents on OTHER workspaces.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -127,6 +163,21 @@
             "type": "string"
           },
           "role": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
+      "name": "agent.resume",
+      "description": "Follow this agent's most recent compaction checkpoint: confirms identity continuity after a crash/compaction, re-registers the same agentId, and returns its last summary + nextHint so the resumed agent can pick up where it left off. Call agent.resume at the start of a prompt when you believe you are continuing a prior thread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "description": "Which agent to resume. Defaults to this session's agent (by sid) if omitted. When omitted and no prior checkpoint exists, no-op.",
             "type": "string"
           }
         },
@@ -302,6 +353,10 @@
           "content": {
             "type": "string"
           },
+          "guardLocks": {
+            "description": "When true, refuse the write if ANOTHER agent holds a live advisory lock on this path (hard-write-guard). Default false = advisory: the write proceeds but the result carries a lockConflict note.",
+            "type": "boolean"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -351,6 +406,10 @@
           "baseDir": {
             "description": "Base dir for relative paths (default: the session workspace).",
             "type": "string"
+          },
+          "guardLocks": {
+            "description": "When true, refuse the delete if ANOTHER agent holds a live advisory lock on this path (hard-write-guard). Default false = advisory.",
+            "type": "boolean"
           },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
@@ -593,6 +652,10 @@
           },
           "content": {
             "type": "string"
+          },
+          "guardLocks": {
+            "description": "When true, refuse the write if ANOTHER agent holds a live advisory lock on this path (hard-write-guard). Default false = advisory: the write proceeds but the result carries a lockConflict note.",
+            "type": "boolean"
           },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
@@ -1157,6 +1220,10 @@
               "additionalProperties": false
             },
             "minItems": 1
+          },
+          "guardLocks": {
+            "description": "When true, refuse the patch if ANOTHER agent holds a live advisory lock on this path (hard-write-guard). Default false = advisory.",
+            "type": "boolean"
           },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",

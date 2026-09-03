@@ -195,6 +195,11 @@ pub struct WriteArgs {
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// When true, refuse the write if ANOTHER agent holds a live advisory lock
+    /// on this path (hard-write-guard). Default false = advisory: the write
+    /// proceeds but the result carries a lockConflict note.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -273,6 +278,10 @@ pub struct DeleteArgs {
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// When true, refuse the delete if ANOTHER agent holds a live advisory lock
+    /// on this path (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -527,12 +536,51 @@ pub fn write_resolved(path: &str, abs: &Path, content: &str) -> Result<Value, To
     Ok(result)
 }
 
+/// Check for a foreign agent's live advisory lock on `abs` before a write.
+/// Advisory (guard=false default): the write proceeds but the caller merges a
+/// `lockConflict` note so the agent knows it collided. Guard (guard=true):
+/// the write is refused with ERR_REFUSED + the lock holder's identity.
+/// Returns the merge-able note JSON on no-foreign-lock, or the conflict note.
+pub fn maybe_warn_foreign_lock(k: &Kernel, base: &Path, abs: &Path, guard: bool) -> Result<Value, ToolError> {
+    let self_agent = k.current_agent_id().unwrap_or_default();
+    let rel = nct_core::rel_path(base, abs);
+    if let Some(lock) = nct_core::foreign_live_lock(&k.root, &rel, &self_agent) {
+        let holder = lock["agentId"].as_str().unwrap_or("?").to_string();
+        let locked_path = lock["path"].as_str().unwrap_or(&rel).to_string();
+        if guard {
+            return Err(ToolError::with_hint(
+                "ERR_REFUSED",
+                format!("path is locked by agent '{holder}' — refusing to write (guardLocks)"),
+                json!({ "path": rel, "lockedBy": holder, "lockedPath": locked_path, "hint": "ask the holder to agent.unlock, or retry without guardLocks" }),
+            ));
+        }
+        return Ok(json!({ "lockConflict": true, "lockedBy": holder, "lockedPath": locked_path, "note": "advisory write proceeded despite an active foreign lock" }));
+    }
+    Ok(json!({ "lockConflict": false }))
+}
+
+/// Merge a lockConflict note into a write result when one was produced.
+fn merge_lock_note(mut result: Value, note: Value) -> Value {
+    if let Value::Object(m) = &mut result {
+        if note["lockConflict"] == json!(true) {
+            m.insert("lockConflict".into(), json!(true));
+            m.insert("lockedBy".into(), note["lockedBy"].clone());
+            m.insert("lockedPath".into(), note["lockedPath"].clone());
+        }
+    }
+    result
+}
+
+
 pub struct WriteHandler;
 impl Handler for WriteHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: WriteArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, &a.path)?;
-        write_resolved(&a.path, &abs, &a.content)
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &a.path)?;
+        let guard = a.guardLocks.unwrap_or(false);
+        let lock_note = maybe_warn_foreign_lock(k, &base, &abs, guard)?;
+        Ok(merge_lock_note(write_resolved(&a.path, &abs, &a.content)?, lock_note))
     }
 }
 
@@ -552,7 +600,12 @@ impl Handler for WriteManyHandler {
         let base = k.base_dir(a.baseDir.as_deref())?;
         let mut results = Vec::new();
         for f in &a.files {
-            match resolve_checked(&base, &f.path).and_then(|abs| write_resolved(&f.path, &abs, &f.content)) {
+            let write_result = (|| -> Result<Value, ToolError> {
+                let abs = resolve_checked(&base, &f.path)?;
+                let lock_note = maybe_warn_foreign_lock(k, &base, &abs, false)?;
+                Ok(merge_lock_note(write_resolved(&f.path, &abs, &f.content)?, lock_note))
+            })();
+            match write_result {
                 Ok(mut v) => {
                     if let Value::Object(m) = &mut v {
                         m.insert("path".into(), json!(f.path));
@@ -1061,6 +1114,7 @@ impl Handler for DeleteHandler {
                 "Refusing to delete the base workspace dir or a filesystem root",
             ));
         }
+        let _ = maybe_warn_foreign_lock(k, &base, &abs, a.guardLocks.unwrap_or(false))?;
         if !abs.exists() {
             return Err(err_no_path_with_siblings(&a.path, &abs, &base));
         }
@@ -1352,3 +1406,105 @@ fn tree_walk(
     Ok(())
 }
 
+
+#[cfg(test)]
+mod lock_guard_tests {
+    use super::*;
+    use nct_core::kernel::Kernel;
+    use std::fs;
+
+    /// Write a lock into .nc-tools/locks.jsonl the way coordination.rs does.
+    fn write_lock(root: &std::path::Path, path_rel: &str, holder: &str, hold_ms: u64) {
+        let lock = json!({
+            "path": path_rel,
+            "agentId": holder,
+            "heldAt": nct_core::now_iso(),
+            "holdMs": hold_ms,
+            "expiresAt": nct_core::now_iso(),
+            "expiresAtMs": nct_core::now_ms() + hold_ms,
+            "seq": nct_core::now_ms(),
+            "released": false,
+        });
+        nct_core::append_lock_line(root, &lock);
+    }
+
+    fn kernel_with(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    fn ws(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nct-lockguard-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_with_foreign_lock_and_no_guard_reports_conflict_not_blocks() {
+        let root = ws("w1");
+        // agent-1 holds a live lock on src/a.rs
+        write_lock(&root, "src/a.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.write", &json!({ "path": "src/a.rs", "content": "x", "baseDir": root.display().to_string() }));
+        assert!(out.ok, "advisory write should succeed: {:?}", out.error);
+        let r = out.result.unwrap();
+        assert_eq!(r["lockConflict"], json!(true), "should report conflict: {r}");
+        assert_eq!(r["lockedBy"], json!("agent-1"));
+        assert_eq!(fs::read_to_string(root.join("src/a.rs")).unwrap(), "x");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_with_foreign_lock_and_guard_refuses() {
+        let root = ws("w2");
+        write_lock(&root, "src/b.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.write", &json!({ "path": "src/b.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse");
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_REFUSED");
+        assert!(e.message.contains("agent-1"), "should name the holder: {}", e.message);
+        assert!(!root.join("src/b.rs").exists(), "must NOT have written");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn own_lock_does_not_conflict() {
+        let root = ws("w3");
+        write_lock(&root, "src/c.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-1");
+        let out = k.call("fs.write", &json!({ "path": "src/c.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(out.ok, "own lock must not block: {:?}", out.error);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_with_guard_refuses_on_foreign_lock() {
+        let root = ws("w4");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/d.rs"), "content").unwrap();
+        write_lock(&root, "src/d.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.delete", &json!({ "path": "src/d.rs", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse delete");
+        assert!(root.join("src/d.rs").exists(), "must NOT delete");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expired_lock_does_not_block() {
+        let root = ws("w5");
+        write_lock(&root, "src/e.rs", "agent-1", 0); // holdMs 0 => already expired
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.write", &json!({ "path": "src/e.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(out.ok, "expired lock must not block: {:?}", out.error);
+        let _ = fs::remove_dir_all(&root);
+    }
+}

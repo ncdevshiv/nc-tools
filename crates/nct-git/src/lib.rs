@@ -578,3 +578,109 @@ impl Handler for BlameHandler {
         }))
     }
 }
+
+#[cfg(test)]
+mod base_dir_tests {
+    use super::*;
+    use std::fs;
+
+    /// Build a fresh Kernel with the git tools registered, rooted on `root`.
+    fn git_kernel(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        register(&mut k);
+        k
+    }
+
+    /// A real, initialized git repo throws away; returns its path.
+    fn init_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-git-basedir-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        fs::write(dir.join("README.md"), format!("{tag}\n")).unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(&dir).status().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).status().unwrap();
+        dir
+    }
+
+    /// A server rooted on A must see B's git data when baseDir=B is passed, and
+    /// A's data by default. This is the exact wrong-workspace regression the
+    /// wave fixed.
+    #[test]
+    fn git_status_baseDir_routes_to_requested_workspace() {
+        let server_root = init_repo("server");
+        let target = init_repo("target");
+        let k = git_kernel(&server_root);
+
+        // default (no baseDir): server root's repo
+        let def = git_kernel(&server_root).call("git.status", &json!({}));
+        assert!(def.ok, "status default should succeed: {:?}", def.error);
+        let def_repo = def.result.unwrap()["repo"].as_str().unwrap().to_string();
+        assert!(def_repo.contains("server"), "default should be the server root repo: {def_repo}");
+
+        // with baseDir=target: the OTHER workspace's repo
+        let overridden = k.call("git.status", &json!({ "baseDir": target.display().to_string() }));
+        assert!(overridden.ok, "status baseDir should succeed: {:?}", overridden.error);
+        let o_repo = overridden.result.unwrap()["repo"].as_str().unwrap().to_string();
+        assert!(o_repo.contains("target"), "baseDir should route to the target repo: {o_repo}");
+
+        // both must read the same file; target README says "target", so diff
+        // the committed tree to prove we touched the right repo.
+        let head = k.call("git.log", &json!({ "baseDir": target.display().to_string(), "maxCount": 1 }));
+        assert!(head.ok);
+        let head_val = head.result.unwrap();
+        let commits = head_val["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 1, "target repo should have exactly 1 commit");
+
+        let _ = fs::remove_dir_all(&server_root);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    /// bad baseDir must ERROR, not silently fall back to the server root.
+    /// A non-existent dir is path-resolvable (loose resolution) but not a git
+    /// repo — so in_repo rejects it as ERR_NOT_A_REPO. The contract is "never
+    /// silently reuse the server root's repo", which this proves: it errors.
+    #[test]
+    fn bad_baseDir_errors_instead_of_silent_fallback() {
+        let server_root = init_repo("server2");
+        let k = git_kernel(&server_root);
+        let out = k.call("git.status", &json!({ "baseDir": "/definitely/not/a/real/dir" }));
+        assert!(!out.ok, "bad baseDir must fail, got false-ok");
+        let e = out.error.unwrap();
+        // Not a git repo at that path — must NOT fall back to the server repo.
+        assert_eq!(e.code, "ERR_NOT_A_REPO", "should reject the dir as not-a-repo: {}", e.code);
+        let _ = fs::remove_dir_all(&server_root);
+    }
+
+    /// commit into a target repo via baseDir must land in the TARGET, not server.
+    #[test]
+    fn git_commit_via_baseDir_lands_in_target_repo() {
+        let server_root = init_repo("srv");
+        let target = init_repo("tgt");
+        let k = git_kernel(&server_root);
+        // mutate a file in the target
+        fs::write(target.join("feature.txt"), "feature work\n").unwrap();
+        let add = k.call("git.add", &json!({ "paths": ["feature.txt"], "baseDir": target.display().to_string() }));
+        assert!(add.ok, "add should succeed: {:?}", add.error);
+        let commit = k.call("git.commit", &json!({ "message": "feat: via baseDir", "baseDir": target.display().to_string() }));
+        assert!(commit.ok, "commit should succeed: {:?}", commit.error);
+        // target repo now has 2 commits; server root still 1 (untouched).
+        let tgt_log = k.call("git.log", &json!({ "baseDir": target.display().to_string(), "maxCount": 10 }));
+        assert_eq!(tgt_log.result.unwrap()["commits"].as_array().unwrap().len(), 2);
+        let srv_log = k.call("git.log", &json!({ "maxCount": 10 }));
+        assert_eq!(srv_log.result.unwrap()["commits"].as_array().unwrap().len(), 1, "server root must be untouched");
+        let _ = fs::remove_dir_all(&server_root);
+        let _ = fs::remove_dir_all(&target);
+    }
+}

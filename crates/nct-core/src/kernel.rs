@@ -82,6 +82,10 @@ pub struct Kernel {
     pub session_env: SessionEnv,
     /// Session id: groups journal events from one server process.
     pub sid: String,
+    /// Agent id (when this session registered via agent.register). Used for
+    /// journal provenance so a row is attributable to a specific agent, not
+    /// just a session. Empty until the agent registers.
+    pub agent_id: std::sync::Mutex<Option<String>>,
     tools: BTreeMap<String, ToolEntry>,
     hooks: Mutex<Vec<Hook>>,
 }
@@ -96,9 +100,21 @@ impl Kernel {
             journal,
             session_env: SessionEnv::new(),
             sid: session_id(),
+            agent_id: std::sync::Mutex::new(None),
             tools: BTreeMap::new(),
             hooks: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Bind this session to an agent id (called by agent.register after it
+    /// resolves the identity). Subsequent journal rows carry the agentId.
+    pub fn set_agent_id(&self, agent_id: &str) {
+        *self.agent_id.lock().unwrap() = Some(agent_id.to_string());
+    }
+
+    /// Current agent id for this session, if bound.
+    pub fn current_agent_id(&self) -> Option<String> {
+        self.agent_id.lock().unwrap().clone()
     }
 
     pub fn register(&mut self, name: &str, description: &str, input_schema: Value, handler: Arc<dyn Handler>) {
@@ -191,6 +207,7 @@ impl Kernel {
             "tool": tool_name,
             "args": args,
             "sid": self.sid,
+            "agentId": self.current_agent_id(),
         })) {
             Ok(ev) => ev.seq,
             Err(e) => {
@@ -217,6 +234,7 @@ impl Kernel {
             "durationMs": duration_ms,
             "callSeq": call_seq,
             "sid": self.sid,
+            "agentId": self.current_agent_id(),
         })) {
             Ok(ev) => ev.seq,
             Err(_) => 0,
@@ -370,7 +388,14 @@ mod tests {
     }
 
     fn kernel_with_tools() -> Kernel {
-        let dir = std::env::temp_dir().join(format!("nct-kernel-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-kernel-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let mut k = Kernel::new(dir).unwrap();
         for t in ["fs.read", "git.status", "net.http", "search.grep"] {
@@ -476,5 +501,53 @@ mod tests {
         }
         // a real tool behind the prefix is unaffected (resolves, no error)
         assert_eq!(k.resolve_tool("mcp__nc-tools__fs__read"), "fs.read");
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    fn kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!("nct-provenance-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Kernel::new(dir).unwrap()
+    }
+
+    #[test]
+    fn agent_id_defaults_to_none() {
+        let k = kernel();
+        assert_eq!(k.current_agent_id(), None);
+    }
+
+    #[test]
+    fn set_agent_id_binds_session() {
+        let k = kernel();
+        k.set_agent_id("agent-7");
+        assert_eq!(k.current_agent_id(), Some("agent-7".to_string()));
+    }
+
+    #[test]
+    fn journal_rows_carry_agent_id_after_binding() {
+        let k = kernel();
+        k.set_agent_id("agent-7");
+        let out = k.call("fs.read", &json!({ "path": "nope" }));
+        // even a failed call is journaled with provenance
+        let events = k.journal.events();
+        for ev in &events {
+            assert_eq!(ev["agentId"], json!("agent-7"), "every row should carry the bound agentId: {ev}");
+            assert_eq!(ev["sid"].as_str(), Some(k.sid.as_str()), "sid present too");
+        }
+        let _ = out;
+    }
+
+    #[test]
+    fn unbinding_none_means_no_agent_id_in_rows() {
+        let k = kernel();
+        let _ = k.call("fs.read", &json!({ "path": "x" }));
+        let events = k.journal.events();
+        for ev in &events {
+            assert_eq!(ev["agentId"], json!(null), "no agent bound -> agentId null: {ev}");
+        }
     }
 }

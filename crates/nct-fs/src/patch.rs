@@ -35,6 +35,10 @@ pub struct ApplyArgs {
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// When true, refuse the patch if ANOTHER agent holds a live advisory lock
+    /// on this path (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -61,6 +65,7 @@ impl Handler for ApplyHandler {
         let a: ApplyArgs = parse_args(args)?;
         let base = k.base_dir(a.baseDir.as_deref())?;
         let abs = resolve_checked(&base, &a.path)?;
+        let _ = crate::fs_tools::maybe_warn_foreign_lock(k, &base, &abs, a.guardLocks.unwrap_or(false))?;
         let applied = apply_impl(&base, &abs, &a.path, &a.edits)?;
         Ok(applied)
     }
