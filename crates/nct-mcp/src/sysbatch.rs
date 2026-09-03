@@ -1,5 +1,6 @@
 // sys.* + batch.execute — kernel-level tools that need the kernel itself.
 // Port of the sys section of src/kernel/kernel.mjs.
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -10,7 +11,7 @@ use nct_core::kernel::{parse_args, Handler, Kernel};
 pub const JOURNAL_DESC: &str = "Read the session journal (your own tool-call trail).";
 pub const WORKSPACE_DESC: &str = "Workspace info: root path, platform.";
 pub const SNAPSHOT_LIST_NOTE: &str = "";
-pub const BATCH_DESC: &str = "Run up to 25 kernel tool calls in ONE round-trip: [{tool, args}]. Each sub-call is individually executed and journaled; failures do not abort the batch. Use for independent multi-step work.";
+pub const BATCH_DESC: &str = "Run up to 25 kernel tool calls in ONE round-trip: [{tool, args, dependsOn?}]. Each sub-call is individually executed and journaled; failures do not abort the batch. Calls with no dependsOn execute in parallel; calls with dependsOn=[indices] wait for those to finish first. Use for independent multi-step work.";
 
 pub fn register_sys_batch(k: &mut Kernel) {
     k.register("sys.journal", JOURNAL_DESC, nct_core::schema::schema_for::<JournalArgs>(), Arc::new(JournalHandler));
@@ -44,6 +45,11 @@ pub struct BatchCall {
     #[serde(default)]
     #[schemars(schema_with = "nct_core::plain_object_schema")]
     pub args: serde_json::Map<String, Value>,
+    /// Indices of calls this one depends on (0-based). The call waits until
+    /// all dependencies finish before executing. Empty/absent = independent.
+    #[serde(default)]
+    #[schemars(length(min = 0, max = 24))]
+    pub dependsOn: Option<Vec<u64>>,
 }
 
 pub struct JournalHandler;
@@ -64,7 +70,7 @@ impl Handler for WorkspaceHandler {
         Ok(json!({
             "root": k.root.display().to_string(),
             "platform": nct_core::platform_str(),
-            "node": Value::Null, // Rust kernel: no node runtime; field kept for shape parity
+            "node": Value::Null,
             "git": git,
         }))
     }
@@ -80,32 +86,306 @@ impl Handler for BatchHandler {
         if a.calls.len() > k.cfg.limits.batch_max {
             return Err(ToolError::new("ERR_BAD_INPUT", format!("max {} calls per batch.execute", k.cfg.limits.batch_max)));
         }
-        let mut results = Vec::new();
+
+        let n = a.calls.len();
+        let batch_name = nct_core::Kernel::resolve_tool(k, "batch.execute");
+        let batch_str = batch_name.as_str();
+
+        // Validate all calls upfront: empty tools and nested batch.execute
+        // are rejected before any execution (fail-fast, not partial-execute).
         for c in &a.calls {
             if c.tool.is_empty() {
-                results.push(json!({ "ok": false, "error": { "code": "ERR_BAD_INPUT", "message": "each call needs a string tool" } }));
-                continue;
+                return Ok(json!({
+                    "results": (0..n).map(|i| {
+                        if a.calls[i].tool.is_empty() {
+                            json!({ "ok": false, "error": { "code": "ERR_BAD_INPUT", "message": "each call needs a string tool" } })
+                        } else {
+                            json!({ "ok": false, "error": { "code": "ERR_BAD_INPUT", "message": "preceding call had empty tool name" } })
+                        }
+                    }).collect::<Vec<_>>(),
+                    "ok": 0,
+                    "failed": n,
+                }));
             }
-            if nct_core::Kernel::resolve_tool(k, "batch.execute") == nct_core::Kernel::resolve_tool(k, &c.tool) {
-                results.push(json!({ "ok": false, "error": { "code": "ERR_REFUSED", "message": "batch.execute cannot nest itself" } }));
-                continue;
-            }
-            let out = k.call(&c.tool, &Value::Object(c.args.clone()));
-            let mut item = serde_json::Map::new();
-            item.insert("ok".into(), json!(out.ok));
-            if let Some(r) = out.result {
-                item.insert("result".into(), r);
-            }
-            if let Some(e) = out.error {
-                item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
-            }
-            results.push(Value::Object(item));
         }
+
+        // Pre-resolve dependencies and validate them.
+        let deps: Vec<HashSet<usize>> = a
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                c.dependsOn
+                    .as_ref()
+                    .map(|d| {
+                        d.iter()
+                            .filter(|&&x| (x as usize) < i)
+                            .map(|x| *x as usize)
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        // Detect cycles (a dependency on a later index is ignored, so cycles
+        // are impossible — but a self-dependency would be pointess). If a call
+        // depends on itself, reject.
+        for (i, d) in deps.iter().enumerate() {
+            if d.contains(&i) {
+                return Err(ToolError::new("ERR_BAD_INPUT", format!("call {i} cannot depend on itself")));
+            }
+        }
+
+        // If no calls have dependencies, everything is independent — execute
+        // in parallel. If any have dependencies, use the topological scheduler.
+        let has_deps = deps.iter().any(|d| !d.is_empty());
+
+        let results: Vec<Value> = if has_deps {
+            execute_dag(k, &a.calls, &deps, batch_str)
+        } else {
+            execute_parallel(k, &a.calls, batch_str)
+        };
+
         let ok_count = results.iter().filter(|r| r["ok"] == json!(true)).count();
         Ok(json!({
             "results": results,
             "ok": ok_count,
             "failed": results.len() - ok_count,
         }))
+    }
+}
+
+/// Execute all calls in parallel via scoped threads. Results are returned in
+/// input order. Each call is journaled individually by the kernel.
+fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str) -> Vec<Value> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let tool = c.tool.clone();
+                let args = Value::Object(c.args.clone());
+                let batch = batch_name.to_string();
+                scope.spawn(move || {
+                    if nct_core::Kernel::resolve_tool(k, &batch) == nct_core::Kernel::resolve_tool(k, &tool) {
+                        return json!({ "ok": false, "error": { "code": "ERR_REFUSED", "message": "batch.execute cannot nest itself" } });
+                    }
+                    let out = k.call(&tool, &args);
+                    let mut item = serde_json::Map::new();
+                    item.insert("ok".into(), json!(out.ok));
+                    if let Some(r) = out.result {
+                        item.insert("result".into(), r);
+                    }
+                    if let Some(e) = out.error {
+                        item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
+                    }
+                    Value::Object(item)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join().unwrap_or_else(|_| json!({
+                    "ok": false,
+                    "error": { "code": "ERR_INTERNAL", "message": "batch worker thread panicked" }
+                }))
+            })
+            .collect()
+    })
+}
+
+/// Execute calls respecting the dependency graph. Uses Kahn's topological
+/// rounds: each round runs all ready calls in parallel, then unlocks
+/// dependents. Results are returned in input order.
+fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_name: &str) -> Vec<Value> {
+    let n = calls.len();
+    let mut results: Vec<Value> = vec![
+        json!({ "ok": false, "error": { "code": "ERR_INTERNAL", "message": "not executed" } });
+        n
+    ];
+    let remaining: Vec<HashSet<usize>> = deps.to_vec();
+    let mut done = vec![false; n];
+
+    loop {
+        // Find all calls whose dependencies are all satisfied
+        let ready: Vec<usize> = (0..n)
+            .filter(|i| !done[*i] && remaining[*i].iter().all(|d| done[*d]))
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+
+        // Execute all ready calls in parallel
+        let completed = std::thread::scope(|scope| {
+            let handles: Vec<_> = ready
+                .iter()
+                .map(|&i| {
+                    let tool = calls[i].tool.clone();
+                    let args = Value::Object(calls[i].args.clone());
+                    let bn = batch_name.to_string();
+                    (i, scope.spawn(move || {
+                        if nct_core::Kernel::resolve_tool(k, &bn)
+                            == nct_core::Kernel::resolve_tool(k, &tool)
+                        {
+                            return json!({ "ok": false, "error": { "code": "ERR_REFUSED", "message": "batch.execute cannot nest itself" } });
+                        }
+                        let out = k.call(&tool, &args);
+                        let mut item = serde_json::Map::new();
+                        item.insert("ok".into(), json!(out.ok));
+                        if let Some(r) = out.result {
+                            item.insert("result".into(), r);
+                        }
+                        if let Some(e) = out.error {
+                            item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
+                        }
+                        Value::Object(item)
+                    }))
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|(i, h)| {
+                    let v = h.join().unwrap_or_else(|_| json!({
+                        "ok": false,
+                        "error": { "code": "ERR_INTERNAL", "message": "worker panicked" }
+                    }));
+                    (i, v)
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for (i, v) in completed {
+            done[i] = true;
+            results[i] = v;
+        }
+    }
+
+    results
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use nct_core::config::Config;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-batch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut k = Kernel::new(dir).unwrap();
+        // Register fs tools so we can test with fs.write / fs.read
+        nct_fs::register(&mut k);
+        register_sys_batch(&mut k);
+        k
+    }
+
+    /// Legacy: calls without dependsOn still work — 3 writes in parallel.
+    #[test]
+    fn batch_parallel_no_dependencies() {
+        let k = make_kernel();
+        let args = json!({
+            "calls": [
+                { "tool": "fs.write", "args": { "path": "a.txt", "content": "alpha" } },
+                { "tool": "fs.write", "args": { "path": "b.txt", "content": "beta" } },
+                { "tool": "fs.write", "args": { "path": "c.txt", "content": "gamma" } }
+            ]
+        });
+        let result = BatchHandler.call(&k, &args).unwrap();
+        assert_eq!(result["ok"], json!(3));
+        assert_eq!(result["failed"], json!(0));
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["ok"], json!(true));
+        assert_eq!(results[1]["ok"], json!(true));
+        assert_eq!(results[2]["ok"], json!(true));
+        // Files exist on disk
+        assert!(k.root.join("a.txt").exists());
+        assert!(k.root.join("b.txt").exists());
+        assert!(k.root.join("c.txt").exists());
+    }
+
+    /// Dependencies: call 1 depends on call 0 (write then read).
+    #[test]
+    fn batch_with_dependencies_executes_in_order() {
+        let k = make_kernel();
+        let args = json!({
+            "calls": [
+                { "tool": "fs.write", "args": { "path": "dep.txt", "content": "dependency data" } },
+                { "tool": "fs.read", "args": { "path": "dep.txt" }, "dependsOn": [0] }
+            ]
+        });
+        let result = BatchHandler.call(&k, &args).unwrap();
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["ok"], json!(true)); // write
+        assert_eq!(results[1]["ok"], json!(true)); // read (after write)
+        // The read must contain the content from the write
+        let read_content = results[1]["result"]["content"].as_str().unwrap();
+        assert!(read_content.contains("dependency data"));
+    }
+
+    /// Nested batch.execute is refused.
+    #[test]
+    fn batch_nesting_is_refused() {
+        let k = make_kernel();
+        let args = json!({
+            "calls": [
+                { "tool": "batch.execute", "args": { "calls": [{ "tool": "fs.write", "args": { "path": "x", "content": "y" } }] } }
+            ]
+        });
+        let result = BatchHandler.call(&k, &args).unwrap();
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results[0]["ok"], json!(false));
+        assert_eq!(results[0]["error"]["code"], json!("ERR_REFUSED"));
+    }
+
+    /// Independent + dependent calls mixed: 0 and 1 are independent,
+    /// 2 depends on both (fan-in).
+    #[test]
+    fn batch_dag_fan_in() {
+        let k = make_kernel();
+        let args = json!({
+            "calls": [
+                { "tool": "fs.write", "args": { "path": "x.txt", "content": "x" } },
+                { "tool": "fs.write", "args": { "path": "y.txt", "content": "y" } },
+                { "tool": "fs.readMany", "args": { "paths": ["x.txt", "y.txt"] }, "dependsOn": [0, 1] }
+            ]
+        });
+        let result = BatchHandler.call(&k, &args).unwrap();
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["ok"], json!(true)); // write x
+        assert_eq!(results[1]["ok"], json!(true)); // write y
+        assert_eq!(results[2]["ok"], json!(true)); // readMany (after both writes)
+        let files = results[2]["result"]["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    /// Mixed success and failure: one call fails, the other succeeds.
+    #[test]
+    fn batch_mixed_success_failure() {
+        let k = make_kernel();
+        let args = json!({
+            "calls": [
+                { "tool": "fs.read", "args": { "path": "nonexistent.txt" } },
+                { "tool": "fs.write", "args": { "path": "ok.txt", "content": "survives" } }
+            ]
+        });
+        let result = BatchHandler.call(&k, &args).unwrap();
+        assert_eq!(result["ok"], json!(1));
+        assert_eq!(result["failed"], json!(1));
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results[0]["ok"], json!(false)); // missing file
+        assert_eq!(results[1]["ok"], json!(true)); // write succeeds
+        assert!(k.root.join("ok.txt").exists());
     }
 }

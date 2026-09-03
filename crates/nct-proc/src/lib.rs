@@ -74,6 +74,9 @@ pub struct SpawnArgs {
     #[serde(default)]
     #[schemars(range(min = 100, max = 600000))]
     pub timeoutMs: Option<u64>,
+    #[doc = "Base directory override (default: kernel base dir). Pass when working on a different workspace than the server was started on."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -88,6 +91,9 @@ pub struct StartArgs {
     #[serde(default)]
     #[schemars(range(min = 1000, max = 3600000))]
     pub maxDurationMs: Option<u64>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -324,7 +330,7 @@ impl Handler for SpawnHandler {
                 json!({ "got": a.timeoutMs }),
             ));
         }
-        let cwd_abs = resolve_checked(&k.root, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
         let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
         let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
@@ -391,7 +397,7 @@ impl Handler for StartHandler {
                 json!({ "got": a.maxDurationMs }),
             ));
         }
-        let cwd_abs = resolve_checked(&k.root, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
         let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
         let spawn_result = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let handle_id = self.handles.next_id();
@@ -581,6 +587,9 @@ pub struct RunScriptArgs {
     #[doc = "Working directory (default: base dir)"]
     #[serde(default)]
     pub cwd: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 fn lang_for_ext(ext: &str) -> Option<&'static str> {
@@ -728,7 +737,7 @@ impl Handler for RunScriptHandler {
                 (tmp, true)
             }
             (None, Some(p)) => {
-                let abs = resolve_checked(&k.root, p)?;
+                let abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, p)?;
                 if !abs.exists() {
                     return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such script: {p}"), json!({ "path": p })));
                 }
@@ -739,7 +748,7 @@ impl Handler for RunScriptHandler {
         let script_str = script_path.display().to_string();
         let extra = a.args.clone().unwrap_or_default();
         let (cmd, child_args) = script_command(&lang, &script_str, &extra);
-        let cwd_abs = resolve_checked(&k.root, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
         let timeout = a.timeoutMs.unwrap_or(k.cfg.limits.spawn_timeout_ms);
         if !(100..=k.cfg.limits.spawn_timeout_max_ms).contains(&timeout) {
             if is_temp {
@@ -782,6 +791,9 @@ pub struct WatchArgs {
     #[doc = "Working directory (default: base dir)"]
     #[serde(default)]
     pub cwd: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct WatchHandler {
@@ -792,13 +804,14 @@ impl Handler for WatchHandler {
         let a: WatchArgs = parse_args(args)?;
         let args_v = a.args.clone().unwrap_or_default();
         validate_cmd(&a.cmd)?;
-        let watch_abs = resolve_checked(&k.root, &a.path)?;
+        let base_root = k.base_dir(a.baseDir.as_deref())?;
+        let watch_abs = resolve_checked(&base_root, &a.path)?;
         if !watch_abs.exists() {
             return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such path: {}", a.path), json!({ "path": a.path })));
         }
         let interval = a.intervalMs.unwrap_or(500);
         let max_duration = a.maxDurationMs.unwrap_or(600_000);
-        let cwd_abs = resolve_checked(&k.root, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
         let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
         let spawn_result = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let handle_id = self.handles.next_id();

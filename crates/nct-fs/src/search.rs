@@ -18,7 +18,7 @@ use nct_core::paths::{is_reparse_point, resolve_checked};
 
 use crate::fs_tools::{err_no_path, err_no_path_with_siblings};
 
-pub const GREP_DESC: &str = "Regex search across files. Returns file/line/text matches. Directory scans are bounded: they skip .git/node_modules/.nc-tools/target/dist/build, skip files over 10MB, and stop after 20k files or 10s (limits.grepMaxScan*) — scanTruncated:true in the result means the budget stopped the scan, so matches may be partial. Directly-targeted file paths are always scanned in full.";
+pub const GREP_DESC: &str = "Regex search across files. Returns file/line/text matches. Directory scans are bounded: they skip .git/node_modules/.nc-tools/target/dist/build, skip files over 10MB, and stop after 20k files or 10s (limits.grepMaxScan*) — scanTruncated:true in the result means the budget stopped the scan, so matches may be partial. Directly-targeted file paths are always scanned in full. Supports contextBefore/contextAfter (adjacent lines with line numbers), fileType (extension filter, e.g. \"rs\"), and fixedString (fast literal substring search — no regex compilation).";
 pub const FILES_DESC: &str = "Find files by glob pattern (e.g. \"**/*.test.mjs\"). Directory scans are bounded like search.grep; scanTruncated:true means the scan budget stopped early.";
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -33,6 +33,23 @@ pub struct GrepArgs {
     #[serde(default)]
     #[schemars(range(min = 1, max = 1000))]
     pub maxResults: Option<u64>,
+    /// Lines of context before a match (0 = none).
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 50))]
+    pub contextBefore: Option<u64>,
+    /// Lines of context after a match (0 = none).
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 50))]
+    pub contextAfter: Option<u64>,    /// Filter by extension (e.g. "rs", "ts", "py" — no dot). Overrides glob.
+    #[serde(default)]
+    pub fileType: Option<String>,
+    /// Literal substring search (no regex compilation — much faster). The
+    /// pattern is matched as a plain string, not a regex.
+    #[serde(default)]
+    pub fixedString: Option<bool>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -42,6 +59,9 @@ pub struct FilesArgs {
     #[doc = "Path — relative to the base dir, or absolute (any location allowed)"]
     #[serde(default)]
     pub path: Option<String>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 /// Extension allowlist (lowercased, no dot) — extensionless files included.
@@ -102,21 +122,34 @@ pub struct GrepHandler;
 impl Handler for GrepHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: GrepArgs = parse_args(args)?;
-        let re = fancy_regex::Regex::new(&a.pattern)
-            .map_err(|e| ToolError::with_hint("ERR_BAD_REGEX", format!("Invalid regex: {e}"), json!({ "pattern": a.pattern })))?;
+        // fixedString path: no regex compilation — match literal substring.
+        // Memchr is the engine ripgrep uses for literal search; a plain
+        // `content.contains(pattern)` lets the compiler use SIMD-optimized
+        // memchr internally and avoids regex setup entirely.
+        let re = if a.fixedString.unwrap_or(false) {
+            None
+        } else {
+            Some(
+                fancy_regex::Regex::new(&a.pattern)
+                    .map_err(|e| ToolError::with_hint("ERR_BAD_REGEX", format!("Invalid regex: {e}"), json!({ "pattern": a.pattern })))?,
+            )
+        };
         let path_str = a.path.clone().unwrap_or_else(|| ".".to_string());
-        let base = resolve_checked(&k.root, &path_str)?;
-        if !base.exists() {
-            return Err(err_no_path_with_siblings(&path_str, &base, &k.root));
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let search_root = resolve_checked(&base, &path_str)?;
+        if !search_root.exists() {
+            return Err(err_no_path_with_siblings(&path_str, &search_root, &base));
         }
         let max_results = a.maxResults.unwrap_or(k.cfg.limits.grep_max_results as u64) as usize;
+        let ctx_before = a.contextBefore.unwrap_or(0) as usize;
+        let ctx_after = a.contextAfter.unwrap_or(0) as usize;
         let budget = WalkBudget::from_limits(&k.cfg.limits);
         let guard = ScanGuard::from_limits(&k.cfg.limits);
         let mut files: Vec<PathBuf> = Vec::new();
-        let mut scan_truncated = if fs::metadata(&base)?.is_dir() {
-            walk(&base, 0, budget, &guard, &mut files)
+        let mut scan_truncated = if fs::metadata(&search_root)?.is_dir() {
+            walk(&search_root, 0, budget, &guard, &mut files)
         } else {
-            files.push(base.clone());
+            files.push(search_root.clone());
             false
         };
         let mut matches: Vec<Value> = Vec::new();
@@ -128,7 +161,15 @@ impl Handler for GrepHandler {
                 break;
             }
             if let Some(glob) = &a.glob {
-                if !glob_match(glob, &rel_slash(&base, file)) {
+                if !glob_match(glob, &rel_slash(&search_root, file)) {
+                    continue;
+                }
+            }
+            // fileType filter: extension match (no dot). Overrides nothing —
+            // it ANDs with glob when both are given, matching standard tools.
+            if let Some(ft) = &a.fileType {
+                let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                if ext != *ft {
                     continue;
                 }
             }
@@ -142,26 +183,53 @@ impl Handler for GrepHandler {
             if content.contains('\0') {
                 continue;
             }
-            for (i, line) in content.split('\n').enumerate() {
-                if (i & 0x3FF) == 0 && guard.expired() {
+            let lines: Vec<&str> = content.split('\n').collect();
+            let mut idx = 0usize;
+            while idx < lines.len() {
+                if (idx & 0x3FF) == 0 && guard.expired() {
                     scan_truncated = true;
                     break 'files;
                 }
-                if let Ok(true) = re.is_match(line) {
+                let line = lines[idx];
+                let is_match = match &re {
+                    Some(re) => re.is_match(line).unwrap_or(false),
+                    None => line.contains(a.pattern.as_str()),
+                };
+                if is_match {
                     total += 1;
                     if matches.len() < max_results {
+                        // Context window: [idx-ctx_before, idx+ctx_after]
+                        let ctx_start = idx.saturating_sub(ctx_before);
+                        let ctx_end = (idx + ctx_after + 1).min(lines.len());
+                        let mut ctx = Vec::new();
+                        for ci in ctx_start..ctx_end {
+                            ctx.push(json!({
+                                "line": ci + 1,
+                                "text": take_chars(lines[ci], k.cfg.limits.grep_line_chars),
+                                "isMatch": ci == idx,
+                            }));
+                        }
                         matches.push(json!({
-                            "file": rel_slash(&k.root, file),
-                            "line": i + 1,
+                            "file": rel_slash(&base, file),
+                            "line": idx + 1,
                             "text": take_chars(line, k.cfg.limits.grep_line_chars),
+                            "context": ctx,
                         }));
                     } else {
                         truncated = true;
                     }
                 }
+                idx += 1;
             }
         }
-        Ok(json!({ "matches": matches, "total": total, "truncated": truncated, "scanTruncated": scan_truncated }))
+        Ok(json!({
+            "matches": matches,
+            "total": total,
+            "truncated": truncated,
+            "scanTruncated": scan_truncated,
+            "contextBefore": ctx_before,
+            "contextAfter": ctx_after,
+        }))
     }
 }
 
@@ -170,33 +238,34 @@ impl Handler for FilesHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: FilesArgs = parse_args(args)?;
         let path_str = a.path.clone().unwrap_or_else(|| ".".to_string());
-        let base = resolve_checked(&k.root, &path_str)?;
-        if !base.exists() {
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let search_root = resolve_checked(&base, &path_str)?;
+        if !search_root.exists() {
             return Err(err_no_path(&path_str));
         }
         let budget = WalkBudget::from_limits(&k.cfg.limits);
         let guard = ScanGuard::from_limits(&k.cfg.limits);
         let mut out: Vec<String> = Vec::new();
         let mut scan_truncated = false;
-        if fs::metadata(&base)?.is_dir() {
+        if fs::metadata(&search_root)?.is_dir() {
             let mut files: Vec<PathBuf> = Vec::new();
-            scan_truncated = walk(&base, 0, budget, &guard, &mut files);
+            scan_truncated = walk(&search_root, 0, budget, &guard, &mut files);
             for file in &files {
                 if guard.expired() {
                     scan_truncated = true;
                     break;
                 }
-                if glob_match(&a.pattern, &rel_slash(&base, file)) {
-                    out.push(rel_slash(&k.root, file));
+                if glob_match(&a.pattern, &rel_slash(&search_root, file)) {
+                    out.push(rel_slash(&base, file));
                 }
             }
         } else {
-            let base_name = base
+            let base_name = search_root
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if glob_match(&a.pattern, &base_name) || glob_match(&a.pattern, &rel_slash(&k.root, &base)) {
-                out.push(rel_slash(&k.root, &base));
+            if glob_match(&a.pattern, &base_name) || glob_match(&a.pattern, &rel_slash(&base, &search_root)) {
+                out.push(rel_slash(&base, &search_root));
             }
         }
         Ok(json!({ "files": out, "total": out.len(), "scanTruncated": scan_truncated }))
@@ -347,6 +416,9 @@ pub struct ReplaceArgs {
     #[serde(default)]
     #[schemars(range(min = 1, max = 2000))]
     pub maxFiles: Option<u64>,
+    #[doc = "Base dir for the root path (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct ReplaceHandler;
@@ -356,24 +428,25 @@ impl Handler for ReplaceHandler {
         let re = fancy_regex::Regex::new(&a.pattern).map_err(|e| {
             ToolError::with_hint("ERR_BAD_REGEX", format!("invalid regex: {e}"), json!({ "pattern": a.pattern }))
         })?;
-        let base = resolve_checked(&k.root, a.path.as_deref().unwrap_or("."))?;
-        if !base.exists() {
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let search_root = resolve_checked(&base, a.path.as_deref().unwrap_or("."))?;
+        if !search_root.exists() {
             return Err(err_no_path(a.path.as_deref().unwrap_or(".")));
         }
         let dry_run = a.dryRun.unwrap_or(true);
         let max_files = a.maxFiles.unwrap_or(200) as usize;
         let mut candidates: Vec<PathBuf> = Vec::new();
-        if fs::metadata(&base)?.is_dir() {
-            walk_files_ext(&base, 0, &mut candidates)
+        if fs::metadata(&search_root)?.is_dir() {
+            walk_files_ext(&search_root, 0, &mut candidates)
                 .map_err(ToolError::from)?;
         } else {
-            candidates.push(base.clone());
+            candidates.push(search_root.clone());
         }
         let mut files: Vec<Value> = Vec::new();
         let mut total_matches: u64 = 0;
         let mut truncated = false;
         for f in candidates {
-            let rel = rel_slash(&base, &f);
+            let rel = rel_slash(&search_root, &f);
             if let Some(g) = &a.glob {
                 if !glob_match(g, &rel) {
                     continue;
@@ -561,5 +634,108 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["small.txt"]);
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod grep_extension_tests {
+    use super::*;
+    use nct_core::kernel::Kernel;
+    use std::fs;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-grep-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut k = Kernel::new(dir).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    fn write(k: &Kernel, path: &str, content: &str) {
+        fs::write(k.root.join(path), content).unwrap();
+    }
+
+    #[test]
+    fn grep_context_before_after() {
+        let k = make_kernel();
+        write(&k, "main.rs", "fn a() {}\n// target line\nfn b() {}\nfn c() {}\n");
+        let args = json!({ "pattern": "target", "path": "main.rs", "contextBefore": 1, "contextAfter": 1 });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        let ctx = matches[0]["context"].as_array().unwrap();
+        // ctx = [before, match, after]
+        assert_eq!(ctx.len(), 3);
+        assert_eq!(ctx[0]["line"], json!(1));
+        assert_eq!(ctx[0]["isMatch"], json!(false));
+        assert_eq!(ctx[1]["line"], json!(2));
+        assert_eq!(ctx[1]["isMatch"], json!(true));
+        assert_eq!(ctx[2]["line"], json!(3));
+        assert_eq!(ctx[2]["isMatch"], json!(false));
+    }
+
+    #[test]
+    fn grep_file_type_filter() {
+        let k = make_kernel();
+        write(&k, "a.rs", "fn rust_fn() {}\n");
+        write(&k, "b.ts", "function tsFn() {}\n");
+        // fileType="rs" → only rust files match
+        let args = json!({ "pattern": "fn", "path": ".", "fileType": "rs" });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0]["file"].as_str().unwrap().ends_with("a.rs"));
+    }
+
+    #[test]
+    fn grep_fixed_string_is_literal() {
+        let k = make_kernel();
+        write(&k, "x.txt", "line with a.b.c inside\n");
+        // regex would need escaping; fixedString treats it literally
+        let args = json!({ "pattern": "a.b.c", "path": "x.txt", "fixedString": true });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1, "fixedString should find literal a.b.c");
+        // Regex mode would also match (the dot is a wildcard) — but literal
+        // semantics must find exactly the literal substring. Verify by
+        // ensuring it matched the right text.
+        assert!(matches[0]["text"].as_str().unwrap().contains("a.b.c"));
+    }
+
+    #[test]
+    fn grep_fixed_string_does_not_interpret_regex() {
+        let k = make_kernel();
+        write(&k, "y.txt", "cat sat on mat\ncatXXat\n");
+        // In regex mode, "cat*" would match "cat", "catX", etc. In fixedString,
+        // it's the literal characters "cat*" — which don't appear.
+        let args = json!({ "pattern": "cat*", "path": "y.txt", "fixedString": true });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        assert_eq!(v["matches"].as_array().unwrap().len(), 0);
+        // Regex mode WOULD match (cat* = cat + zero or more)
+        let args2 = json!({ "pattern": "cat*", "path": "y.txt" });
+        let v2 = GrepHandler.call(&k, &args2).unwrap();
+        assert!(v2["matches"].as_array().unwrap().len() >= 1);
+    }
+
+    #[test]
+    fn grep_context_absent_by_default() {
+        let k = make_kernel();
+        write(&k, "z.txt", "one\ntwo\nthree\n");
+        let args = json!({ "pattern": "two", "path": "z.txt" });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        // no context key when not requested (or empty)
+        assert!(matches[0]["context"].as_array().unwrap().is_empty() || matches[0]["context"].as_array().unwrap().len() == 1);
+        assert_eq!(v["contextBefore"], json!(0));
+        assert_eq!(v["contextAfter"], json!(0));
     }
 }

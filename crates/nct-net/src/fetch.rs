@@ -528,32 +528,41 @@ impl Handler for SearchHandler {
         // results for a rust query — live-observed 2026-09-02). The local
         // embedder scores every source's top result against the query and
         // drops sources whose output is semantically unrelated. Without a
-        // model, skip validation (fusion still dedupes).
-        let validated_lists = if let Some(embedder) = embedder {
-            let q_vec = embedder.embed(&query)?;
-            let mut kept: Vec<(String, Vec<engines::RawResult>)> = Vec::new();
-            let mut dropped: Vec<Value> = Vec::new();
-            for (name, results) in lists.iter() {
-                let probe = results.first().map(|r| format!("{} {}", r.title, r.snippet));
-                let score = match probe {
-                    Some(text) if !text.trim().is_empty() => {
-                        let v = embedder.embed(&text).unwrap_or_default();
-                        if v.len() == q_vec.len() { dot(&q_vec, &v) } else { 0.0 }
+        // model, skip validation (fusion still dedupes). A validated empty
+        // result is NOT silently reverted to the unfiltered list — that would
+        // hand the agent exactly the garbage the validator just rejected.
+        let lists = match embedder {
+            Some(embedder) => {
+                let q_vec = embedder.embed(&query)?;
+                let mut kept: Vec<(String, Vec<engines::RawResult>)> = Vec::new();
+                let mut dropped: Vec<Value> = Vec::new();
+                for (name, results) in lists.iter() {
+                    let probe = results.first().map(|r| format!("{} {}", r.title, r.snippet));
+                    let score = match probe {
+                        Some(text) if !text.trim().is_empty() => {
+                            let v = embedder.embed(&text).unwrap_or_default();
+                            if v.len() == q_vec.len() { dot(&q_vec, &v) } else { 0.0 }
+                        }
+                        _ => 0.0,
+                    };
+                    if results.is_empty() || score >= 0.25 {
+                        kept.push((name.clone(), results.clone()));
+                    } else {
+                        dropped.push(json!({ "engine": name, "topScore": round4(score), "reason": "results unrelated to query (source degraded)" }));
                     }
-                    _ => 0.0,
-                };
-                if results.is_empty() || score >= 0.25 {
-                    kept.push((name.clone(), results.clone()));
-                } else {
-                    dropped.push(json!({ "engine": name, "topScore": round4(score), "reason": "results unrelated to query (source degraded)" }));
                 }
+                source_dropped = dropped;
+                kept
             }
-            source_dropped = dropped;
-            kept
-        } else {
-            Vec::new()
+            None => lists, // no model → cannot validate, keep the fused candidates
         };
-        let lists = if validated_lists.is_empty() { lists } else { validated_lists };
+        if lists.is_empty() {
+            return Err(ToolError::with_hint(
+                "ERR_ENGINE",
+                "all sources returned results unrelated to the query (relevance validator dropped every engine)",
+                json!({ "sourcesDropped": source_dropped, "hint": "try a more specific query or engines:\"all\"" }),
+            ));
+        }
         let fused = engines::fuse(&lists);
         let rerank_enabled = a.rerank.unwrap_or(true);
         let authority = AuthorityStore::load(&k.root);

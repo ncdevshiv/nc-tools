@@ -43,6 +43,7 @@ pub fn register(k: &mut Kernel) {
     k.register("sys.snapshot", SNAPSHOT_DESC, schema_for::<SnapshotArgs>(), Arc::new(SnapshotHandler));
     k.register("sys.rollback", ROLLBACK_DESC, schema_for::<RollbackArgs>(), Arc::new(RollbackHandler));
     k.register("sys.listSnapshots", LIST_SNAPSHOTS_DESC, schema_for::<EmptyArgs>(), Arc::new(ListSnapshotsHandler));
+    k.register("sys.snapshotDiff", SNAPSHOT_DIFF_DESC, schema_for::<SnapshotDiffArgs>(), Arc::new(SnapshotDiffHandler));
     // phase 2 additions
     k.register("fs.readRange", READ_RANGE_DESC, schema_for::<ReadRangeArgs>(), Arc::new(ReadRangeHandler));
     k.register("fs.tree", TREE_DESC, schema_for::<TreeArgs>(), Arc::new(TreeHandler));

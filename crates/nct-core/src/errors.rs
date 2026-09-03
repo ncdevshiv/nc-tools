@@ -48,6 +48,7 @@ pub mod codes {
     pub const BAD_EDIT: &str = "ERR_BAD_EDIT";
     pub const BAD_PATH: &str = "ERR_BAD_PATH";
     pub const BAD_REGEX: &str = "ERR_BAD_REGEX";
+    pub const BINARY_FILE: &str = "ERR_BINARY_FILE";
     pub const CMD_NOT_FOUND: &str = "ERR_CMD_NOT_FOUND";
     pub const EMBED_UNAVAILABLE: &str = "ERR_EMBED_UNAVAILABLE";
     pub const ENGINE: &str = "ERR_ENGINE";
@@ -85,6 +86,7 @@ pub mod codes {
         BAD_EDIT,
         BAD_PATH,
         BAD_REGEX,
+        BINARY_FILE,
         CMD_NOT_FOUND,
         EMBED_UNAVAILABLE,
         ENGINE,

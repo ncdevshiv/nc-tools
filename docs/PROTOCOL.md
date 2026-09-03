@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 62 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 72 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
@@ -45,8 +45,8 @@ internal architecture, or data structures beyond the observable contract.
   (wave W-Net-1: agent-grade fetch+extract, robots/llms.txt, keyless federated
   search with local neural rerank — see docs/INTERNET-TOOLS.md)
 - `env.get`, `env.set`, `env.list`
-- `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.journal`,
-  `sys.workspace`, `sys.doctor`
+- `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.snapshotDiff`,
+  `sys.journal`, `sys.workspace`, `sys.doctor`
 - `batch.execute`
 
 Behavioral invariants every implementation MUST honor:
@@ -121,6 +121,7 @@ exactly one code (combined rows are not parseable by the gate).
 | `ERR_BAD_EDIT` | edit arguments invalid before matching (e.g. empty oldText) |
 | `ERR_BAD_PATH` | empty / non-path value |
 | `ERR_BAD_REGEX` | invalid search pattern |
+| `ERR_BINARY_FILE` | path is a binary file (fs.read refuses >30% NUL bytes; hint: readRange) |
 | `ERR_CMD_NOT_FOUND` | spawned command not found (hint: binary + PATH note) |
 | `ERR_EMBED_UNAVAILABLE` | local embedding model not loaded (semantic rerank/grounding) |
 | `ERR_ENGINE` | text-extraction/rerank engine failure |
@@ -216,3 +217,62 @@ means operationally: the suite never inspects the implementation.
 
 Hooks (chaos) and batch nesting depth>1 are implementation-level features;
 the protocol requires only that they do not break the specified invariants.
+
+### 3.1 Tool-surface evolution (Dr. Invi wave)
+
+As of this wave, the surface is **72 tools** (was 62, then 63 after the Dr. Invi tool wave). One additive tool:
+
+- `sys.snapshotDiff` — diff two snapshots: what files were added, removed, or
+  modified between them, plus byte totals. The review gate before a rollback.
+
+Existing tools gained NEW arguments (all additive — strict-untyped callers
+that omit them behave identically to before):
+
+| Tool | New argument | Behavior |
+|---|---|---|
+| `fs.read` | — (reader rewritten to stream) | no longer loads whole file; binary detection, single-pass digest |
+| `fs.write`/`writeMany` | `previousHash` in result | crash-safe atomic write via tmp+fsync+rename |
+| `fs.readMany` | — (now parallel) | reads files concurrently, order preserved |
+| `search.grep` | `contextBefore`, `contextAfter`, `fileType`, `fixedString` | context lines, extension filter, literal search |
+| `search.semantic` | — (chunk-level) | returns `symbol`/`lineStart`/`lineEnd` per hit |
+| `patch.apply` | `fuzzy` | survives whitespace drift; adds `nearestDiff` hint |
+| `code.symbols` | `withBody` | returns `endLine`/`doc`/`body` spans |
+| `text.diff` | `wordLevel` | word-level `wordSegments` |
+| `sys.rollback` | `paths` | partial rollback (restore only selected paths) |
+| `batch.execute` | `dependsOn` | parallel DAG execution |
+
+### 3.2 Agent coordination layer
+
+The **72-tool** surface now includes a full multi-agent coordination layer
+(`agent.*`) — the capability that was missing when several agents worked the
+same workspace anonymously and blind to each other. State is on-disk and
+cross-process, so parallel servers sharing a workspace all see it:
+
+- `.nc-tools/agents.jsonl` — roster: every agent identity + state
+- `.nc-tools/agent-messages.jsonl` — inter-agent noticeboard
+- `.nc-tools/locks.jsonl` — advisory file locks
+
+| Tool | What it does |
+|---|---|
+| `agent.register` | Mint or resume an identity. `{agentId}` restores a known id (crash/compaction continuation); absent = resume this session's agent or mint `agent-<n>` (chronological). |
+| `agent.list` | Chronological roster: id, name, sid, createdAt, lastSeen, status, task. Newest-first. |
+| `agent.heartbeat` | Update `{status, task}` + lastSeen so the roster stays live. |
+| `agent.status` | Coordination snapshot: who's here, what each is doing, active locks, whether YOU are locked out of a path, recent messages. The "look around before you start" tool. |
+| `agent.post` | Write to the noticeboard. `{to}` = direct message, omit = broadcast. `kind` = note\|question\|request\|handoff\|bug\|hold\|resume. |
+| `agent.messages` | Read messages (filter by to/from/kind, newest-first). |
+| `agent.lock` | Advisory lock on a path; `holdMs` auto-releases even on crash (default 10 min). |
+| `agent.unlock` | Release a lock you hold. Won't steal another's live lock. |
+| `agent.locks` | List active locks + expiry. Call before editing. |
+
+**Identity + continuity (crash/compaction):**
+- A client sends `agentId` in MCP `initialize`'s `clientInfo`; the kernel binds
+  that id so a restart keeps the same identity + history.
+- `agent.register {agentId}` resumes; a known id is honored, not renumbered.
+- No `agentId`: same session (by `sid`) resumes; a new session mints the next
+  chronological `agent-<n>`. Sids are now counter-unique so two servers in one
+  process never collide onto one identity.
+
+**Conflict + awareness:** agents call `agent.status` on entry, `agent.lock`
+before editing a shared file, `agent.locks` before writing, and `agent.post`
+to broadcast bugs/holds/handoffs — so agents that never met can still see and
+coordinate through the shared workspace state.

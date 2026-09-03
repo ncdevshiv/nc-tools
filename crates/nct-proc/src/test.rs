@@ -109,15 +109,40 @@ fn run_suite(k: &Kernel, cmd: &str, args: &[String], timeout_ms: u64) -> Result<
                 ToolError::new("ERR_SPAWN", format!("{cmd} failed: {e}"))
             }
         })?;
-    let mut out = String::new();
-    let mut err = String::new();
+    // Drain BOTH pipes concurrently into their own buffers. Serial reads
+    // (stdout to EOF, then stderr) deadlock once a runner writes enough to
+    // fill the OS pipe buffer (~64KB) on the SECOND stream while the FIRST is
+    // still held open: the child blocks on write, so the first never reaches
+    // EOF and the whole call hangs. Two background pumps drain each stream as
+    // it arrives, so the child can always write; we then poll for exit.
+    let out_buf = Arc::new(Mutex::new(String::new()));
+    let err_buf = Arc::new(Mutex::new(String::new()));
+    let mut pump_handles = Vec::new();
     if let Some(mut s) = child.stdout.take() {
-        use std::io::Read;
-        let _ = s.read_to_string(&mut out);
+        let buf = out_buf.clone();
+        pump_handles.push(std::thread::spawn(move || {
+            use std::io::Read;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match s.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().unwrap().push_str(&String::from_utf8_lossy(&chunk[..n])),
+                }
+            }
+        }));
     }
     if let Some(mut s) = child.stderr.take() {
-        use std::io::Read;
-        let _ = s.read_to_string(&mut err);
+        let buf = err_buf.clone();
+        pump_handles.push(std::thread::spawn(move || {
+            use std::io::Read;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match s.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().unwrap().push_str(&String::from_utf8_lossy(&chunk[..n])),
+                }
+            }
+        }));
     }
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     let status = loop {
@@ -134,6 +159,11 @@ fn run_suite(k: &Kernel, cmd: &str, args: &[String], timeout_ms: u64) -> Result<
             Err(e) => return Err(ToolError::new("ERR_SPAWN", format!("{cmd} failed: {e}"))),
         }
     };
+    for h in pump_handles {
+        let _ = h.join();
+    }
+    let out = out_buf.lock().unwrap().clone();
+    let err = err_buf.lock().unwrap().clone();
     Ok(std::process::Output { status, stdout: out.into_bytes(), stderr: err.into_bytes() })
 }
 

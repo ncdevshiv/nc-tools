@@ -9,6 +9,7 @@ node_modules/
 
 # local run artifacts (results are reproducible; transcripts stay local)
 bench/results/
+benchmark/results/
 .nc-tools/
 .*.log
 .test.out.log

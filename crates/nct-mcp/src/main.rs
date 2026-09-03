@@ -196,14 +196,30 @@ fn main() {
         let params = msg.get("params").cloned().unwrap_or(json!({}));
 
         let resp = match method.as_str() {
-            "initialize" => rpc_result(
-                id,
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                }),
-            ),
+            "initialize" => {
+                // Identity binding: a client that carries a durable agentId
+                // (survives crash/compaction/restart) tells us who it is so it
+                // keeps its identity, history, and locks across sessions.
+                // Registration is best-effort — the handshake must never fail
+                // because the coordination layer had a problem, so a client
+                // that omits clientInfo is still fully functional (it gets a
+                // fresh sid-bound identity on first agent.register).
+                let client_info = params.get("clientInfo").cloned().unwrap_or(json!({}));
+                if let Some(agent_id) = client_info.get("agentId").and_then(|a| a.as_str()) {
+                    let _ = kernel.call(
+                        "agent.register",
+                        &json!({ "agentId": agent_id }),
+                    );
+                }
+                rpc_result(
+                    id,
+                    json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": { "listChanged": false } },
+                        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                    }),
+                )
+            }
             m if m.starts_with("notifications/") => continue, // no response for notifications
             "tools/list" => rpc_result(id, json!({ "tools": kernel.descriptors() })),
             "tools/call" => {

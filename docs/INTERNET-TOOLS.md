@@ -1,6 +1,6 @@
 # Internet Tools: Research + Design (Wave W-Net)
 
-Status: **W-Net-1 + W-Net-2a SHIPPED** (2026-09-02, 62 tools) — verifier 10/10 arms (`bench/results/net-w1/verifier.json`). W-Net-2b/3 remainder below.
+Status: **W-Net-1 + W-Net-2a SHIPPED** (2026-09-02, then 62 tools; now 63 with Dr. Invi wave) — verifier 10/10 arms (`bench/results/net-w1/verifier.json`). W-Net-2b/3 remainder below.
 
 ## W-Net-2a shipped results (2026-09-02)
 
@@ -8,7 +8,7 @@ Status: **W-Net-1 + W-Net-2a SHIPPED** (2026-09-02, 62 tools) — verifier 10/10
 - **Render escalation** (`render.rs`): JS-shell pages (extraction <400 chars and confidence <0.5) re-render through the system browser headless (`msedge/chrome --headless=new --dump-dom --virtual-time-budget=5000`) — zero new deps; `source:"rendered"` when it engages; honest low-confidence degrade when no browser. Live-proven: JS-only content read correctly (verifier F1 arm).
 - **Citation ledger** (`cite.rs`): `net.cite {url}` → live fetch (refresh) → `.nc-tools/sources.jsonl` entry {id (sha256(url@hash)[:8]), title, contentHash, citation line, **stored markdown** — the ledger owns the content, link-rot-proof}; idempotent per (url,content); re-cite after a silent edit → NEW id. `net.cite {id}` → live health check → unchanged/changed/dead (stored copy survives regardless); `net.cite {}` → list. Live-fetch failure with cache present → honest `stale:true` cite.
 - **`net.verify {claim, url|id}`**: chunks the content (id path = the LEDGER's stored copy — verify what was cited, immune to later edits), embeds claim+chunks with local MiniLM, verdict grounded (≥0.50) / partial (≥0.35) / not-grounded with best span. Live: grounded 0.769 vs unrelated claim 0.102 — cleanly separated.
-- Gates: node 96/96, conformance 27/27, crossaudit 20/20, cargo all-green (20 suites), verifier 10/10 incl. render + grounding arms, exe reinstalled (62 tools).
+- Gates: node 96/96, conformance 27/27, crossaudit 20/20, cargo all-green (20 suites), verifier 10/10 incl. render + grounding arms, exe reinstalled (63 tools after Dr. Invi wave).
 
 ## W-Net-1 shipped results
 
