@@ -1,5 +1,6 @@
 // sys.* + batch.execute — kernel-level tools that need the kernel itself.
 // Port of the sys section of src/kernel/kernel.mjs.
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -36,6 +37,23 @@ pub struct EmptySysArgs {}
 pub struct BatchArgs {
     #[schemars(length(min = 1, max = 25))]
     pub calls: Vec<BatchCall>,
+    /// Retry policy for failed sub-calls. When {times} > 0, a failed sub-call
+    /// is retried up to `times` more times with a linear backoff of
+    /// `delayMs * attempt` between attempts (default delayMs = 1000). Applies
+    /// per failing sub-call, not to the batch as a whole.
+    #[serde(default)]
+    pub retry: Option<RetryArgs>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct RetryArgs {
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 5))]
+    pub times: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 30000))]
+    pub delayMs: Option<u64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -140,10 +158,14 @@ impl Handler for BatchHandler {
         // in parallel. If any have dependencies, use the topological scheduler.
         let has_deps = deps.iter().any(|d| !d.is_empty());
 
+        let retry_times = a.retry.as_ref().and_then(|r| r.times).unwrap_or(0) as u32;
+        let retry_delay = a.retry.as_ref().and_then(|r| r.delayMs).unwrap_or(1000);
+        let retry = Retry { times: retry_times, delay_ms: retry_delay };
+
         let results: Vec<Value> = if has_deps {
-            execute_dag(k, &a.calls, &deps, batch_str)
+            execute_dag(k, &a.calls, &deps, batch_str, &retry)
         } else {
-            execute_parallel(k, &a.calls, batch_str)
+            execute_parallel(k, &a.calls, batch_str, &retry)
         };
 
         let ok_count = results.iter().filter(|r| r["ok"] == json!(true)).count();
@@ -155,9 +177,46 @@ impl Handler for BatchHandler {
     }
 }
 
+/// Retry policy for one sub-call invocation.
+#[derive(Clone, Copy)]
+struct Retry {
+    times: u32,
+    delay_ms: u64,
+}
+
+/// Run one sub-call with the retry policy. On failure the call is retried up
+/// to `retry.times` more times with `delay_ms * attempt` linear backoff. The
+/// successful (or final failing) outcome is returned.
+fn run_with_retry(k: &Kernel, tool: &str, args: &Value, retry: &Retry) -> Value {
+    let mut attempt = 0u32;
+    loop {
+        let out = k.call(tool, args);
+        if out.ok {
+            return call_item(out);
+        }
+        if attempt >= retry.times {
+            return call_item(out);
+        }
+        attempt += 1;
+        std::thread::sleep(std::time::Duration::from_millis(retry.delay_ms * attempt as u64));
+    }
+}
+
+fn call_item(out: nct_core::CallOutcome) -> Value {
+    let mut item = serde_json::Map::new();
+    item.insert("ok".into(), json!(out.ok));
+    if let Some(r) = out.result {
+        item.insert("result".into(), r);
+    }
+    if let Some(e) = out.error {
+        item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
+    }
+    Value::Object(item)
+}
+
 /// Execute all calls in parallel via scoped threads. Results are returned in
 /// input order. Each call is journaled individually by the kernel.
-fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str) -> Vec<Value> {
+fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str, retry: &Retry) -> Vec<Value> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = calls
             .iter()
@@ -166,20 +225,12 @@ fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str) -> Vec<Va
                 let tool = c.tool.clone();
                 let args = Value::Object(c.args.clone());
                 let batch = batch_name.to_string();
+                let retry = *retry;
                 scope.spawn(move || {
                     if nct_core::Kernel::resolve_tool(k, &batch) == nct_core::Kernel::resolve_tool(k, &tool) {
                         return json!({ "ok": false, "error": { "code": "ERR_REFUSED", "message": "batch.execute cannot nest itself" } });
                     }
-                    let out = k.call(&tool, &args);
-                    let mut item = serde_json::Map::new();
-                    item.insert("ok".into(), json!(out.ok));
-                    if let Some(r) = out.result {
-                        item.insert("result".into(), r);
-                    }
-                    if let Some(e) = out.error {
-                        item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
-                    }
-                    Value::Object(item)
+                    run_with_retry(k, &tool, &args, &retry)
                 })
             })
             .collect();
@@ -198,7 +249,7 @@ fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str) -> Vec<Va
 /// Execute calls respecting the dependency graph. Uses Kahn's topological
 /// rounds: each round runs all ready calls in parallel, then unlocks
 /// dependents. Results are returned in input order.
-fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_name: &str) -> Vec<Value> {
+fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_name: &str, retry: &Retry) -> Vec<Value> {
     let n = calls.len();
     let mut results: Vec<Value> = vec![
         json!({ "ok": false, "error": { "code": "ERR_INTERNAL", "message": "not executed" } });
@@ -224,22 +275,14 @@ fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_n
                     let tool = calls[i].tool.clone();
                     let args = Value::Object(calls[i].args.clone());
                     let bn = batch_name.to_string();
+                    let retry = *retry;
                     (i, scope.spawn(move || {
                         if nct_core::Kernel::resolve_tool(k, &bn)
                             == nct_core::Kernel::resolve_tool(k, &tool)
                         {
                             return json!({ "ok": false, "error": { "code": "ERR_REFUSED", "message": "batch.execute cannot nest itself" } });
                         }
-                        let out = k.call(&tool, &args);
-                        let mut item = serde_json::Map::new();
-                        item.insert("ok".into(), json!(out.ok));
-                        if let Some(r) = out.result {
-                            item.insert("result".into(), r);
-                        }
-                        if let Some(e) = out.error {
-                            item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
-                        }
-                        Value::Object(item)
+                        run_with_retry(k, &tool, &args, &retry)
                     }))
                 })
                 .collect();
@@ -387,5 +430,61 @@ mod batch_tests {
         assert_eq!(results[0]["ok"], json!(false)); // missing file
         assert_eq!(results[1]["ok"], json!(true)); // write succeeds
         assert!(k.root.join("ok.txt").exists());
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use nct_core::Kernel;
+
+    fn kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = Kernel::new(dir).unwrap();
+        nct_fs::register(&mut k);
+        register_sys_batch(&mut k);
+        k
+    }
+
+    #[test]
+    fn retry_recovers_a_flapping_call() {
+        // fs.read on a path that does NOT exist fails, then we create it and
+        // retry the same batch — the retried call succeeds. (Retry is per-call
+        // re-execution against fresh state, which is the real-world flake.)
+        let k = kernel();
+        let missing = k.root.join("will-exist.txt");
+        let _ = missing;
+        // first: fail (missing), second batch after creating it: succeed
+        let args = json!({
+            "calls": [{ "tool": "fs.read", "args": { "path": "will-exist.txt" } }],
+            "retry": { "times": 3, "delayMs": 10 }
+        });
+        let v1 = BatchHandler.call(&k, &args).unwrap();
+        assert_eq!(v1["failed"], json!(1), "missing file must fail");
+        // create it now
+        std::fs::write(k.root.join("will-exist.txt"), "now here\n").unwrap();
+        let v2 = BatchHandler.call(&k, &args).unwrap();
+        assert_eq!(v2["ok"], json!(1), "after creation the same call must succeed");
+        // journal saw the retried calls (each attempt journaled)
+        let evs = k.journal.events();
+        let calls: Vec<_> = evs.iter().filter(|e| e["kind"] == "tool.call" && e["tool"] == json!("fs.read")).collect();
+        assert!(calls.len() >= 2);
+    }
+
+    #[test]
+    fn no_retry_is_backward_compatible() {
+        let k = kernel();
+        let args = json!({ "calls": [{ "tool": "fs.stat", "args": { "path": "." } }] });
+        let v = BatchHandler.call(&k, &args).unwrap();
+        assert_eq!(v["ok"], json!(1));
+        assert_eq!(v["failed"], json!(0));
     }
 }

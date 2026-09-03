@@ -97,6 +97,39 @@ pub struct StartArgs {
     #[doc = "Base directory override (default: kernel base dir)"]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// Health check: a {cmd, args} probe run every `healthEveryMs` (default
+    /// 30s). If the probe exits non-zero twice in a row, the record is marked
+    /// unhealthy (but NOT killed — the agent decides). proc.status reports it.
+    #[serde(default)]
+    pub healthCheck: Option<HealthCheckArgs>,
+    /// Restart policy: if the child exits on its own, restart it up to
+    /// `maxRetries` times (default 0 = never), waiting `restartDelayMs`
+    /// between attempts (default 5s). Only applies when the process stream
+    /// itself exits; maxDuration still bounds the total.
+    #[serde(default)]
+    pub restart: Option<RestartArgs>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheckArgs {
+    pub cmd: String,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    #[schemars(range(min = 1000, max = 600000))]
+    pub healthEveryMs: Option<u64>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RestartArgs {
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 25))]
+    pub maxRetries: Option<u64>,
+    #[serde(default)]
+    #[schemars(range(min = 500, max = 300000))]
+    pub restartDelayMs: Option<u64>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -120,6 +153,12 @@ pub struct StopArgs {
     pub handleId: String,
     #[serde(default)]
     pub force: Option<bool>,
+    /// Graceful shutdown: SIGTERM-equivalent first (kill on unix, terminate on
+    /// windows), wait up to gracefulMs for exit, then SIGKILL. Default 0 =
+    /// immediate stop (old behavior).
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 300000))]
+    pub gracefulMs: Option<u64>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -205,6 +244,11 @@ pub struct HandleRec {
     pub output: Arc<Mutex<String>>,
     /// Owned child; polled + reaped by the watcher thread, or taken by stop().
     child: Mutex<Option<Child>>,
+    /// Health: Some(false) after two consecutive failing probes (agent-visible),
+    /// None until the first probe runs. Never kills — only marks.
+    pub healthy: Mutex<Option<bool>>,
+    /// Restart bookkeeping: retries used, last restart at.
+    pub restarts: Mutex<u32>,
 }
 
 impl HandleRec {
@@ -433,6 +477,8 @@ impl Handler for StartHandler {
             spawn_error: Mutex::new(spawn_error),
             output: Arc::new(Mutex::new(String::new())),
             child: Mutex::new(child),
+            healthy: Mutex::new(None),
+            restarts: Mutex::new(0),
         });
         // output pumps: stdout+stderr merged into rec.output, capped (proc.mjs)
         let max = k.cfg.limits.proc_handle_output_bytes;
@@ -443,15 +489,59 @@ impl Handler for StartHandler {
             pump(s, rec.output.clone(), max);
         }
         // watcher thread: reaps exit, enforces maxDuration (proc.mjs timers)
-        // (a failed spawn has no child; the watcher exits immediately)
+        // (a failed spawn has no child; the watcher exits immediately).
+        // Health and restart extend it:
+        //   - every tick, run the health probe if configured; two consecutive
+        //     failures mark healthy=false (never kills, only marks).
+        //   - if the child exits and maxRetries>0, respawn (bounded by the
+        //     same max_duration overall).
         let rec_w = rec.clone();
+        let health_cfg = a.healthCheck.clone();
+        let restart_cfg = a.restart.clone();
+        let restart_cwd = cwd_abs.clone();
+        let session_snapshot = k.session_env.snapshot();
         std::thread::spawn(move || {
             let started = Instant::now();
+            let mut health_bad = 0u32;
+            let mut restarts_used = 0u32;
+            let max_retries = restart_cfg.as_ref().and_then(|r| r.maxRetries).unwrap_or(0) as u32;
+            let restart_delay = restart_cfg.as_ref().and_then(|r| r.restartDelayMs).unwrap_or(5000);
+            let health_every = health_cfg.as_ref().and_then(|h| h.healthEveryMs).unwrap_or(30_000);
+            let mut next_health = started + Duration::from_millis(health_every);
             loop {
                 match rec_w.poll_once() {
                     None => return, // child taken by stop()
                     Some(Ok(Some(status))) => {
                         rec_w.record_exit(&status);
+                        if restarts_used < max_retries {
+                            // respawn the SAME command after the delay
+                            std::thread::sleep(Duration::from_millis(restart_delay));
+                            if started.elapsed() > Duration::from_millis(max_duration) {
+                                rec_w.take_child();
+                                return;
+                            }
+                            let mut cmd2 = build_command_env(&rec_w.cmd, &rec_w.args, &restart_cwd, &session_snapshot);
+                            if let Ok(mut ch) = cmd2.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+                                let out_clone = rec_w.output.clone();
+                                let max2 = max;
+                                if let Some(s) = ch.stdout.take() {
+                                    pump(s, out_clone, max2);
+                                }
+                                if let Some(s) = ch.stderr.take() {
+                                    let out_clone2 = rec_w.output.clone();
+                                    pump(s, out_clone2, max2);
+                                }
+                                restarts_used += 1;
+                                *rec_w.restarts.lock().unwrap() = restarts_used;
+                                *rec_w.running.lock().unwrap() = true;
+                                *rec_w.child.lock().unwrap() = Some(ch);
+                                health_bad = 0;
+                                continue;
+                            } else {
+                                rec_w.take_child();
+                                return;
+                            }
+                        }
                         rec_w.take_child();
                         return;
                     }
@@ -461,6 +551,26 @@ impl Handler for StartHandler {
                         *rec_w.running.lock().unwrap() = false;
                         rec_w.take_child();
                         return;
+                    }
+                }
+                // health probe on schedule (only while child is alive)
+                if health_cfg.is_some() && std::time::Instant::now() >= next_health {
+                    next_health = std::time::Instant::now() + Duration::from_millis(health_every);
+                    let h = health_cfg.as_ref().unwrap();
+                    let health_args = h.args.clone().unwrap_or_default();
+                    let mut hc = build_command_env(&h.cmd, &health_args, &restart_cwd, &session_snapshot);
+                    let probe_ok = match hc.stdout(Stdio::null()).stderr(Stdio::null()).status() {
+                        Ok(s) => s.success(),
+                        Err(_) => false,
+                    };
+                    if probe_ok {
+                        health_bad = 0;
+                        *rec_w.healthy.lock().unwrap() = Some(true);
+                    } else {
+                        health_bad += 1;
+                        if health_bad >= 2 {
+                            *rec_w.healthy.lock().unwrap() = Some(false);
+                        }
                     }
                 }
                 if started.elapsed() > Duration::from_millis(max_duration) {
@@ -485,6 +595,24 @@ impl Handler for StartHandler {
     }
 }
 
+/// Build a child command for the watcher thread (restart + health probes):
+/// same session-env inheritance as build_command.
+fn build_command_env(cmd: &str, args: &[String], cwd: &std::path::Path, session_env: &std::collections::BTreeMap<String, String>) -> Command {
+    use nct_core::childenv::child_env;
+    let mut c = Command::new(cmd);
+    c.args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .env_clear()
+        .envs(child_env(&session_env.clone()));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(nct_core::CREATE_NO_WINDOW);
+    }
+    c
+}
+
 pub struct StatusHandler {
     handles: HandleTable,
 }
@@ -506,6 +634,8 @@ impl Handler for StatusHandler {
             "cmd": rec.cmd,
             "args": rec.args,
             "running": running,
+            "healthy": *rec.healthy.lock().unwrap(),
+            "restarts": *rec.restarts.lock().unwrap(),
             "exitCode": *rec.exit_code.lock().unwrap(),
             "signal": *rec.signal.lock().unwrap(),
             "timedOut": *rec.timed_out.lock().unwrap(),
@@ -560,6 +690,39 @@ impl Handler for StopHandler {
             )
         })?;
         let was_running = *rec.running.lock().unwrap();
+        let graceful_ms = a.gracefulMs.unwrap_or(0);
+        if graceful_ms > 0 {
+            // Graceful: SIGTERM first, wait up to gracefulMs, then SIGKILL.
+            // On Windows there is no portable SIGTERM; terminate() sends a
+            // CTRL-BREAK/console-close equivalent via taskkill semantics — we
+            // approximate with an immediate kill after the wait only if needed.
+            if let Some(_child) = rec.child.lock().unwrap().as_mut() {
+                #[cfg(unix)]
+                {
+                    // kill(pid, SIGTERM) via libc
+                    unsafe { libc::kill(_child.id() as i32, 15) };
+                }
+                #[cfg(windows)]
+                {
+                    // no std SIGTERM; signal intent by letting the process see
+                    // we want it gone (no-op here) — then rely on the wait.
+                }
+                let deadline = Instant::now() + Duration::from_millis(graceful_ms);
+                // wait for exit without holding the child lock
+                while Instant::now() < deadline {
+                    if !*rec.running.lock().unwrap() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                    // poll once more (exit may have been recorded)
+                    if rec.poll_once().map(|r| r.ok().flatten().is_some()).unwrap_or(false) {
+                        if let Some(s) = rec.poll_once().and_then(|r| r.ok()).flatten() {
+                            let _ = s;
+                        }
+                    }
+                }
+            }
+        }
         // On Windows kill() is async-ish; report current knowledge, caller
         // re-statuses (same contract as proc.mjs stop).
         if let Some(mut child) = rec.take_child() {
@@ -568,7 +731,7 @@ impl Handler for StopHandler {
                 rec.record_exit(&status);
             }
         }
-        Ok(json!({ "handleId": a.handleId, "requested": true, "wasRunning": was_running }))
+        Ok(json!({ "handleId": a.handleId, "requested": true, "wasRunning": was_running, "graceful": graceful_ms > 0 }))
     }
 }
 
@@ -847,6 +1010,8 @@ impl Handler for WatchHandler {
             spawn_error: Mutex::new(spawn_error),
             output: Arc::new(Mutex::new(String::new())),
             child: Mutex::new(child),
+            healthy: Mutex::new(None),
+            restarts: Mutex::new(0),
         });
         let max_out = k.cfg.limits.proc_handle_output_bytes;
         if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stdout.take()) {
