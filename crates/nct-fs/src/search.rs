@@ -47,6 +47,10 @@ pub struct GrepArgs {
     /// pattern is matched as a plain string, not a regex.
     #[serde(default)]
     pub fixedString: Option<bool>,
+    /// Count-only: return per-file match counts (no match text). Much cheaper
+    /// than full matches when you only need "how many, where".
+    #[serde(default)]
+    pub countOnly: Option<bool>,
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
     pub baseDir: Option<String>,
@@ -143,6 +147,8 @@ impl Handler for GrepHandler {
         let max_results = a.maxResults.unwrap_or(k.cfg.limits.grep_max_results as u64) as usize;
         let ctx_before = a.contextBefore.unwrap_or(0) as usize;
         let ctx_after = a.contextAfter.unwrap_or(0) as usize;
+        let count_only = a.countOnly.unwrap_or(false);
+        let mut count_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
         let budget = WalkBudget::from_limits(&k.cfg.limits);
         let guard = ScanGuard::from_limits(&k.cfg.limits);
         let mut files: Vec<PathBuf> = Vec::new();
@@ -197,6 +203,11 @@ impl Handler for GrepHandler {
                 };
                 if is_match {
                     total += 1;
+                    if count_only {
+                        bump_count(&mut count_map, &rel_slash(&base, file));
+                        idx += 1; // countOnly short-circuit must still advance the cursor
+                        continue;
+                    }
                     if matches.len() < max_results {
                         // Context window: [idx-ctx_before, idx+ctx_after]
                         let ctx_start = idx.saturating_sub(ctx_before);
@@ -222,6 +233,20 @@ impl Handler for GrepHandler {
                 idx += 1;
             }
         }
+        if count_only {
+            let counts: Vec<Value> = count_map
+                .into_iter()
+                .map(|(file, n)| json!({ "file": file, "count": n }))
+                .collect();
+            return Ok(json!({
+                "counts": counts,
+                "filesWithMatches": counts.len(),
+                "total": total,
+                "truncated": truncated,
+                "scanTruncated": scan_truncated,
+                "countOnly": true,
+            }));
+        }
         Ok(json!({
             "matches": matches,
             "total": total,
@@ -231,6 +256,11 @@ impl Handler for GrepHandler {
             "contextAfter": ctx_after,
         }))
     }
+}
+
+/// Bump the per-file count map for countOnly mode.
+fn bump_count(map: &mut std::collections::HashMap<String, u64>, file: &str) {
+    *map.entry(file.to_string()).or_insert(0) += 1;
 }
 
 pub struct FilesHandler;
@@ -737,5 +767,64 @@ mod grep_extension_tests {
         assert!(matches[0]["context"].as_array().unwrap().is_empty() || matches[0]["context"].as_array().unwrap().len() == 1);
         assert_eq!(v["contextBefore"], json!(0));
         assert_eq!(v["contextAfter"], json!(0));
+    }
+}
+
+#[cfg(test)]
+mod count_only_tests {
+    use super::*;
+    use nct_core::kernel::Kernel;
+    use std::fs;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-countonly-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut k = Kernel::new(dir).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    #[test]
+    fn count_only_returns_per_file_counts_without_text() {
+        let k = make_kernel();
+        let dir = k.root.join("corpus");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "foo\nbar\nfoo\n").unwrap();
+        fs::write(dir.join("b.txt"), "foo\n").unwrap();
+        let args = json!({ "pattern": "foo", "path": "corpus", "countOnly": true });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        assert_eq!(v["countOnly"], json!(true));
+        let counts = v["counts"].as_array().unwrap();
+        let mut by_file: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for c in counts {
+            by_file.insert(c["file"].as_str().unwrap().to_string(), c["count"].as_u64().unwrap());
+        }
+        // find the two files by exact relative suffix
+        let a = by_file.iter().find(|(f, _)| f.ends_with("/a.txt") || **f == "a.txt").map(|(_, n)| *n).unwrap_or(0);
+        let b = by_file.iter().find(|(f, _)| f.ends_with("/b.txt") || **f == "b.txt").map(|(_, n)| *n).unwrap_or(0);
+        assert_eq!(a, 2, "a.txt should have 2 hits; map: {by_file:?}");
+        assert_eq!(b, 1, "b.txt should have 1 hit; map: {by_file:?}");
+        assert_eq!(v["total"], json!(3));
+        assert!(v.get("matches").is_none(), "countOnly must not return match text");
+    }
+
+    #[test]
+    fn count_only_zero_matches_when_absent() {
+        let k = make_kernel();
+        let dir = k.root.join("corpus2");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("z.txt"), "hello\n").unwrap();
+        let args = json!({ "pattern": "zzz_no_match", "path": "corpus2", "countOnly": true });
+        let v = GrepHandler.call(&k, &args).unwrap();
+        assert_eq!(v["total"], json!(0));
+        assert!(v["counts"].as_array().unwrap().is_empty());
     }
 }

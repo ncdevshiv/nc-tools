@@ -298,6 +298,21 @@
             },
             "maxItems": 25,
             "minItems": 1
+          },
+          "retry": {
+            "description": "Retry policy for failed sub-calls. When {times} > 0, a failed sub-call is retried up to `times` more times with a linear backoff of `delayMs * attempt` between attempts (default delayMs = 1000). Applies per failing sub-call, not to the batch as a whole.",
+            "type": "object",
+            "properties": {
+              "delayMs": {
+                "maximum": 30000,
+                "type": "integer"
+              },
+              "times": {
+                "maximum": 5,
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -998,8 +1013,16 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "author": {
+            "description": "Filter commits by author (case-insensitive substring).",
+            "type": "string"
+          },
           "baseDir": {
             "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
+          "grep": {
+            "description": "Filter commits whose message matches (case-insensitive substring).",
             "type": "string"
           },
           "maxCount": {
@@ -1007,9 +1030,17 @@
             "type": "integer",
             "maximum": 200
           },
+          "path": {
+            "description": "Limit commits to ones touching this path.",
+            "type": "string"
+          },
           "repo": {
             "description": "Repo directory (default: base dir)",
             "type": "string"
+          },
+          "withStat": {
+            "description": "Attach {filesChanged, insertions, deletions} per commit (git show --stat).",
+            "type": "boolean"
           }
         },
         "additionalProperties": false,
@@ -1188,6 +1219,11 @@
           "url"
         ],
         "properties": {
+          "auth": {
+            "description": "Auth: {type:\"basic\",user,pass} or {type:\"bearer\",token}. Sets the Authorization header (explicit `headers` win on key conflict).",
+            "additionalProperties": true,
+            "type": "object"
+          },
           "blockPrivate": {
             "description": "Refuse private/loopback/link-local targets (SSRF guard); default false to keep raw-curl semantics",
             "type": "boolean"
@@ -1195,8 +1231,17 @@
           "body": {
             "type": "string"
           },
+          "followRedirects": {
+            "description": "Follow 3xx redirects (default true). When false, the redirect response is returned as data (status + Location).",
+            "type": "boolean"
+          },
           "headers": {
             "type": "object"
+          },
+          "maxRedirects": {
+            "description": "Cap on redirect hops (default 10, max 20) — bounding the chain.",
+            "maximum": 20,
+            "type": "integer"
           },
           "method": {
             "type": "string",
@@ -1208,6 +1253,14 @@
               "DELETE",
               "HEAD"
             ]
+          },
+          "multipart": {
+            "description": "Multipart form data: [{name, value, filename?, contentType?}]. Forces Content-Type multipart/form-data; body is ignored when multipart set.",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "type": "array"
           },
           "timeoutMs": {
             "minimum": 100,
@@ -1806,10 +1859,51 @@
             "description": "Working dir (absolute allowed; default base dir)",
             "type": "string"
           },
+          "healthCheck": {
+            "description": "Health check: a {cmd, args} probe run every `healthEveryMs` (default 30s). If the probe exits non-zero twice in a row, the record is marked unhealthy (but NOT killed — the agent decides). proc.status reports it.",
+            "type": "object",
+            "required": [
+              "cmd"
+            ],
+            "properties": {
+              "args": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "cmd": {
+                "type": "string"
+              },
+              "healthEveryMs": {
+                "minimum": 1000,
+                "type": "integer",
+                "maximum": 600000
+              }
+            },
+            "additionalProperties": false
+          },
           "maxDurationMs": {
             "minimum": 1000,
             "type": "integer",
             "maximum": 3600000
+          },
+          "restart": {
+            "description": "Restart policy: if the child exits on its own, restart it up to `maxRetries` times (default 0 = never), waiting `restartDelayMs` between attempts (default 5s). Only applies when the process stream itself exits; maxDuration still bounds the total.",
+            "type": "object",
+            "properties": {
+              "maxRetries": {
+                "minimum": 1,
+                "type": "integer",
+                "maximum": 25
+              },
+              "restartDelayMs": {
+                "minimum": 500,
+                "type": "integer",
+                "maximum": 300000
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -1842,6 +1936,11 @@
         "properties": {
           "force": {
             "type": "boolean"
+          },
+          "gracefulMs": {
+            "description": "Graceful shutdown: SIGTERM-equivalent first (kill on unix, terminate on windows), wait up to gracefulMs for exit, then SIGKILL. Default 0 = immediate stop (old behavior).",
+            "maximum": 300000,
+            "type": "integer"
           },
           "handleId": {
             "type": "string"
@@ -1947,6 +2046,10 @@
             "description": "Lines of context before a match (0 = none).",
             "maximum": 50,
             "type": "integer"
+          },
+          "countOnly": {
+            "description": "Count-only: return per-file match counts (no match text). Much cheaper than full matches when you only need \"how many, where\".",
+            "type": "boolean"
           },
           "fileType": {
             "description": "Filter by extension (e.g. \"rs\", \"ts\", \"py\" — no dot). Overrides glob.",

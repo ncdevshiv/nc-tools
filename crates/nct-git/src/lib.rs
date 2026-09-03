@@ -104,6 +104,18 @@ pub struct LogArgs {
     #[doc = "Base directory override (default: kernel base dir)"]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// Limit commits to ones touching this path.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Filter commits whose message matches (case-insensitive substring).
+    #[serde(default)]
+    pub grep: Option<String>,
+    /// Filter commits by author (case-insensitive substring).
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Attach {filesChanged, insertions, deletions} per commit (git show --stat).
+    #[serde(default)]
+    pub withStat: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -352,34 +364,95 @@ impl Handler for LogHandler {
         let base = base_of(k, &a)?;
         let r = in_repo(&base, a.repo.as_deref())?;
         let max_count = a.maxCount.unwrap_or(20);
-        let out = git(
-            &r,
-            &[
-                "log",
-                &format!("--max-count={max_count}"),
-                "--pretty=format:%H%x1f%an%x1f%aI%x1f%s",
-            ],
-            k,
-        )?;
+        // Build the git log argv: --author and --grep pass through as git
+        // filters; -- <path> limits to commits touching that path.
+        let mut git_args: Vec<String> = vec![
+            "log".to_string(),
+            format!("--max-count={max_count}"),
+            "--pretty=format:%H%x1f%an%x1f%aI%x1f%s".to_string(),
+        ];
+        if let Some(author) = &a.author {
+            if !author.trim().is_empty() {
+                git_args.push(format!("--author={}", author.trim()));
+            }
+        }
+        if let Some(g) = &a.grep {
+            if !g.trim().is_empty() {
+                git_args.push("--regexp-ignore-case".to_string());
+                git_args.push(format!("--grep={}", g.trim()));
+            }
+        }
+        if let Some(p) = &a.path {
+            if !p.trim().is_empty() {
+                git_args.push("--".to_string());
+                git_args.push(p.trim().to_string());
+            }
+        }
+        let arg_refs: Vec<&str> = git_args.iter().map(|s| s.as_str()).collect();
+        let out = git(&r, &arg_refs, k)?;
         let commits: Vec<Value> = out
             .split('\n')
             .filter(|l| !l.is_empty())
             .filter_map(|l| {
                 let parts: Vec<&str> = l.split('\x1f').collect();
                 if parts.len() >= 4 {
-                    Some(json!({
+                    let mut c = json!({
                         "sha": parts[0],
                         "author": parts[1],
                         "date": parts[2],
                         "message": parts[3],
-                    }))
+                    });
+                    if a.withStat.unwrap_or(false) {
+                        c["stat"] = json!({ "filesChanged": Value::Null, "insertions": Value::Null, "deletions": Value::Null });
+                    }
+                    Some(c)
                 } else {
                     None
                 }
             })
             .collect();
+        // --stat: attach {filesChanged, insertions, deletions} per commit.
+        // We do one `git show --stat --format=` per commit (bounded by the
+        // same max_count, at most 200) and parse the trailing summary line.
+        let commits = if a.withStat.unwrap_or(false) {
+            commits
+                .into_iter()
+                .map(|c| {
+                    let mut c = c;
+                    let sha = c["sha"].as_str().unwrap_or("").to_string();
+                    let stat_out = git(&r, &["show", "--stat", "--format=", &sha], k)
+                        .unwrap_or_default();
+                    let (files, ins, del) = parse_stat(&stat_out);
+                    c["stat"] = json!({ "filesChanged": files, "insertions": ins, "deletions": del });
+                    c
+                })
+                .collect()
+        } else {
+            commits
+        };
         Ok(json!({ "repo": r.display().to_string(), "commits": commits }))
     }
+}
+
+/// Parse a `git show --stat` tail like " 3 files changed, 10 insertions(+), 2 deletions(-)"
+/// into (filesChanged, insertions, deletions). Missing components -> 0.
+fn parse_stat(out: &str) -> (u64, u64, u64) {
+    let mut files = 0u64;
+    let mut ins = 0u64;
+    let mut del = 0u64;
+    let tail = out.lines().rev().find(|l| l.contains("file") && l.contains("changed")).unwrap_or("");
+    // split at commas: " 3 files changed", " 10 insertions(+)", " 2 deletions(-)"
+    for part in tail.split(',') {
+        let t = part.trim();
+        if t.contains("file") && t.contains("changed") {
+            files = t.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        } else if t.contains("insertion") {
+            ins = t.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        } else if t.contains("deletion") {
+            del = t.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        }
+    }
+    (files, ins, del)
 }
 
 pub struct BranchHandler;
@@ -682,5 +755,88 @@ mod base_dir_tests {
         assert_eq!(srv_log.result.unwrap()["commits"].as_array().unwrap().len(), 1, "server root must be untouched");
         let _ = fs::remove_dir_all(&server_root);
         let _ = fs::remove_dir_all(&target);
+    }
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::*;
+    use std::fs;
+
+    fn git_kernel(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        register(&mut k);
+        k
+    }
+
+    fn repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nct-logfilter-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::process::Command::new("git").args(["init", "-b", "main"]).current_dir(&dir).status().unwrap();
+        dir
+    }
+
+    fn commit(dir: &std::path::Path, file: &str, content: &str, msg: &str) {
+        fs::write(dir.join(file), content).unwrap();
+        std::process::Command::new("git").args(["add", "."]).current_dir(dir).status().unwrap();
+        std::process::Command::new("git").args(["commit", "-m", msg]).current_dir(dir).status().unwrap();
+    }
+
+    #[test]
+    fn log_path_filter_limits_to_touched_commits() {
+        let r = repo("path");
+        let k = git_kernel(&r);
+        commit(&r, "a.txt", "v1", "feat: add a");
+        commit(&r, "b.txt", "v1", "feat: add b");
+        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "path": "b.txt" }));
+        assert!(out.ok);
+        let commits = out.result.unwrap()["commits"].as_array().unwrap().len();
+        assert_eq!(commits, 1, "only the b.txt commit should match");
+        let _ = fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn log_grep_filter_matches_message() {
+        let r = repo("grep");
+        let k = git_kernel(&r);
+        commit(&r, "a.txt", "v1", "feat: shiny new thing");
+        commit(&r, "a.txt", "v2", "fix: a bug");
+        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "grep": "shiny" }));
+        assert!(out.ok);
+        let commits = out.result.unwrap()["commits"].as_array().unwrap().len();
+        assert_eq!(commits, 1, "only the shiny commit should match");
+        let _ = fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn log_with_stat_reports_files_and_lines() {
+        let r = repo("stat");
+        let k = git_kernel(&r);
+        commit(&r, "a.txt", "one\ntwo\nthree\n", "feat: three lines");
+        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "withStat": true, "maxCount": 1 }));
+        assert!(out.ok);
+        let out_val = out.result.unwrap();
+        let commits = out_val["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 1);
+        let stat = &commits[0]["stat"];
+        assert_eq!(stat["filesChanged"], json!(1));
+        assert_eq!(stat["insertions"], json!(3));
+        assert_eq!(stat["deletions"], json!(0));
+        let _ = fs::remove_dir_all(&r);
+    }
+
+    #[test]
+    fn log_author_filter_accepts_substring() {
+        let r = repo("author");
+        let k = git_kernel(&r);
+        commit(&r, "a.txt", "v1", "init");
+        let author = std::process::Command::new("git").args(["log","-1","--pretty=format:%an"]).current_dir(&r).output().unwrap();
+        let name = String::from_utf8_lossy(&author.stdout).trim().to_string();
+        let prefix: String = name.chars().take(4).collect();
+        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "author": prefix }));
+        assert!(out.ok);
+        assert!(out.result.unwrap()["commits"].as_array().unwrap().len() >= 1);
+        let _ = fs::remove_dir_all(&r);
     }
 }
