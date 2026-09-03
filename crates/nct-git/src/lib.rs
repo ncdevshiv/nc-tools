@@ -2,6 +2,9 @@
 // Behavior-parity port of src/kernel/git.mjs: git is an external program; the
 // kernel's job is to turn its output into data. Each tool accepts `repo`
 // (default: the base dir) so remote agents can work on ANY repository.
+pub mod extra;
+pub use extra::{STASH_DESC, CHERRY_PICK_DESC, TAG_DESC, StashArgs, StashHandler, CherryPickArgs, CherryPickHandler, TagArgs, TagHandler};
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -38,6 +41,9 @@ pub fn register(k: &mut Kernel) {
     k.register("git.push", PUSH_DESC, nct_core::schema::schema_for::<PushArgs>(), Arc::new(PushHandler));
     k.register("git.pull", PULL_DESC, nct_core::schema::schema_for::<PullArgs>(), Arc::new(PullHandler));
     k.register("git.blame", BLAME_DESC, nct_core::schema::schema_for::<BlameArgs>(), Arc::new(BlameHandler));
+    k.register("git.stash", STASH_DESC, nct_core::schema::schema_for::<StashArgs>(), Arc::new(StashHandler));
+    k.register("git.cherryPick", CHERRY_PICK_DESC, nct_core::schema::schema_for::<CherryPickArgs>(), Arc::new(CherryPickHandler));
+    k.register("git.tag", TAG_DESC, nct_core::schema::schema_for::<TagArgs>(), Arc::new(TagHandler));
 }
 
 use std::sync::Arc;
@@ -180,7 +186,7 @@ pub struct PullArgs {
 }
 
 /// Resolve the repo dir for a call; must actually be a git repository.
-fn in_repo(base: &std::path::Path, repo: Option<&str>) -> Result<PathBuf, ToolError> {
+pub(crate) fn in_repo(base: &std::path::Path, repo: Option<&str>) -> Result<PathBuf, ToolError> {
     let r = resolve_checked(base, repo.unwrap_or("."))?;
     if !r.join(".git").exists() {
         return Err(ToolError::with_hint(
@@ -193,7 +199,7 @@ fn in_repo(base: &std::path::Path, repo: Option<&str>) -> Result<PathBuf, ToolEr
 }
 
 /// The per-call workspace override every git arg carries (default: kernel base).
-trait HasBaseDir {
+pub(crate) trait HasBaseDir {
     fn base_dir(&self) -> Option<&str>;
 }
 macro_rules! impl_has_base_dir {
@@ -209,13 +215,13 @@ impl_has_base_dir!(RepoArgs, DiffArgs, AddArgs, CommitArgs, LogArgs, BranchArgs,
 
 /// Effective base directory for a git call: the per-call baseDir override
 /// (workspace override) wins over the server root. Mirrors the fs.* family.
-fn base_of<T: HasBaseDir>(k: &Kernel, a: &T) -> Result<PathBuf, ToolError> {
+pub(crate) fn base_of<T: HasBaseDir>(k: &Kernel, a: &T) -> Result<PathBuf, ToolError> {
     k.base_dir(a.base_dir())
 }
 
 /// Run git in dir with porcelain args; stdout on success, ERR_GIT with
 /// structured hint on failure (git.mjs `git()`).
-fn git(dir: &std::path::Path, args: &[&str], k: &Kernel) -> Result<String, ToolError> {
+pub(crate) fn git(dir: &std::path::Path, args: &[&str], k: &Kernel) -> Result<String, ToolError> {
     let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(dir)
