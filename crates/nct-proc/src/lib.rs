@@ -49,6 +49,7 @@ pub fn register(k: &mut Kernel) {
     // phase 2 additions
     k.register("proc.runScript", RUN_SCRIPT_DESC, nct_core::schema::schema_for::<RunScriptArgs>(), Arc::new(RunScriptHandler));
     k.register("proc.watch", WATCH_DESC, nct_core::schema::schema_for::<WatchArgs>(), Arc::new(WatchHandler { handles: handles.clone() }));
+    register_proc_diff(k);
 }
 
 pub(crate) fn schema<T: schemars::JsonSchema>() -> Value {
@@ -57,7 +58,9 @@ pub(crate) fn schema<T: schemars::JsonSchema>() -> Value {
 
 mod pkg;
 mod test;
+mod diff;
 pub use pkg::register_pkg;
+pub use diff::register_proc_diff;
 pub use test::register_test;
 
 // ---- typed args -------------------------------------------------------------
@@ -1013,7 +1016,7 @@ impl Handler for ListHandler {
 
 /// Parse the OS process table into [{pid, name, memKb?}] (proc.mjs
 /// systemProcesses: tasklist CSV on Windows, ps on Unix).
-fn system_processes(env: &std::collections::BTreeMap<String, String>, root: &std::path::Path) -> Result<Vec<Value>, ToolError> {
+pub(crate) fn system_processes(env: &std::collections::BTreeMap<String, String>, root: &std::path::Path) -> Result<Vec<Value>, ToolError> {
     #[cfg(windows)]
     {
         let out = run_sync("tasklist", &["/FO", "CSV", "/NH"], Duration::from_secs(20), env, root)?;

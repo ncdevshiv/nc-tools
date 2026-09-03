@@ -7,6 +7,8 @@ pub mod patch;
 pub mod search;
 pub mod snapshot;
 pub mod symbols;
+pub mod graph;
+pub mod watch;
 
 use std::sync::Arc;
 
@@ -19,6 +21,8 @@ use crate::patch::*;
 use crate::search::*;
 use crate::snapshot::*;
 use crate::symbols::*;
+use crate::graph::*;
+use crate::watch::*;
 
 pub fn register(k: &mut Kernel) {
     // fs.*
@@ -49,5 +53,7 @@ pub fn register(k: &mut Kernel) {
     k.register("fs.tree", TREE_DESC, schema_for::<TreeArgs>(), Arc::new(TreeHandler));
     k.register("search.replace", REPLACE_DESC, schema_for::<ReplaceArgs>(), Arc::new(ReplaceHandler));
     k.register("code.symbols", SYMBOLS_DESC, schema_for::<SymbolsArgs>(), Arc::new(SymbolsHandler));
+    k.register("code.graph", GRAPH_DESC, schema_for::<GraphArgs>(), Arc::new(GraphHandler));
+    k.register("fs.watch", WATCH_DESC, schema_for::<WatchArgs>(), Arc::new(WatchSemanticHandler));
     k.register("text.diff", DIFF_DESC, schema_for::<DiffArgs>(), Arc::new(DiffHandler));
 }

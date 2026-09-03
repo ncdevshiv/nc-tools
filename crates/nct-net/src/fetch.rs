@@ -745,7 +745,7 @@ fn fused_json(f: &engines::FusedResult, score: Option<f64>) -> Value {
     v
 }
 
-fn model_cache_dir(k: &Kernel) -> std::path::PathBuf {
+pub(crate) fn model_cache_dir(k: &Kernel) -> std::path::PathBuf {
     if let Ok(d) = std::env::var("NCTOOLS_MODEL_CACHE") {
         if !d.is_empty() {
             return std::path::PathBuf::from(d);
