@@ -43,8 +43,9 @@ use nct_core::errors::ToolError;
 use nct_core::kernel::{parse_args, Handler, Kernel};
 use nct_core::{now_iso, now_ms};
 
-pub const REGISTER_DESC: &str = "Register (or resume) this agent's identity in the workspace roster. With {agentId} restores a known identity (the crash/compaction continuation path — a client that remembers who it was keeps its identity and history). Without it, resumes this session's agent or mints `agent-<n>` (chronological). Returns {agentId, name, role, createdAt, resumed}. Call agent.status to see who else is working here.";
+pub const REGISTER_DESC: &str = "Register (or resume) this agent's identity in the workspace roster AND the global (cross-workspace) index. With {agentId} restores a known identity (the crash/compaction continuation path — a client that remembers who it was keeps its identity and history). Without it, resumes this session's agent or mints `agent-<n>` (chronological). Returns {agentId, name, role, createdAt, resumed}. Call agent.status to see who else is working here; agent.peers to see agents on OTHER workspaces.";
 pub const LIST_DESC: &str = "List the workspace agent roster chronologically: every agent identity (id, name, sid, createdAt, lastSeen, status, task, toolCount) that has touched this workspace. Sorted newest-first.";
+pub const PEERS_DESC: &str = "List agents across OTHER workspaces from the GLOBAL index (~/.nc-tools/agents.jsonl, override with NCTOOLS_AGENT_HOME). Agents register here too, so you can discover who else is working on a different project and coordinate with them. Filter by {workspace} to narrow. Cross-process + cross-machine-user.";
 pub const HEARTBEAT_DESC: &str = "Update this agent's roster entry: lastSeen, status (idle|working|blocked|done), and the current task summary. Other agents see this via agent.status/agent.list. Cheap — call it between steps so the roster stays live.";
 pub const STATUS_DESC: &str = "Full coordination snapshot: who is here, what each is working on, active locks, whether this agent is locked out of any path, and recent inter-agent messages. The 'look around before you start' tool.";
 pub const POST_DESC: &str = "Post a message to the inter-agent noticeboard. {to} may be an agentId for a direct message or omitted for a broadcast. {kind} is note|question|request|handoff|bug|hold|resume — other agents can filter by it. Messages persist in .nc-tools/agent-messages.jsonl.";
@@ -62,6 +63,20 @@ fn messages_path(root: &Path) -> PathBuf {
 fn locks_path(root: &Path) -> PathBuf {
     root.join(".nc-tools").join("locks.jsonl")
 }
+/// Global (cross-workspace) agent index. Home dir is overridable via
+/// NCTOOLS_AGENT_HOME so a shared user-level registry can be pointed elsewhere.
+fn global_path() -> PathBuf {
+    if let Ok(d) = std::env::var("NCTOOLS_AGENT_HOME") {
+        if !d.is_empty() {
+            return PathBuf::from(d).join("agents.jsonl");
+        }
+    }
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".nc-tools").join("agents.jsonl")
+}
+
 
 /// Append a JSON line to a path, creating the parent dir + file.
 fn append_line(path: &Path, entry: &Value) -> Result<(), ToolError> {
@@ -205,6 +220,34 @@ fn register_impl(k: &Kernel, a: &RegisterArgs) -> Result<Value, ToolError> {
         "epoch": now_ms(),
     }))?;
 
+    // Bind this session's kernel (and therefore its journal rows) to the agent
+    // id so provenance is attributable to the agent, not just the session.
+    k.set_agent_id(&record.agent_id);
+
+    // Mirror this agent into the GLOBAL (cross-workspace) index so agents on
+    // OTHER workspaces can discover it. Best-effort: a global index write
+    // failure must never fail registration.
+    let g = global_path();
+    if let Some(parent) = g.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&g) {
+        use std::io::Write;
+        let _ = f.write_all(
+            (serde_json::to_string(&json!({
+                "agentId": record.agent_id,
+                "name": record.name,
+                "role": record.role,
+                "workspace": k.root.display().to_string(),
+                "status": record.status,
+                "task": record.task,
+                "lastSeen": now_iso(),
+                "createdAt": record.created_at,
+                "epoch": now_ms(),
+            })).unwrap_or_default() + "\n").as_bytes(),
+        );
+    }
+
     Ok(json!({
         "agentId": record.agent_id,
         "name": record.name,
@@ -231,6 +274,45 @@ impl Handler for ListHandler {
     fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
         let roster = roster_snapshot(&k.root);
         Ok(json!({ "agents": roster, "total": roster.len() }))
+    }
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PeersArgs {
+    /// Narrow to agents last seen in this workspace path (substring match).
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+pub struct PeersHandler;
+impl Handler for PeersHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: PeersArgs = parse_args(args)?;
+        let current_ws = k.root.display().to_string();
+        let mut peers: Vec<Value> = read_lines(&global_path())
+            .into_iter()
+            .filter(|e| {
+                let ws = e["workspace"].as_str().unwrap_or("");
+                // Not my own workspace — peers are agents on OTHER workspaces.
+                if ws == current_ws {
+                    return false;
+                }
+                if let Some(w) = &a.workspace {
+                    if !ws.contains(w.as_str()) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+        // newest-first
+        peers.sort_by(|x, y| {
+            let ex = x["lastSeen"].as_str().unwrap_or("");
+            let ey = y["lastSeen"].as_str().unwrap_or("");
+            ey.cmp(ex)
+        });
+        Ok(json!({"peers": peers, "total": peers.len(), "note": "agents on other workspaces; this workspace's agents are in agent.list"}))
     }
 }
 
@@ -601,6 +683,121 @@ fn locks_snapshot(root: &Path) -> Vec<Value> {
 #[serde(deny_unknown_fields)]
 pub struct EmptyArgs {}
 
+pub const COMPACT_DESC: &str = "Record a compaction checkpoint for this agent: the agent is about to have its context summarized, so it writes a durable marker (id, agentId, ts, summary, nextHint) that agent.resume later follows to reconstruct the identity + state. This is the explicit continuation handshake — a crash/compaction for THIS agent is recorded so a later prompt in the same thread can resume cleanly instead of starting anonymous.";
+pub const RESUME_DESC: &str = "Follow this agent's most recent compaction checkpoint: confirms identity continuity after a crash/compaction, re-registers the same agentId, and returns its last summary + nextHint so the resumed agent can pick up where it left off. Call agent.resume at the start of a prompt when you believe you are continuing a prior thread.";
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompactArgs {
+    /// Short summary of what this agent did / where it left off (the
+    /// checkpoint's durable record). Saved as-is and returned on resume.
+    pub summary: String,
+    /// Optional hint for the next step (e.g. the next file to touch). Returned
+    /// on resume verbatim.
+    #[serde(default)]
+    pub nextHint: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeArgs {
+    /// Which agent to resume. Defaults to this session's agent (by sid) if
+    /// omitted. When omitted and no prior checkpoint exists, no-op.
+    #[serde(default)]
+    pub agentId: Option<String>,
+}
+
+pub struct CompactHandler;
+impl Handler for CompactHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: CompactArgs = parse_args(args)?;
+        if a.summary.trim().is_empty() {
+            return Err(ToolError::new("ERR_BAD_INPUT", "summary must be a non-empty string"));
+        }
+        let agent_id = my_agent_id(&k.root, &k.sid);
+        let path = roster_path(&k.root);
+        let roster_read = read_lines(&path);
+        let prior = roster_read.iter().rev().find(|e| e["agentId"].as_str() == Some(agent_id.as_str()));
+        let created = prior.and_then(|e| e["createdAt"].as_str().map(String::from)).unwrap_or_else(|| now_iso());
+        let name = prior.and_then(|e| e["name"].as_str().map(String::from)).unwrap_or_else(|| agent_id.clone());
+        let tool_count = prior.and_then(|e| e["toolCount"].as_u64()).unwrap_or(0);
+        let checkpoint = json!({
+            "agentId": agent_id,
+            "sid": k.sid,
+            "name": name,
+            "ts": now_iso(),
+            "seq": messages_seq(&k.root),
+            "summary": a.summary,
+            "nextHint": a.nextHint,
+            "toolCount": tool_count,
+            "kind": "compact",
+        });
+        append_line(&path, &checkpoint)?;
+        // Mark the roster status as compacted too, so other agents see it paused.
+        append_line(&path, &json!({
+            "agentId": agent_id,
+            "sid": k.sid,
+            "name": checkpoint["name"],
+            "role": prior.and_then(|e| e["role"].as_str().map(String::from)).unwrap_or_else(|| "agent".to_string()),
+            "status": "compacted",
+            "task": a.summary.clone(),
+            "createdAt": created,
+            "lastSeen": now_iso(),
+            "toolCount": tool_count,
+            "epoch": now_ms(),
+        }))?;
+        Ok(json!({
+            "agentId": agent_id,
+            "checkpoint": true,
+            "seq": checkpoint["seq"],
+            "summary": a.summary,
+            "nextHint": a.nextHint,
+            "note": "call agent.resume at the start of a later prompt in this thread to continue this identity",
+        }))
+    }
+}
+
+pub struct ResumeHandler;
+impl Handler for ResumeHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: ResumeArgs = parse_args(args)?;
+        let agent_id = a.agentId.clone().unwrap_or_else(|| my_agent_id(&k.root, &k.sid));
+        // Find the most recent compact checkpoint for this agent.
+        let roster = read_lines(&roster_path(&k.root));
+        let checkpoint = roster.iter().rev().find(|e| {
+            e["kind"].as_str() == Some("compact") && e["agentId"].as_str() == Some(agent_id.as_str())
+        });
+        let Some(cp) = checkpoint else {
+            return Ok(json!({
+                "agentId": agent_id,
+                "resumed": false,
+                "note": "no compaction checkpoint found for this agent; call agent.register to mint/resume",
+            }));
+        };
+        // Re-bind this session to the agent id (continuity) and refresh roster.
+        k.set_agent_id(&agent_id);
+        append_line(&roster_path(&k.root), &json!({
+            "agentId": agent_id,
+            "sid": k.sid,
+            "name": cp["name"],
+            "role": cp.get("role").and_then(|v| v.as_str()).unwrap_or("agent"),
+            "status": "resumed",
+            "task": cp["summary"],
+            "createdAt": cp.get("createdAt").and_then(|v| v.as_str()).unwrap_or(&now_iso()),
+            "lastSeen": now_iso(),
+            "toolCount": cp["toolCount"].as_u64().unwrap_or(0),
+            "epoch": now_ms(),
+        }))?;
+        Ok(json!({
+            "agentId": agent_id,
+            "resumed": true,
+            "checkpointSeq": cp["seq"],
+            "summary": cp["summary"],
+            "nextHint": cp["nextHint"],
+        }))
+    }
+}
+
 pub fn register_coordination(k: &mut Kernel) {
     k.register(
         "agent.register",
@@ -609,6 +806,7 @@ pub fn register_coordination(k: &mut Kernel) {
         std::sync::Arc::new(RegisterHandler),
     );
     k.register("agent.list", LIST_DESC, nct_core::schema::schema_for::<EmptyArgs>(), std::sync::Arc::new(ListHandler));
+    k.register("agent.peers", PEERS_DESC, nct_core::schema::schema_for::<PeersArgs>(), std::sync::Arc::new(PeersHandler));
     k.register(
         "agent.heartbeat",
         HEARTBEAT_DESC,
@@ -626,6 +824,8 @@ pub fn register_coordination(k: &mut Kernel) {
     k.register("agent.lock", LOCK_DESC, nct_core::schema::schema_for::<LockArgs>(), std::sync::Arc::new(LockHandler));
     k.register("agent.unlock", UNLOCK_DESC, nct_core::schema::schema_for::<UnlockArgs>(), std::sync::Arc::new(UnlockHandler));
     k.register("agent.locks", LOCKS_DESC, nct_core::schema::schema_for::<EmptyArgs>(), std::sync::Arc::new(LocksHandler));
+    k.register("agent.compact", COMPACT_DESC, nct_core::schema::schema_for::<CompactArgs>(), std::sync::Arc::new(CompactHandler));
+    k.register("agent.resume", RESUME_DESC, nct_core::schema::schema_for::<ResumeArgs>(), std::sync::Arc::new(ResumeHandler));
 }
 
 #[cfg(test)]
@@ -777,5 +977,155 @@ mod coordination_tests {
         assert!(st["agents"].as_array().unwrap().len() >= 1);
         assert!(st["locks"].is_array());
         assert!(st["recentMessages"].is_array());
+    }
+}
+
+#[cfg(test)]
+mod compact_resume_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-compact-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut k = Kernel::new(dir).unwrap();
+        register_coordination(&mut k);
+        k
+    }
+
+    #[test]
+    fn compact_writes_checkpoint_and_marks_status() {
+        let k = make_kernel();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: Some("A".into()), role: None }).unwrap();
+        let c = CompactHandler.call(&k, &json!({ "summary": "audited git baseDir", "nextHint": "fix proc" })).unwrap();
+        assert_eq!(c["agentId"], json!("agent-1"));
+        assert_eq!(c["checkpoint"], json!(true));
+        // roster has a compact-kind row
+        let roster = read_lines(&roster_path(&k.root));
+        assert!(roster.iter().any(|e| e["kind"] == json!("compact") && e["agentId"] == json!("agent-1")));
+    }
+
+    #[test]
+    fn resume_follows_checkpoint_and_rebinds_identity() {
+        let k = make_kernel();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: Some("A".into()), role: None }).unwrap();
+        CompactHandler.call(&k, &json!({ "summary": "left at proc baseDir", "nextHint": "add tests" })).unwrap();
+        // A NEW session (fresh kernel, same workspace) resumes
+        let dir = k.root.clone();
+        let mut k2 = Kernel::new(dir).unwrap();
+        register_coordination(&mut k2);
+        let r = ResumeHandler.call(&k2, &json!({ "agentId": "agent-1" })).unwrap();
+        assert_eq!(r["resumed"], json!(true));
+        assert_eq!(r["agentId"], json!("agent-1"));
+        assert_eq!(r["summary"], json!("left at proc baseDir"));
+        assert_eq!(r["nextHint"], json!("add tests"));
+        // k2's kernel is now bound to agent-1 (provenance continuity)
+        assert_eq!(k2.current_agent_id(), Some("agent-1".to_string()));
+    }
+
+    #[test]
+    fn resume_no_checkpoint_returns_noop() {
+        let k = make_kernel();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-9".into()), name: None, role: None }).unwrap();
+        let r = ResumeHandler.call(&k, &json!({ "agentId": "agent-9" })).unwrap();
+        assert_eq!(r["resumed"], json!(false));
+    }
+}
+
+#[cfg(test)]
+mod global_peers_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_kernel(ws: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(ws.to_path_buf()).unwrap();
+        register_coordination(&mut k);
+        k
+    }
+
+    /// The global index lives in the user home (or NCTOOLS_AGENT_HOME). Point
+    /// it at a temp dir so the test is hermetic and never touches the real one.
+    fn with_temp_agent_home(tag: &str, f: impl FnOnce(&std::path::Path)) {
+        let dir = std::env::temp_dir().join(format!("nct-agent-home-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("NCTOOLS_AGENT_HOME", &dir);
+        f(&dir);
+        std::env::remove_var("NCTOOLS_AGENT_HOME");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn register_writes_global_index_row() {
+        with_temp_agent_home("g1", |home| {
+            std::env::set_var("NCTOOLS_AGENT_HOME", home);
+            let ws = home.join("wsA");
+            fs::create_dir_all(&ws).unwrap();
+            let k = make_kernel(&ws);
+            register_impl(&k, &RegisterArgs { agentId: Some("global-1".into()), name: Some("Amara".into()), role: None }).unwrap();
+            let g = global_path();
+            assert!(g.exists(), "global index should exist: {}", g.display());
+            let rows = read_lines(&g);
+            assert!(rows.iter().any(|r| r["agentId"] == json!("global-1") && r["workspace"].as_str().unwrap().contains("wsA")));
+            std::env::remove_var("NCTOOLS_AGENT_HOME");
+        });
+    }
+
+    #[test]
+    fn peers_lists_other_workspaces_not_own() {
+        with_temp_agent_home("g2", |home| {
+            std::env::set_var("NCTOOLS_AGENT_HOME", home);
+            let ws_a = home.join("workspaceA");
+            let ws_b = home.join("workspaceB");
+            fs::create_dir_all(&ws_a).unwrap();
+            fs::create_dir_all(&ws_b).unwrap();
+            // register an agent in A
+            let ka = make_kernel(&ws_a);
+            register_impl(&ka, &RegisterArgs { agentId: Some("alpha".into()), name: Some("Alpha".into()), role: None }).unwrap();
+            // register a DIFFERENT agent in B
+            let kb = Kernel::new(ws_b.clone()).unwrap();
+            // This kernel is B; but the "other" workspace is A. Register an
+            // agent in B too (so A is a peer of B and vice versa).
+            let _ = kb;
+            let kb = make_kernel(&ws_b);
+            register_impl(&kb, &RegisterArgs { agentId: Some("beta".into()), name: Some("Beta".into()), role: None }).unwrap();
+
+            // From A's perspective, peers should include B's agent (beta) and
+            // NOT A's own (alpha).
+            let peers = PeersHandler.call(&ka, &json!({})).unwrap();
+            let arr = peers["peers"].as_array().unwrap();
+            assert!(arr.iter().any(|p| p["agentId"] == json!("beta")), "should see B's agent: {arr:?}");
+            assert!(!arr.iter().any(|p| p["agentId"] == json!("alpha")), "must NOT list own ws agent: {arr:?}");
+            std::env::remove_var("NCTOOLS_AGENT_HOME");
+        });
+    }
+
+    #[test]
+    fn peers_filter_by_workspace() {
+        with_temp_agent_home("g3", |home| {
+            std::env::set_var("NCTOOLS_AGENT_HOME", home);
+            let ws_a = home.join("projX");
+            let ws_b = home.join("projY");
+            fs::create_dir_all(&ws_a).unwrap();
+            fs::create_dir_all(&ws_b).unwrap();
+            let ka = make_kernel(&ws_a);
+            register_impl(&ka, &RegisterArgs { agentId: Some("x-1".into()), name: None, role: None }).unwrap();
+            // other ws agent
+            let kb = make_kernel(&ws_b);
+            register_impl(&kb, &RegisterArgs { agentId: Some("y-1".into()), name: None, role: None }).unwrap();
+            // filter by projY: should return y-1
+            let peers = PeersHandler.call(&ka, &json!({ "workspace": "projY" })).unwrap();
+            let arr = peers["peers"].as_array().unwrap();
+            assert!(arr.iter().any(|p| p["agentId"] == json!("y-1")));
+            std::env::remove_var("NCTOOLS_AGENT_HOME");
+        });
     }
 }

@@ -1202,3 +1202,98 @@ impl Handler for EnvListHandler {
         Ok(json!({ "session": k.session_env.snapshot() }))
     }
 }
+
+#[cfg(test)]
+mod base_dir_tests {
+    use super::*;
+    use std::fs;
+
+    fn proc_kernel(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        register(&mut k);
+        k
+    }
+
+    /// Create a disposable workspace whose name contains a unique marker, so
+    /// a `pwd` test can prove the cwd routed there and not to the server root.
+    fn workspace(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-proc-basedir-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// proc.spawn cwd must route to the baseDir workspace, not the server root.
+    /// Proved with `pwd` on the RELEASE behavior (a real child process).
+    #[test]
+    fn proc_spawn_cwd_routes_to_baseDir() {
+        let server_root = workspace("server");
+        let target = workspace("target");
+        let k = proc_kernel(&server_root);
+
+        // default: cwd is the server root
+        let def = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000 }));
+        assert!(def.ok, "pwd default should succeed: {:?}", def.error);
+        let def_cwd = def.result.unwrap()["stdout"].as_str().unwrap().trim().to_string();
+        assert!(def_cwd.to_lowercase().contains("server"), "default cwd should be the server root: {def_cwd}");
+
+        // baseDir=target: cwd is the target workspace, regardless of server root
+        let over = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000, "baseDir": target.display().to_string() }));
+        assert!(over.ok, "pwd baseDir should succeed: {:?}", over.error);
+        let over_cwd = over.result.unwrap()["stdout"].as_str().unwrap().trim().to_string();
+        assert!(over_cwd.to_lowercase().contains("target"), "baseDir should route cwd to the target: {over_cwd}");
+
+        let _ = fs::remove_dir_all(&server_root);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    /// proc.runScript with a baseDir script path resolves against that base.
+    #[test]
+    fn proc_runScript_path_resolves_against_baseDir() {
+        let server_root = workspace("srv");
+        let target = workspace("tgt");
+        fs::write(target.join("hello.py"), "print('from-target')\n").unwrap();
+        let k = proc_kernel(&server_root);
+
+        let out = k.call("proc.runScript", &json!({
+            "path": "hello.py",
+            "baseDir": target.display().to_string(),
+            "timeoutMs": 20000,
+        }));
+        assert!(out.ok, "runScript via baseDir should find the script: {:?}", out.error);
+        let out_val = out.result.unwrap();
+        let stdout = out_val["stdout"].as_str().unwrap_or("");
+        assert!(stdout.contains("from-target"), "should run the target script, stdout: {stdout}");
+
+        let _ = fs::remove_dir_all(&server_root);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    /// A bad baseDir must not silently run in the server root. proc.spawn
+    /// reports spawn failures inside a SUCCESSFUL tool result (proc.mjs
+    /// close/error semantics), so the observable guarantee is: the child never
+    /// starts with a bogus cwd — the result carries error ERR_SPAWN, and the
+    /// cwd is NOT the server root.
+    #[test]
+    fn proc_spawn_bad_baseDir_errors() {
+        let server_root = workspace("srv2");
+        let k = proc_kernel(&server_root);
+        let out = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000, "baseDir": "/no/such/dir/xyz" }));
+        // proc.spawn: ok=true at the tool level, but the result embeds an error.
+        assert!(out.ok, "proc.spawn returns ok=true with an embedded error on spawn failure");
+        let result = out.result.unwrap();
+        let embedded = result["error"].as_object();
+        assert!(embedded.is_some(), "result must carry an embedded error for a bad cwd: {result}");
+        assert_eq!(embedded.unwrap()["code"], json!("ERR_SPAWN"), "should surface ERR_SPAWN");
+        let cwd = result["stdout"].as_str().unwrap_or("");
+        assert!(!cwd.to_lowercase().contains("srv2"), "must NOT fall back to the server root");
+        let _ = fs::remove_dir_all(&server_root);
+    }
+}

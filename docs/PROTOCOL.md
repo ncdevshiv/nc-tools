@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 72 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 75 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
@@ -220,7 +220,7 @@ the protocol requires only that they do not break the specified invariants.
 
 ### 3.1 Tool-surface evolution (Dr. Invi wave)
 
-As of this wave, the surface is **72 tools** (was 62, then 63 after the Dr. Invi tool wave). One additive tool:
+As of this wave, the surface is **75 tools** (62 → 63 → 72 → 74 → 75 with agent.peers). One additive tool:
 
 - `sys.snapshotDiff` — diff two snapshots: what files were added, removed, or
   modified between them, plus byte totals. The review gate before a rollback.
@@ -243,7 +243,7 @@ that omit them behave identically to before):
 
 ### 3.2 Agent coordination layer
 
-The **72-tool** surface now includes a full multi-agent coordination layer
+The **75-tool** surface now includes a full multi-agent coordination layer
 (`agent.*`) — the capability that was missing when several agents worked the
 same workspace anonymously and blind to each other. State is on-disk and
 cross-process, so parallel servers sharing a workspace all see it:
@@ -262,6 +262,9 @@ cross-process, so parallel servers sharing a workspace all see it:
 | `agent.messages` | Read messages (filter by to/from/kind, newest-first). |
 | `agent.lock` | Advisory lock on a path; `holdMs` auto-releases even on crash (default 10 min). |
 | `agent.unlock` | Release a lock you hold. Won't steal another's live lock. |
+| `agent.compact` | Record a compaction checkpoint for this agent (summary + nextHint); agent.resume later follows it |
+| `agent.resume` | Follow the most recent compact checkpoint: re-registers the same agentId, returns last summary + nextHint |
+| `agent.peers` | List agents on OTHER workspaces from the global index (~/.nc-tools/agents.jsonl, override NCTOOLS_AGENT_HOME) |
 | `agent.locks` | List active locks + expiry. Call before editing. |
 
 **Identity + continuity (crash/compaction):**
