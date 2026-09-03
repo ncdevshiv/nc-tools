@@ -1108,7 +1108,13 @@ mod global_peers_tests {
 
     /// The global index lives in the user home (or NCTOOLS_AGENT_HOME). Point
     /// it at a temp dir so the test is hermetic and never touches the real one.
+    /// NCTOOLS_AGENT_HOME is a PROCESS-GLOBAL env var, and cargo runs tests in
+    /// parallel — so these tests must serialize (a shared lock) or they race:
+    /// one test's global_path() reads another's home dir. The lock makes the
+    /// whole block atomic with respect to the other home-dir tests.
     fn with_temp_agent_home(tag: &str, f: impl FnOnce(&std::path::Path)) {
+        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("nct-agent-home-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
