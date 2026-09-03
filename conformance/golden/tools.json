@@ -1656,6 +1656,10 @@
           "names"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "dev": {
             "type": "boolean"
           },
@@ -1691,6 +1695,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "dir": {
             "description": "Directory (default: base dir)",
             "type": "string"
@@ -1722,6 +1730,10 @@
             },
             "type": "array"
           },
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "dir": {
             "description": "Directory (default: base dir)",
             "type": "string"
@@ -1743,6 +1755,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "dir": {
             "description": "Directory (default: base dir)",
             "type": "string"
@@ -2255,6 +2271,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Per-call workspace override: diagnose THIS base dir instead of the server root. When absent, the server-rooted session workspace is used (identical behavior to before).",
+            "type": "string"
+          },
           "deep": {
             "description": "Include runtime probes (writable root, cargo available)",
             "type": "boolean"
@@ -2288,9 +2308,14 @@
       "name": "sys.listSnapshots",
       "description": "List available snapshots.",
       "inputSchema": {
+        "description": "Per-call workspace override for sys.listSnapshots (was an empty-args tool).",
         "type": "object",
+        "properties": {
+          "baseDir": {
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
-        "properties": {},
         "required": []
       }
     },
@@ -2335,6 +2360,10 @@
           "id"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Per-call workspace override: restore into THIS base dir (same one the snapshot was taken from). Default: the session workspace.",
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -2355,6 +2384,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Per-call workspace override: snapshot THIS base dir (its snapshot store lives under <baseDir>/.nc-tools/snapshots). Default: the session workspace the server was rooted on.",
+            "type": "string"
+          },
           "label": {
             "type": "string"
           }
@@ -2378,6 +2411,10 @@
           },
           "b": {
             "type": "string"
+          },
+          "baseDir": {
+            "description": "Per-call workspace override: diff snapshots from THIS base dir's snapshot store. Default: the session workspace.",
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -2387,9 +2424,14 @@
       "name": "sys.workspace",
       "description": "Workspace info: root path, platform.",
       "inputSchema": {
+        "description": "Per-call workspace override: report/answer about this base dir instead of the server root. A mandatory-dir override must exist; bad overrides are rejected by kernel.base_dir, never silently ignored.",
         "type": "object",
+        "properties": {
+          "baseDir": {
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
-        "properties": {},
         "required": []
       }
     },
@@ -2399,6 +2441,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths AND the working dir of the test runner (default: the session workspace).",
+            "type": "string"
+          },
           "framework": {
             "type": "string",
             "enum": [

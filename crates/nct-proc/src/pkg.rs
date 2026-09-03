@@ -113,6 +113,9 @@ pub struct AddArgs {
     #[doc = "Directory (default: base dir)"]
     #[serde(default)]
     pub dir: Option<String>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -123,6 +126,9 @@ pub struct ListArgs {
     #[doc = "Directory (default: base dir)"]
     #[serde(default)]
     pub dir: Option<String>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -131,6 +137,9 @@ pub struct ScriptsArgs {
     #[doc = "Directory (default: base dir)"]
     #[serde(default)]
     pub dir: Option<String>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -145,6 +154,9 @@ pub struct RunScriptArgs {
     #[doc = "Directory (default: base dir)"]
     #[serde(default)]
     pub dir: Option<String>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 // ---- handlers -------------------------------------------------------------------
@@ -157,7 +169,7 @@ impl Handler for AddHandler {
         if a.names.is_empty() || a.names.iter().any(|n| n.trim().is_empty()) {
             return Err(ToolError::new("ERR_BAD_INPUT", "names must be a non-empty array of strings"));
         }
-        let d = resolve_checked(&k.root, a.dir.as_deref().unwrap_or("."))?;
+        let d = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.dir.as_deref().unwrap_or("."))?;
         let timeout = a.timeoutMs.unwrap_or(k.cfg.limits.child_timeout_ms);
         let dev = a.dev.unwrap_or(false);
         let install_args: Vec<String> = match manager.as_str() {
@@ -208,7 +220,7 @@ impl Handler for ListHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ListArgs = parse_args(args)?;
         let manager = match a.manager.unwrap_or(Manager::Npm) { Manager::Npm => "npm", Manager::Pip => "pip" }.to_string();
-        let d = resolve_checked(&k.root, a.dir.as_deref().unwrap_or("."))?;
+        let d = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.dir.as_deref().unwrap_or("."))?;
         match manager.as_str() {
             "npm" => {
                 if !d.join("package.json").exists() {
@@ -247,7 +259,7 @@ pub struct ScriptsHandler;
 impl Handler for ScriptsHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ScriptsArgs = parse_args(args)?;
-        let d = resolve_checked(&k.root, a.dir.as_deref().unwrap_or("."))?;
+        let d = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.dir.as_deref().unwrap_or("."))?;
         let pj = d.join("package.json");
         if !pj.exists() {
             return Err(ToolError::with_hint("ERR_NOT_FOUND", "no package.json in workspace", json!({ "path": "package.json" })));
@@ -270,7 +282,7 @@ impl Handler for RunScriptHandler {
         if script_args.iter().any(|s| s.trim().is_empty() && false) {
             return Err(ToolError::new("ERR_BAD_INPUT", "args must be an array of strings"));
         }
-        let d = resolve_checked(&k.root, a.dir.as_deref().unwrap_or("."))?;
+        let d = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.dir.as_deref().unwrap_or("."))?;
         let timeout = a.timeoutMs.unwrap_or(k.cfg.limits.child_timeout_ms);
         let mut npm_args: Vec<String> = vec!["run".into(), a.name.clone(), "--".into()];
         npm_args.extend(script_args);
@@ -284,5 +296,83 @@ impl Handler for RunScriptHandler {
             "stderr": tail(stderr.trim_end(), 50_000),
             "ok": out.status.success(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod base_dir_tests {
+    use super::*;
+
+    fn pkg_kernel(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register_pkg(&mut k);
+        k
+    }
+
+    fn workspace(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-pkg-basedir-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// pkg.scripts must read the TARGET workspace's package.json when baseDir
+    /// is passed, and keep reading the server root's when not (default
+    /// unchanged). Distinctive script names prove which file was read.
+    #[test]
+    fn pkg_scripts_routes_to_baseDir() {
+        let server_root = workspace("server");
+        let target = workspace("target");
+        std::fs::write(
+            server_root.join("package.json"),
+            r#"{ "name": "server-ws", "scripts": { "SERVER_MARKER": "echo server" } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            target.join("package.json"),
+            r#"{ "name": "target-ws", "scripts": { "TARGET_MARKER": "echo target" } }"#,
+        )
+        .unwrap();
+        let k = pkg_kernel(&server_root);
+
+        // baseDir=target: the target's scripts, never the server root's
+        let over = ScriptsHandler
+            .call(&k, &json!({ "baseDir": target.display().to_string() }))
+            .unwrap();
+        let over_scripts = over["scripts"].as_object().unwrap();
+        assert!(over_scripts.contains_key("TARGET_MARKER"), "must read the target package.json: {over}");
+        assert!(!over_scripts.contains_key("SERVER_MARKER"), "must NOT read the server package.json: {over}");
+
+        // default: unchanged — the server root's scripts
+        let def = ScriptsHandler.call(&k, &json!({})).unwrap();
+        let def_scripts = def["scripts"].as_object().unwrap();
+        assert!(def_scripts.contains_key("SERVER_MARKER"), "default must read the server package.json: {def}");
+
+        let _ = std::fs::remove_dir_all(&server_root);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// A bad baseDir is an error, never a silent fallback to the server root.
+    #[test]
+    fn pkg_bad_baseDir_errors() {
+        let server_root = workspace("srv2");
+        std::fs::write(
+            server_root.join("package.json"),
+            r#"{ "name": "server-ws", "scripts": { "x": "echo x" } }"#,
+        )
+        .unwrap();
+        let k = pkg_kernel(&server_root);
+        let err = ScriptsHandler
+            .call(&k, &json!({ "baseDir": "/no/such/ws/xyz" }))
+            .unwrap_err();
+        assert_eq!(err.code, "ERR_BAD_PATH", "bad baseDir must surface as ERR_BAD_PATH");
+        let _ = std::fs::remove_dir_all(&server_root);
     }
 }

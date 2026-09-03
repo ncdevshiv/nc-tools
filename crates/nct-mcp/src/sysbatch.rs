@@ -16,7 +16,7 @@ pub const BATCH_DESC: &str = "Run up to 25 kernel tool calls in ONE round-trip: 
 
 pub fn register_sys_batch(k: &mut Kernel) {
     k.register("sys.journal", JOURNAL_DESC, nct_core::schema::schema_for::<JournalArgs>(), Arc::new(JournalHandler));
-    k.register("sys.workspace", WORKSPACE_DESC, nct_core::schema::schema_for::<EmptySysArgs>(), Arc::new(WorkspaceHandler));
+    k.register("sys.workspace", WORKSPACE_DESC, nct_core::schema::schema_for::<WorkspaceArgs>(), Arc::new(WorkspaceHandler));
     k.register("batch.execute", BATCH_DESC, nct_core::schema::schema_for::<BatchArgs>(), Arc::new(BatchHandler));
 }
 
@@ -31,6 +31,16 @@ pub struct JournalArgs {
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EmptySysArgs {}
+
+/// Per-call workspace override: report/answer about this base dir instead of
+/// the server root. A mandatory-dir override must exist; bad overrides are
+/// rejected by kernel.base_dir, never silently ignored.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceArgs {
+    #[serde(default)]
+    pub baseDir: Option<String>,
+}
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -83,10 +93,13 @@ impl Handler for JournalHandler {
 
 pub struct WorkspaceHandler;
 impl Handler for WorkspaceHandler {
-    fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
-        let git = k.root.join(".git").exists();
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: WorkspaceArgs = parse_args(args)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let git = base.join(".git").exists();
         Ok(json!({
-            "root": k.root.display().to_string(),
+            "root": base.display().to_string(),
+            "serverRoot": k.root.display().to_string(),
             "platform": nct_core::platform_str(),
             "node": Value::Null,
             "git": git,
@@ -486,5 +499,45 @@ mod retry_tests {
         let v = BatchHandler.call(&k, &args).unwrap();
         assert_eq!(v["ok"], json!(1));
         assert_eq!(v["failed"], json!(0));
+    }
+
+    /// sys.workspace reports the EFFECTIVE base: default = server root
+    /// (unchanged from before baseDir existed), baseDir = the other workspace,
+    /// including whether THAT workspace is a git repo.
+    #[test]
+    fn workspace_reports_baseDir_not_server_root() {
+        let k = kernel();
+        let target = std::env::temp_dir().join(format!(
+            "nct-ws-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(target.join(".git")).unwrap();
+
+        // default: server root, serverRoot echo present
+        let def = WorkspaceHandler.call(&k, &json!({})).unwrap();
+        assert_eq!(def["root"], json!(k.root.display().to_string()));
+        assert_eq!(def["serverRoot"], json!(k.root.display().to_string()));
+
+        // baseDir: the OTHER workspace and its real git state
+        // (compare canonicalized — resolve_checked returns the long path)
+        let canon = dunce::canonicalize(&target).unwrap();
+        let over = WorkspaceHandler
+            .call(&k, &json!({ "baseDir": target.display().to_string() }))
+            .unwrap();
+        assert_eq!(over["root"], json!(canon.display().to_string()));
+        assert_eq!(over["git"], json!(true), "target has .git — must be reported");
+        assert_eq!(over["serverRoot"], json!(k.root.display().to_string()), "serverRoot stays the server's");
+
+        // a bad baseDir is an error, never a silent fallback to the server root
+        let bad = WorkspaceHandler.call(&k, &json!({ "baseDir": "/no/such/ws/xyz" }));
+        assert!(bad.is_err(), "bad baseDir must error, not fall back");
+
+        let _ = std::fs::remove_dir_all(&target);
     }
 }

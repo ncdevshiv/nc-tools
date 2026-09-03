@@ -138,12 +138,23 @@ impl Kernel {
     /// caller passes an explicit `baseDir` (per-call workspace override) that
     /// resolves, it wins over the session root — so an agent bound to one
     /// workspace can still read/observe another without re-rooting the server.
-    /// The override must exist; a bad override is an error, not a silent
-    /// fallback to the session root (that is precisely the "results come back
+    /// The override must exist as a directory; a bad override is an error,
+    /// not a silent fallback to the session root and not a lexical path that
+    /// quietly points nowhere (either is precisely the "results come back
     /// relative to the wrong workspace" bug).
     pub fn base_dir(&self, override_dir: Option<&str>) -> Result<PathBuf, ToolError> {
         match override_dir {
-            Some(d) if !d.is_empty() => crate::paths::resolve_checked(&self.root, d),
+            Some(d) if !d.is_empty() => {
+                let resolved = crate::paths::resolve_checked(&self.root, d)?;
+                if !resolved.is_dir() {
+                    return Err(ToolError::with_hint(
+                        "ERR_BAD_PATH",
+                        format!("baseDir is not an existing directory: {d}"),
+                        serde_json::json!({ "baseDir": d, "resolved": resolved.display().to_string() }),
+                    ));
+                }
+                Ok(resolved)
+            }
             _ => Ok(self.root.clone()),
         }
     }

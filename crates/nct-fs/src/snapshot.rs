@@ -25,6 +25,11 @@ const EXCLUDED: &[&str] = &[".git", "node_modules", ".nc-tools"];
 pub struct SnapshotArgs {
     #[serde(default)]
     pub label: Option<String>,
+    /// Per-call workspace override: snapshot THIS base dir (its snapshot
+    /// store lives under <baseDir>/.nc-tools/snapshots). Default: the session
+    /// workspace the server was rooted on.
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -35,6 +40,10 @@ pub struct RollbackArgs {
     /// This makes a bad edit undoable WITHOUT losing unrelated work.
     #[serde(default)]
     pub paths: Option<Vec<String>>,
+    /// Per-call workspace override: restore into THIS base dir (same one the
+    /// snapshot was taken from). Default: the session workspace.
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -42,11 +51,19 @@ pub struct RollbackArgs {
 pub struct SnapshotDiffArgs {
     pub a: String,
     pub b: String,
+    /// Per-call workspace override: diff snapshots from THIS base dir's
+    /// snapshot store. Default: the session workspace.
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
+/// Per-call workspace override for sys.listSnapshots (was an empty-args tool).
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EmptySnapArgs {}
+pub struct ListSnapshotsArgs {
+    #[serde(default)]
+    pub baseDir: Option<String>,
+}
 
 fn snapshots_root(root: &Path) -> PathBuf {
     root.join(".nc-tools").join("snapshots")
@@ -83,17 +100,18 @@ pub struct SnapshotHandler;
 impl Handler for SnapshotHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: SnapshotArgs = parse_args(args)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
         let label = a.label.unwrap_or_else(|| "auto".to_string());
         let safe: String = label
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
             .collect();
         let id = format!("{}-{}", now_ms(), safe);
-        let dir = snapshots_root(&k.root).join(&id);
+        let dir = snapshots_root(&base).join(&id);
         let mut files: Vec<String> = Vec::new();
-        walk_files(&k.root, "", &mut files);
+        walk_files(&base, "", &mut files);
         for rel in &files {
-            let src = k.root.join(rel);
+            let src = base.join(rel);
             let dst = dir.join(rel);
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
@@ -109,8 +127,10 @@ impl Handler for SnapshotHandler {
 
 pub struct ListSnapshotsHandler;
 impl Handler for ListSnapshotsHandler {
-    fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
-        let snapshots = list_impl(&k.root);
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: ListSnapshotsArgs = parse_args(args)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let snapshots = list_impl(&base);
         Ok(json!({ "snapshots": snapshots, "total": snapshots.len() }))
     }
 }
@@ -146,10 +166,11 @@ impl Handler for RollbackHandler {
         if a.id.is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "snapshot id required"));
         }
-        let dir = snapshots_root(&k.root).join(&a.id);
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let dir = snapshots_root(&base).join(&a.id);
         let manifest_path = dir.join("manifest.json");
         if !manifest_path.exists() {
-            let available: Vec<String> = list_impl(&k.root)
+            let available: Vec<String> = list_impl(&base)
                 .iter()
                 .filter_map(|s| s["id"].as_str().map(|s| s.to_string()))
                 .collect();
@@ -184,7 +205,7 @@ impl Handler for RollbackHandler {
                 if !src.exists() {
                     continue;
                 }
-                let dst = k.root.join(rel);
+                let dst = base.join(rel);
                 if let Some(parent) = dst.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -203,7 +224,7 @@ impl Handler for RollbackHandler {
         // 1. restore every file in the manifest
         for rel in &manifest_files {
             let src = dir.join(rel);
-            let dst = k.root.join(rel);
+            let dst = base.join(rel);
             if let Some(parent) = dst.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -212,13 +233,13 @@ impl Handler for RollbackHandler {
         // 2. remove files created after the snapshot (not in manifest, not excluded)
         let manifest_set: std::collections::HashSet<&String> = manifest_files.iter().collect();
         let mut current: Vec<String> = Vec::new();
-        walk_files(&k.root, "", &mut current);
+        walk_files(&base, "", &mut current);
         let mut removed: Vec<String> = Vec::new();
         for rel in &current {
             if manifest_set.contains(rel) {
                 continue;
             }
-            let abs = k.root.join(rel);
+            let abs = base.join(rel);
             let res = if fs::metadata(&abs).map(|m| m.is_dir()).unwrap_or(false) {
                 fs::remove_dir_all(&abs)
             } else {
@@ -241,11 +262,12 @@ pub struct SnapshotDiffHandler;
 impl Handler for SnapshotDiffHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: SnapshotDiffArgs = parse_args(args)?;
-        let sroot = snapshots_root(&k.root);
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let sroot = snapshots_root(&base);
         let dir_a = sroot.join(&a.a);
         let dir_b = sroot.join(&a.b);
         if !dir_a.join("manifest.json").exists() || !dir_b.join("manifest.json").exists() {
-            let available: Vec<String> = list_impl(&k.root)
+            let available: Vec<String> = list_impl(&base)
                 .iter()
                 .filter_map(|s| s["id"].as_str().map(|s| s.to_string()))
                 .collect();
@@ -437,5 +459,65 @@ mod snapshot_diff_tests {
         assert_eq!(err.code, "ERR_UNKNOWN_SNAPSHOT");
         let hint = err.hint.expect("has available list");
         assert!(hint.get("available").is_some());
+    }
+
+    /// The whole snapshot family must route to baseDir: the store lives under
+    /// <baseDir>/.nc-tools/snapshots and covers baseDir's files — NOT the
+    /// server root's. Proven on all four tools (snapshot, list, diff, rollback).
+    #[test]
+    fn snapshot_family_routes_to_baseDir() {
+        let k = make_kernel();
+        let target = std::env::temp_dir().join(format!(
+            "nct-snap-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&target);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("work.txt"), "target content\n").unwrap();
+
+        // snapshot the TARGET workspace via baseDir
+        let snap = SnapshotHandler
+            .call(&k, &json!({ "label": "cross", "baseDir": target.display().to_string() }))
+            .unwrap();
+        let id = snap["id"].as_str().unwrap().to_string();
+        assert!(snap["files"].as_u64().unwrap() >= 1);
+        // the store is under the TARGET, not the server root
+        assert!(target.join(".nc-tools").join("snapshots").join(&id).join("manifest.json").exists());
+        assert!(!k.root.join(".nc-tools").join("snapshots").join(&id).exists());
+
+        // listSnapshots on the target sees it; the server root does not
+        let listed = ListSnapshotsHandler
+            .call(&k, &json!({ "baseDir": target.display().to_string() }))
+            .unwrap();
+        assert!(listed["snapshots"].as_array().unwrap().iter().any(|s| s["id"] == json!(id)));
+        let listed_root = ListSnapshotsHandler.call(&k, &json!({})).unwrap();
+        assert!(!listed_root["snapshots"].as_array().unwrap().iter().any(|s| s["id"] == json!(id)));
+
+        // mutate the target, then diff + rollback through baseDir
+        fs::write(target.join("work.txt"), "CHANGED\n").unwrap();
+        fs::write(target.join("extra.txt"), "created after\n").unwrap();
+        let snap2 = SnapshotHandler
+            .call(&k, &json!({ "label": "after", "baseDir": target.display().to_string() }))
+            .unwrap();
+        let id2 = snap2["id"].as_str().unwrap().to_string();
+        let diff = SnapshotDiffHandler
+            .call(&k, &json!({ "a": id, "b": id2, "baseDir": target.display().to_string() }))
+            .unwrap();
+        assert!(diff["added"].as_array().unwrap().iter().any(|f| f == "extra.txt"));
+
+        let rb = RollbackHandler
+            .call(&k, &json!({ "id": id, "baseDir": target.display().to_string() }))
+            .unwrap();
+        assert_eq!(rb["id"], json!(id));
+        assert_eq!(fs::read_to_string(target.join("work.txt")).unwrap(), "target content\n", "target file restored");
+        assert!(!target.join("extra.txt").exists(), "post-snapshot file removed from the target");
+        // the server root was never touched by any of this
+        assert!(!k.root.join("work.txt").exists());
+
+        let _ = fs::remove_dir_all(&target);
     }
 }

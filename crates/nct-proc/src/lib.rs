@@ -1469,24 +1469,18 @@ mod base_dir_tests {
         let _ = fs::remove_dir_all(&target);
     }
 
-    /// A bad baseDir must not silently run in the server root. proc.spawn
-    /// reports spawn failures inside a SUCCESSFUL tool result (proc.mjs
-    /// close/error semantics), so the observable guarantee is: the child never
-    /// starts with a bogus cwd — the result carries error ERR_SPAWN, and the
-    /// cwd is NOT the server root.
+    /// A bad baseDir must not silently run in the server root. The kernel
+    /// rejects a nonexistent baseDir up front (ERR_BAD_PATH) — the tool call
+    /// fails before any child is spawned, so the cwd can never be a wrong
+    /// workspace.
     #[test]
     fn proc_spawn_bad_baseDir_errors() {
         let server_root = workspace("srv2");
         let k = proc_kernel(&server_root);
         let out = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000, "baseDir": "/no/such/dir/xyz" }));
-        // proc.spawn: ok=true at the tool level, but the result embeds an error.
-        assert!(out.ok, "proc.spawn returns ok=true with an embedded error on spawn failure");
-        let result = out.result.unwrap();
-        let embedded = result["error"].as_object();
-        assert!(embedded.is_some(), "result must carry an embedded error for a bad cwd: {result}");
-        assert_eq!(embedded.unwrap()["code"], json!("ERR_SPAWN"), "should surface ERR_SPAWN");
-        let cwd = result["stdout"].as_str().unwrap_or("");
-        assert!(!cwd.to_lowercase().contains("srv2"), "must NOT fall back to the server root");
+        assert!(!out.ok, "bad baseDir must fail the call: {:?}", out.result);
+        let err = out.error.unwrap();
+        assert_eq!(err.code, "ERR_BAD_PATH", "kernel rejects the override before spawn: {:?}", err.hint);
         let _ = fs::remove_dir_all(&server_root);
     }
 }

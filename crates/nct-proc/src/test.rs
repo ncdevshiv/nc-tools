@@ -46,6 +46,9 @@ pub struct RunArgs {
     #[serde(default)]
     #[schemars(range(min = 1000, max = 600000))]
     pub timeoutMs: Option<u64>,
+    #[doc = "Base dir for relative paths AND the working dir of the test runner (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq)]
@@ -61,16 +64,17 @@ pub struct RunHandler;
 impl Handler for RunHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: RunArgs = parse_args(args)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
         match a.framework.unwrap_or(Framework::Node) {
-            Framework::Node => run_node(k, a.path.as_deref(), a.timeoutMs),
-            Framework::Pytest => run_pytest(k, a.path.as_deref(), a.timeoutMs),
-            Framework::Cargo => run_cargo(k, a.path.as_deref(), a.timeoutMs),
+            Framework::Node => run_node(k, &base, a.path.as_deref(), a.timeoutMs),
+            Framework::Pytest => run_pytest(k, &base, a.path.as_deref(), a.timeoutMs),
+            Framework::Cargo => run_cargo(k, &base, a.path.as_deref(), a.timeoutMs),
         }
     }
 }
 
-fn patterns_for(k: &Kernel, path: &str) -> Result<Vec<String>, ToolError> {
-    let abs = resolve_checked(&k.root, path)?;
+fn patterns_for(base: &std::path::Path, path: &str) -> Result<Vec<String>, ToolError> {
+    let abs = resolve_checked(base, path)?;
     if !abs.exists() {
         return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("No such path: {path}"), json!({ "path": path })));
     }
@@ -82,14 +86,14 @@ fn patterns_for(k: &Kernel, path: &str) -> Result<Vec<String>, ToolError> {
     }
 }
 
-fn run_suite(k: &Kernel, cmd: &str, args: &[String], timeout_ms: u64) -> Result<std::process::Output, ToolError> {
+fn run_suite(k: &Kernel, base: &std::path::Path, cmd: &str, args: &[String], timeout_ms: u64) -> Result<std::process::Output, ToolError> {
     // Strip NODE_TEST_CONTEXT: node sets it for its own test children, and an
     // inherited value makes the spawned runner think it is nested and skip files.
     let mut env = child_env(&k.session_env.snapshot());
     env.remove("NODE_TEST_CONTEXT");
     let mut c = Command::new(cmd);
     c.args(args)
-        .current_dir(&k.root)
+        .current_dir(base)
         .stdin(Stdio::null())
         .env_clear()
         .envs(env);
@@ -167,15 +171,15 @@ fn run_suite(k: &Kernel, cmd: &str, args: &[String], timeout_ms: u64) -> Result<
     Ok(std::process::Output { status, stdout: out.into_bytes(), stderr: err.into_bytes() })
 }
 
-fn run_node(k: &Kernel, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
+fn run_node(k: &Kernel, base: &std::path::Path, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
     let timeout = timeout_ms.unwrap_or(k.cfg.limits.test_timeout_ms);
     let patterns: Vec<String> = match path {
-        Some(p) => patterns_for(k, p)?,
+        Some(p) => patterns_for(base, p)?,
         None => DEFAULT_PATTERNS.iter().map(|s| s.to_string()).collect(),
     };
     let mut args: Vec<String> = vec!["--test".into(), "--test-reporter=junit".into()];
     args.extend(patterns.iter().cloned());
-    let out = run_suite(k, "node", &args, timeout)?;
+    let out = run_suite(k, base, "node", &args, timeout)?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let xml = format!("{stdout}\n{stderr}");
@@ -201,12 +205,12 @@ fn run_node(k: &Kernel, path: Option<&str>, timeout_ms: Option<u64>) -> Result<V
     Ok(result)
 }
 
-fn run_pytest(k: &Kernel, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
+fn run_pytest(k: &Kernel, base: &std::path::Path, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
     let timeout = timeout_ms.unwrap_or(k.cfg.limits.test_timeout_ms);
     let junit = k.root.join(".nc-tools").join("junit.xml");
     let mut args: Vec<String> = vec!["-m".into(), "pytest".into(), path.unwrap_or(".").to_string(), "--junitxml".into(), junit.display().to_string(), "-q".into(), "--no-header".into()];
     let _ = &mut args;
-    let out = run_suite(k, "python", &args, timeout)?;
+    let out = run_suite(k, base, "python", &args, timeout)?;
     if !junit.exists() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         return Err(ToolError::with_hint(
@@ -340,17 +344,17 @@ fn parse_junit_xml(xml: &str, framework: &str) -> Result<Value, ToolError> {
 
 // ---- cargo (Rust) driver ----------------------------------------------------
 
-fn run_cargo(k: &Kernel, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
+fn run_cargo(k: &Kernel, base: &std::path::Path, path: Option<&str>, timeout_ms: Option<u64>) -> Result<Value, ToolError> {
     let dir = match path {
         Some(p) => {
-            let abs = resolve_checked(&k.root, p)?;
+            let abs = resolve_checked(base, p)?;
             if abs.is_file() {
                 abs.parent().map(|d| d.to_path_buf()).unwrap_or(abs.clone())
             } else {
                 abs
             }
         }
-        None => k.root.clone(),
+        None => base.to_path_buf(),
     };
     let timeout = timeout_ms.unwrap_or(300_000);
     let mut c = Command::new("cargo");
@@ -452,4 +456,77 @@ fn parse_cargo_output(stdout: &str, stderr: &str, code: Option<i32>, duration_ms
         "durationMs": duration_ms,
         "failures": failures,
     }))
+}
+
+#[cfg(test)]
+mod base_dir_tests {
+    use super::*;
+
+    /// test.run must execute the TARGET workspace's tests when baseDir is
+    /// passed. Proved with real node:test children: each workspace holds a
+    /// distinctively-named FAILING test, and the run's failure identities show
+    /// exactly which workspace's file the child executed.
+    #[test]
+    fn test_run_routes_to_baseDir_workspace() {
+        let mk = |tag: &str| {
+            let dir = std::env::temp_dir().join(format!(
+                "nct-test-basedir-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let server_root = mk("server");
+        let target = mk("target");
+        std::fs::write(
+            target.join("target-only.test.mjs"),
+            "import test from 'node:test';\ntest('TARGET-WS-MARKER', () => { throw new Error('marker'); });\n",
+        )
+        .unwrap();
+        std::fs::write(
+            server_root.join("server-only.test.mjs"),
+            "import test from 'node:test';\ntest('SERVER-WS-MARKER', () => { throw new Error('marker'); });\n",
+        )
+        .unwrap();
+        let mut k = Kernel::new(server_root.clone()).unwrap();
+        crate::register(&mut k);
+        crate::register_test(&mut k);
+
+        // baseDir=target: the child runs IN the target — it discovers and
+        // executes the target's failing test, never the server root's.
+        let over = k.call("test.run", &json!({ "framework": "node", "baseDir": target.display().to_string(), "timeoutMs": 60000 }));
+        assert!(over.ok, "test.run with baseDir should succeed: {:?}", over.error);
+        let v = over.result.unwrap();
+        let over_names: Vec<String> = v["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str().map(String::from))
+            .collect();
+        assert!(over_names.iter().any(|n| n.contains("TARGET-WS-MARKER")), "the TARGET test must have run: {v}");
+        assert!(!over_names.iter().any(|n| n.contains("SERVER-WS-MARKER")), "the server test must NOT leak into the target run: {v}");
+
+        // explicit relative path also resolves against the baseDir
+        let out2 = k.call("test.run", &json!({ "framework": "node", "path": "target-only.test.mjs", "baseDir": target.display().to_string(), "timeoutMs": 60000 }));
+        assert!(out2.ok, "explicit path under baseDir should resolve: {:?}", out2.error);
+
+        // default (no baseDir) is unchanged: the child runs in the server root
+        let def = k.call("test.run", &json!({ "framework": "node", "path": "server-only.test.mjs", "timeoutMs": 60000 }));
+        assert!(def.ok, "default (no baseDir) should still run in the server root: {:?}", def.error);
+        let dv = def.result.unwrap();
+        let def_names: Vec<String> = dv["failures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str().map(String::from))
+            .collect();
+        assert!(def_names.iter().any(|n| n.contains("SERVER-WS-MARKER")), "default run must execute the server test: {dv}");
+
+        let _ = std::fs::remove_dir_all(&server_root);
+        let _ = std::fs::remove_dir_all(&target);
+    }
 }

@@ -727,9 +727,11 @@ mod base_dir_tests {
     }
 
     /// bad baseDir must ERROR, not silently fall back to the server root.
-    /// A non-existent dir is path-resolvable (loose resolution) but not a git
-    /// repo — so in_repo rejects it as ERR_NOT_A_REPO. The contract is "never
-    /// silently reuse the server root's repo", which this proves: it errors.
+    /// The kernel rejects a nonexistent baseDir up front as ERR_BAD_PATH
+    /// (before the repo check could even run) — a strict improvement over the
+    /// older ERR_NOT_A_REPO-on-nonexistent-path behavior. The contract is
+    /// "never silently reuse the server root's repo", which this proves: it
+    /// errors.
     #[test]
     fn bad_baseDir_errors_instead_of_silent_fallback() {
         let server_root = init_repo("server2");
@@ -737,8 +739,8 @@ mod base_dir_tests {
         let out = k.call("git.status", &json!({ "baseDir": "/definitely/not/a/real/dir" }));
         assert!(!out.ok, "bad baseDir must fail, got false-ok");
         let e = out.error.unwrap();
-        // Not a git repo at that path — must NOT fall back to the server repo.
-        assert_eq!(e.code, "ERR_NOT_A_REPO", "should reject the dir as not-a-repo: {}", e.code);
+        // Kernel rejects the non-existent dir before any git work happens.
+        assert_eq!(e.code, "ERR_BAD_PATH", "should reject the dir as a bad path: {}", e.code);
         let _ = fs::remove_dir_all(&server_root);
     }
 
