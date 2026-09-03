@@ -1,6 +1,6 @@
 {
   "generatedFrom": "rust/nct-mcp (build_kernel)",
-  "toolCount": 75,
+  "toolCount": 81,
   "tools": [
     {
       "name": "agent.compact",
@@ -301,6 +301,40 @@
           }
         },
         "additionalProperties": false
+      }
+    },
+    {
+      "name": "code.graph",
+      "description": "Build a cross-file reference graph (who calls whom / what a symbol references) WITHOUT a language server. Scans symbols (fn/def/class/struct/trait) via the same lexical scanner as code.symbols, then records word-boundary references from each symbol body to other symbols. Query with callees? or callers? to answer 'who calls X'. Name-resolution within scope — not full type resolution (may miss a method resolved through an impl bound). Returns {nodes, edges}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseDir": {
+            "type": "string"
+          },
+          "callees": {
+            "description": "Return only edges where the caller has this name.",
+            "type": "string"
+          },
+          "callers": {
+            "description": "Return only edges where the callee has this name.",
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "maxNodes": {
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 5000
+          },
+          "path": {
+            "description": "Path — relative to the base dir, or absolute (any location allowed)",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
       }
     },
     {
@@ -700,6 +734,43 @@
       }
     },
     {
+      "name": "fs.watch",
+      "description": "Semantic file watch: polls a file and reports ONLY when its meaning changes — not on whitespace/comment-only edits. Embeds the content with local MiniLM and scores cosine(v0,v1); returns on threshold cross, or \"semantic-unchanged\" (byte-changed but cosine above threshold), or timeout. Use to re-run tests on logic changes without rebuild storms.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
+          "intervalMs": {
+            "description": "Poll interval in ms (default 2000, min 500, max 60000)",
+            "minimum": 500,
+            "type": "integer",
+            "maximum": 60000
+          },
+          "path": {
+            "description": "File to watch — relative to the base dir, or absolute",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "Cosine threshold for a semantic change (default 0.995). A whitespace- only edit scores ~1.0; a real logic change scores lower.",
+            "type": "number"
+          },
+          "timeoutMs": {
+            "description": "Max time to watch in ms (default 60s, max 10 min).",
+            "minimum": 5000,
+            "type": "integer",
+            "maximum": 600000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "fs.write",
       "description": "Write a file (creates parent dirs). Returns created/overwrote.",
       "inputSchema": {
@@ -1043,6 +1114,33 @@
       }
     },
     {
+      "name": "net.contradict",
+      "description": "Search for evidence AGAINST a claim, not just for it: runs net.search for the claim AND its negation, embeds each result against both, classifies each as supporting/contradicting/neutral, then net.verify the top sources to confirm direction. Returns {claim, supporting:[...], contradicting:[...], verdict: confirmed|contested|unsupported|insufficient}. The anti-confirmation-bias check — pair with net.verify/net.research.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "claim"
+        ],
+        "properties": {
+          "allowPrivate": {
+            "type": "boolean"
+          },
+          "claim": {
+            "type": "string"
+          },
+          "intent": {
+            "type": "string"
+          },
+          "maxSources": {
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 8
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "net.fetch",
       "description": "Read a web page as CLEAN MARKDOWN for an agent: main-content extraction discards nav/ads/boilerplate, returns title, links, token estimate, and extraction confidence. SSRF-guarded by default (private/loopback targets refused; allowPrivate to reach internal hosts), ETag-revalidated cache (set refresh to force), Accept: text/markdown negotiation, and automatic headless re-render through the system browser when a JS-heavy page extracts as empty. Prefer over net.http whenever you want page CONTENT, not raw protocol bytes.",
       "inputSchema": {
@@ -1144,6 +1242,41 @@
             "minimum": 100,
             "type": "integer",
             "maximum": 10000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "net.research",
+      "description": "Research a question end-to-end in one call: net.search → net.fetch top results → extract the query-relevant span from each → net.verify whether it is grounded → net.cite the grounded sources. Returns {answer, sources:[{url,title,verdict,score,citation}], groundedCount, confidence, gaps}. This is the multi-hop conductor over the existing net primitives — same journaling, authority, and ledgers, no mock.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "allowPrivate": {
+            "type": "boolean"
+          },
+          "intent": {
+            "description": "Force a net.search intent (general|news|howto|academic|package).",
+            "type": "string"
+          },
+          "maxResults": {
+            "description": "net.search maxResults passthrough (default 10).",
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 25
+          },
+          "maxSources": {
+            "description": "How many search results to fetch + verify (default 5, max 10).",
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 10
+          },
+          "query": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -1458,6 +1591,52 @@
           "dir": {
             "description": "Directory (default: base dir)",
             "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
+      "name": "proc.diff",
+      "description": "Diff the OS process table across two points in time (runtime process-tree diff). With {command} it captures the table, runs the command, captures again, and reports what started / stopped / changed (pid, name, memKb). Without it, pass before=/after= for two stored snapshots. Answers 'what did this command spawn?' — proc.list is a snapshot, this is the diff.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "after": {
+            "description": "Optional stored \"after\" snapshot to diff against `before`.",
+            "type": "string"
+          },
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "baseDir": {
+            "type": "string"
+          },
+          "before": {
+            "description": "Optional stored \"before\" snapshot (the output of a prior proc.diff {capture} run). Used without a command.",
+            "type": "string"
+          },
+          "capture": {
+            "description": "Capture the current table and return it (a snapshot id) with no diff.",
+            "type": "boolean"
+          },
+          "cmd": {
+            "description": "Command to run between the two captures (argv-safe: cmd + args).",
+            "type": "string"
+          },
+          "cwd": {
+            "description": "Working dir for the in-between command.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Timeout for the in-between command (default 60s).",
+            "minimum": 1000,
+            "type": "integer",
+            "maximum": 600000
           }
         },
         "additionalProperties": false,
@@ -1907,6 +2086,38 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "sys.replay",
+      "description": "Replay journal entries as tool calls (time-machine debugging). Reads tool.call events in a seq range, and by default (dryRun=true) shows what WOULD be re-executed with the original args + recorded result — no side effects. dryRun=false actually re-runs each call through the kernel and returns fresh results next to the originals so you can diff and find the divergence. Restrict with tool= / from= / to=. Each replay call is itself journaled.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "description": "Dry-run (default true): show what would run, no execution.",
+            "type": "boolean"
+          },
+          "from": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "lastN": {
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 500
+          },
+          "to": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "tool": {
+            "description": "Replay only calls to this tool (dotted name).",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
         "required": []
       }
     },

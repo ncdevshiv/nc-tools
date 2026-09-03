@@ -1330,6 +1330,7 @@ dependencies = [
  "fancy-regex 0.13.0",
  "libc",
  "nct-core",
+ "nct-semantic",
  "pathdiff",
  "regex",
  "schemars",

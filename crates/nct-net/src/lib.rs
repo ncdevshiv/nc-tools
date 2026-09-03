@@ -13,6 +13,7 @@ use nct_core::kernel::{parse_args, Handler, Kernel};
 pub mod authority;
 pub mod cache;
 pub mod cite;
+pub mod contradict;
 pub mod engines;
 pub mod extract;
 pub mod feed;
@@ -22,6 +23,7 @@ pub mod httpx;
 pub mod pdf;
 pub mod query;
 pub mod render;
+pub mod research;
 pub mod robots;
 pub mod routing;
 pub mod sources;
@@ -35,6 +37,8 @@ pub fn register(k: &mut Kernel) {
     k.register("net.probePort", PROBE_DESC, nct_core::schema::schema_for::<ProbeArgs>(), std::sync::Arc::new(ProbeHandler));
     fetch::register(k);
     cite::register(k);
+    research::register_research(k);
+    crate::contradict::register_contradict(k);
 }
 
 #[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq)]

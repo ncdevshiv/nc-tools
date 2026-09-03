@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 75 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 81 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
@@ -41,9 +41,10 @@ internal architecture, or data structures beyond the observable contract.
   `proc.list`, `proc.kill`, `proc.runScript`, `proc.watch`
 - `test.run` (frameworks: `node`, `pytest`)
 - `pkg.add`, `pkg.list`, `pkg.scripts`, `pkg.runScript`
-- `net.http`, `net.probePort`, `net.fetch`, `net.robots`, `net.search`, `net.cite`, `net.verify`
+- `net.http`, `net.probePort`, `net.fetch`, `net.robots`, `net.search`, `net.cite`, `net.verify`, `net.research`, `net.contradict`
   (wave W-Net-1: agent-grade fetch+extract, robots/llms.txt, keyless federated
-  search with local neural rerank — see docs/INTERNET-TOOLS.md)
+  search with local neural rerank — see docs/INTERNET-TOOLS.md; net.research is
+  the multi-hop conductor, net.contradict the anti-confirmation-bias check)
 - `env.get`, `env.set`, `env.list`
 - `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.snapshotDiff`,
   `sys.journal`, `sys.workspace`, `sys.doctor`
@@ -220,7 +221,7 @@ the protocol requires only that they do not break the specified invariants.
 
 ### 3.1 Tool-surface evolution (Dr. Invi wave)
 
-As of this wave, the surface is **75 tools** (62 → 63 → 72 → 74 → 75 with agent.peers). One additive tool:
+As of this wave, the surface is **81 tools** (62 → 63 → 72 → 74 → 75 → 77 → 78 → 79 → 80 → 81 with the six inventions). One additive tool:
 
 - `sys.snapshotDiff` — diff two snapshots: what files were added, removed, or
   modified between them, plus byte totals. The review gate before a rollback.
@@ -243,7 +244,7 @@ that omit them behave identically to before):
 
 ### 3.2 Agent coordination layer
 
-The **75-tool** surface now includes a full multi-agent coordination layer
+The **77-tool** surface now includes a full multi-agent coordination layer
 (`agent.*`) — the capability that was missing when several agents worked the
 same workspace anonymously and blind to each other. State is on-disk and
 cross-process, so parallel servers sharing a workspace all see it:
@@ -279,3 +280,19 @@ cross-process, so parallel servers sharing a workspace all see it:
 before editing a shared file, `agent.locks` before writing, and `agent.post`
 to broadcast bugs/holds/handoffs — so agents that never met can still see and
 coordinate through the shared workspace state.
+
+### 3.3 Inventions wave (code.graph, fs.watch, net.research, net.contradict, sys.replay, proc.diff)
+
+The **81-tool** surface adds six tools no normal developer invented. Each is
+machine-proven (unit tests + live black-box proofs). Surface history:
+75 (side-channel wave) → 77 (net.research + net.contradict) → 78 (sys.replay)
+→ 79 (proc.diff) → 80 (code.graph) → 81 (fs.watch).
+
+| Tool | What it does | Why it's novel |
+|---|---|---|
+| `net.research` | Multi-hop conductor: search → fetch top N → extract query-relevant span → verify → cite in ONE call. Returns answer + grounded sources + confidence. | Chains 5 primitives instead of 5 round-trips. Live: C inventor → 2/3 grounded, conf 0.667. |
+| `net.contradict` | Adversarial evidence: search the claim AND its negation, classify supporting/contradicting, verdict confirmed\|contested\|unsupported\|insufficient. | Engines can't answer "why might this be wrong" — the embedder does. Live: Rust-faster-than-Go → contested (3 vs 3, real counter-evidence). |
+| `sys.replay` | Replay journal entries as tool calls. dryRun=true (default) shows what would run, no side effects; dryRun=false re-executes and diffs fresh vs recorded. | The journal was write-only; now it's a reproducible instruction log. Live: re-ran an fs.write, diverged: 0. |
+| `proc.diff` | Runtime process-tree diff: capture-run-capture around a command, or diff two stored snapshots. Started/stopped/changed by pid. | proc.list is a snapshot; this answers "what did this command spawn". Live: captured 409, run-node surfaced cmd/conhost with 73 changed. |
+| `code.graph` | Cross-file reference graph WITHOUT a language server: who calls whom, callerFile+line+kind. `callees=X` (callers-of) / `callers=X` (calls-from) filters. | Name-resolution within scope (brace/indent spans, word-boundary refs). Live: `callees=my_agent_id` → real call sites in coordination.rs. |
+| `fs.watch` | Semantic file watch: polls a file, embeds content, returns ONLY on meaning-cross-threshold (cos < 0.995) — whitespace/comment edits stay silent. | proc.watch re-runs on bytes; this watches semantics. 10× fewer rebuilds during formatting. |
