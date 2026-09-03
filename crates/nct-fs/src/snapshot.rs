@@ -14,8 +14,9 @@ use nct_core::paths::is_reparse_point;
 use nct_core::{now_iso, now_ms};
 
 pub const SNAPSHOT_DESC: &str = "Capture a workspace snapshot (files + dirs, excludes .git/node_modules/.nc-tools). Returns an id usable with sys.rollback. Use before risky edits so you can undo.";
-pub const ROLLBACK_DESC: &str = "Restore the workspace to a snapshot: restores manifest files, removes files created after the snapshot.";
+pub const ROLLBACK_DESC: &str = "Restore the workspace to a snapshot: restores manifest files, removes files created after the snapshot. Pass paths to restore only those files and leave the rest untouched (partial rollback).";
 pub const LIST_SNAPSHOTS_DESC: &str = "List available snapshots.";
+pub const SNAPSHOT_DIFF_DESC: &str = "Diff two snapshots: what files were added, removed, or modified between them, plus byte totals. Answers 'what changed since I snapshotted before the deploy?' — the review gate before a rollback.";
 
 const EXCLUDED: &[&str] = &[".git", "node_modules", ".nc-tools"];
 
@@ -30,6 +31,17 @@ pub struct SnapshotArgs {
 #[serde(deny_unknown_fields)]
 pub struct RollbackArgs {
     pub id: String,
+    /// Restore only these paths from the snapshot; other files are left as-is.
+    /// This makes a bad edit undoable WITHOUT losing unrelated work.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotDiffArgs {
+    pub a: String,
+    pub b: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -153,6 +165,41 @@ impl Handler for RollbackHandler {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
+
+        // Partial rollback: restore ONLY the requested paths (and their
+        // descendants) from the snapshot, leaving all else untouched. A bad
+        // edit to config/ is undone without losing unrelated work in src/.
+        if let Some(select) = &a.paths {
+            let selected: Vec<String> = manifest_files
+                .iter()
+                .filter(|rel| select.iter().any(|p| rel.as_str() == p.as_str() || rel.starts_with(&format!("{p}/"))))
+                .map(|s| s.clone())
+                .collect();
+            let mut restored = Vec::new();
+            for rel in &selected {
+                if rel.is_empty() {
+                    continue;
+                }
+                let src = dir.join(rel);
+                if !src.exists() {
+                    continue;
+                }
+                let dst = k.root.join(rel);
+                if let Some(parent) = dst.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&src, &dst)?;
+                restored.push(rel.clone());
+            }
+            return Ok(json!({
+                "id": a.id,
+                "partial": true,
+                "restored": restored.len(),
+                "restoredPaths": &restored[..restored.len().min(20)],
+                "note": "partial rollback — only the selected paths were restored; unrelated files untouched",
+            }));
+        }
+
         // 1. restore every file in the manifest
         for rel in &manifest_files {
             let src = dir.join(rel);
@@ -187,5 +234,208 @@ impl Handler for RollbackHandler {
             "removed": removed.len(),
             "removedFiles": &removed[..removed.len().min(20)],
         }))
+    }
+}
+
+pub struct SnapshotDiffHandler;
+impl Handler for SnapshotDiffHandler {
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: SnapshotDiffArgs = parse_args(args)?;
+        let sroot = snapshots_root(&k.root);
+        let dir_a = sroot.join(&a.a);
+        let dir_b = sroot.join(&a.b);
+        if !dir_a.join("manifest.json").exists() || !dir_b.join("manifest.json").exists() {
+            let available: Vec<String> = list_impl(&k.root)
+                .iter()
+                .filter_map(|s| s["id"].as_str().map(|s| s.to_string()))
+                .collect();
+            return Err(ToolError::with_hint(
+                "ERR_UNKNOWN_SNAPSHOT",
+                format!("snapshot diff needs two known ids (got {} / {})", a.a, a.b),
+                json!({ "available": available }),
+            ));
+        }
+        let files_a = snapshot_files(&dir_a);
+        let files_b = snapshot_files(&dir_b);
+        let set_a: std::collections::HashSet<&String> = files_a.iter().collect();
+        let set_b: std::collections::HashSet<&String> = files_b.iter().collect();
+
+        // added = in B but not A; removed = in A but not B; modified = in both
+        // but different bytes (compare actual file content via length + hash).
+        let mut added: Vec<String> = Vec::new();
+        let mut removed: Vec<String> = Vec::new();
+        let mut modified: Vec<Value> = Vec::new();
+        for f in &files_b {
+            if !set_a.contains(f) {
+                added.push(f.clone());
+            }
+        }
+        for f in &files_a {
+            if !set_b.contains(f) {
+                removed.push(f.clone());
+            }
+        }
+        for f in &files_a {
+            if set_b.contains(f) {
+                let pa = dir_a.join(f);
+                let pb = dir_b.join(f);
+                if file_changed(&pa, &pb) {
+                    modified.push(json!({ "file": f, "aBytes": file_len(&pa), "bBytes": file_len(&pb) }));
+                }
+            }
+        }
+        added.sort();
+        removed.sort();
+        modified.sort_by(|x, y| x["file"].as_str().unwrap_or("").cmp(y["file"].as_str().unwrap_or("")));
+
+        // "changed" = everything that differs between the two snapshots:
+        // added + removed + modified. This is the number an agent reads to
+        // decide whether a rollback is warranted.
+        let changed_files: Vec<String> = modified.iter().map(|m| m["file"].as_str().unwrap_or("").to_string()).collect();
+        let changed_count = added.len() + removed.len() + modified.len();
+        let mut total_bytes_a: u64 = 0;
+        let mut total_bytes_b: u64 = 0;
+        for f in &files_a { total_bytes_a += file_len(&dir_a.join(f)); }
+        for f in &files_b { total_bytes_b += file_len(&dir_b.join(f)); }
+
+        Ok(json!({
+            "from": a.a,
+            "to": a.b,
+            "added": &added[..added.len().min(50)],
+            "removed": &removed[..removed.len().min(50)],
+            "modified": &modified[..modified.len().min(50)],
+            "changed": changed_count,
+            "changedFiles": &changed_files[..changed_files.len().min(50)],
+            "bytesFrom": total_bytes_a,
+            "bytesTo": total_bytes_b,
+            "netBytes": total_bytes_b as i64 - total_bytes_a as i64,
+        }))
+    }
+}
+
+fn snapshot_files(dir: &Path) -> Vec<String> {
+    let Ok(raw) = fs::read_to_string(dir.join("manifest.json")) else { return Vec::new() };
+    let Ok(manifest) = serde_json::from_str::<Value>(&raw) else { return Vec::new() };
+    manifest["files"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+fn file_changed(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => {
+            if ma.len() != mb.len() {
+                return true;
+            }
+            // Same length — compare content hashes to catch same-size edits.
+            match (fs::read(a), fs::read(b)) {
+                (Ok(ba), Ok(bb)) => ba != bb,
+                _ => true,
+            }
+        }
+        _ => true,
+    }
+}
+
+fn file_len(p: &Path) -> u64 {
+    fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod snapshot_diff_tests {
+    use super::*;
+    use nct_core::kernel::Kernel;
+    use std::fs;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-snap-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut k = Kernel::new(dir).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    #[test]
+    fn snapshot_roundtrip_restores_all() {
+        let k = make_kernel();
+        fs::create_dir_all(k.root.join("sub")).unwrap();
+        fs::write(k.root.join("a.txt"), "alpha\n").unwrap();
+        fs::write(k.root.join("sub/b.txt"), "beta\n").unwrap();
+        let s1 = SnapshotHandler.call(&k, &json!({ "label": "before" })).unwrap();
+        let id = s1["id"].as_str().unwrap().to_string();
+        assert!(s1["files"].as_u64().unwrap() >= 2);
+        // mutate
+        fs::write(k.root.join("a.txt"), "CHANGED\n").unwrap();
+        // rollback
+        let rb = RollbackHandler.call(&k, &json!({ "id": id })).unwrap();
+        assert!(rb["restored"].as_u64().unwrap() >= 2);
+        assert_eq!(fs::read_to_string(k.root.join("a.txt")).unwrap(), "alpha\n");
+    }
+
+    #[test]
+    fn partial_rollback_restores_only_selected() {
+        let k = make_kernel();
+        fs::write(k.root.join("a.txt"), "alpha\n").unwrap();
+        fs::write(k.root.join("b.txt"), "beta\n").unwrap();
+        let s1 = SnapshotHandler.call(&k, &json!({ "label": "before" })).unwrap();
+        let id = s1["id"].as_str().unwrap().to_string();
+        // mutate both
+        fs::write(k.root.join("a.txt"), "CHANGED-A\n").unwrap();
+        fs::write(k.root.join("b.txt"), "CHANGED-B\n").unwrap();
+        // rollback only a.txt
+        let rb = RollbackHandler.call(&k, &json!({ "id": id, "paths": ["a.txt"] })).unwrap();
+        assert_eq!(rb["partial"], json!(true));
+        assert_eq!(rb["restored"], json!(1));
+        assert_eq!(fs::read_to_string(k.root.join("a.txt")).unwrap(), "alpha\n");
+        // b.txt is untouched — the unrelated change survives
+        assert_eq!(fs::read_to_string(k.root.join("b.txt")).unwrap(), "CHANGED-B\n");
+    }
+
+    #[test]
+    fn snapshot_diff_reports_added_removed_modified() {
+        let k = make_kernel();
+        fs::write(k.root.join("keep.txt"), "same\n").unwrap();
+        fs::write(k.root.join("remove.txt"), "gone soon\n").unwrap();
+        let s1 = SnapshotHandler.call(&k, &json!({ "label": "v1" })).unwrap();
+        let id1 = s1["id"].as_str().unwrap().to_string();
+        // change keep, remove remove.txt, add new.txt
+        fs::write(k.root.join("keep.txt"), "changed\n").unwrap();
+        fs::remove_file(k.root.join("remove.txt")).unwrap();
+        fs::write(k.root.join("new.txt"), "brand new\n").unwrap();
+        let s2 = SnapshotHandler.call(&k, &json!({ "label": "v2" })).unwrap();
+        let id2 = s2["id"].as_str().unwrap().to_string();
+
+        let diff = SnapshotDiffHandler.call(&k, &json!({ "a": id1, "b": id2 })).unwrap();
+        assert!(diff["added"].as_array().unwrap().iter().any(|f| f == "new.txt"));
+        assert!(diff["removed"].as_array().unwrap().iter().any(|f| f == "remove.txt"));
+        assert!(diff["modified"].as_array().unwrap().iter().any(|m| m["file"] == "keep.txt"));
+        assert!(diff["changed"].as_u64().unwrap() >= 3);
+        assert!(diff["bytesFrom"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn snapshot_diff_unknown_id_errors() {
+        let k = make_kernel();
+        let err = SnapshotDiffHandler.call(&k, &json!({ "a": "does-not-exist", "b": "also-missing" }));
+        let e = err.unwrap_err();
+        assert_eq!(e.code, "ERR_UNKNOWN_SNAPSHOT");
+    }
+
+    #[test]
+    fn rollback_unknown_id_gives_available() {
+        let k = make_kernel();
+        let err = RollbackHandler.call(&k, &json!({ "id": "nope" })).unwrap_err();
+        assert_eq!(err.code, "ERR_UNKNOWN_SNAPSHOT");
+        let hint = err.hint.expect("has available list");
+        assert!(hint.get("available").is_some());
     }
 }

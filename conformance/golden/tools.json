@@ -1,10 +1,168 @@
 {
   "generatedFrom": "rust/nct-mcp (build_kernel)",
-  "toolCount": 62,
+  "toolCount": 72,
   "tools": [
     {
+      "name": "agent.heartbeat",
+      "description": "Update this agent's roster entry: lastSeen, status (idle|working|blocked|done), and the current task summary. Other agents see this via agent.status/agent.list. Cheap — call it between steps so the roster stays live.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
+      "name": "agent.list",
+      "description": "List the workspace agent roster chronologically: every agent identity (id, name, sid, createdAt, lastSeen, status, task, toolCount) that has touched this workspace. Sorted newest-first.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "agent.lock",
+      "description": "Take an advisory lock on a path (e.g. a file you are about to edit). {holdMs} auto-releases the lock after that long even if this agent crashes (default 10 min). Locking is advisory — it makes the intent visible and recordable so agents choose not to collide. Check agent.locks/agent.status before editing, and agent.unlock when done.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "holdMs": {
+            "description": "Auto-release after this many ms even if this agent crashes (default 10 min).",
+            "minimum": 1000,
+            "type": "integer",
+            "maximum": 3600000
+          },
+          "path": {
+            "description": "Path (relative to base dir or absolute) this agent will be editing.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "agent.locks",
+      "description": "List active advisory locks: path, agentId, heldAt, expiresAt, expired state. Call this before writing to a path to see whether another agent is mid-edit there.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "agent.messages",
+      "description": "Read inter-agent messages. {since} filters by agentId context (from/to), {lastN} caps the tail. Returns messages newest-first with from/to/kind.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "lastN": {
+            "minimum": 1,
+            "type": "integer",
+            "maximum": 100
+          },
+          "to": {
+            "description": "Return messages to (direct) or from this agentId. Omit = all.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
+      "name": "agent.post",
+      "description": "Post a message to the inter-agent noticeboard. {to} may be an agentId for a direct message or omitted for a broadcast. {kind} is note|question|request|handoff|bug|hold|resume — other agents can filter by it. Messages persist in .nc-tools/agent-messages.jsonl.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "kind": {
+            "description": "note | question | request | handoff | bug | hold | resume",
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "to": {
+            "description": "Recipient agentId; omit for a broadcast.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "agent.register",
+      "description": "Register (or resume) this agent's identity in the workspace roster. With {agentId} restores a known identity (the crash/compaction continuation path — a client that remembers who it was keeps its identity and history). Without it, resumes this session's agent or mints `agent-<n>` (chronological). Returns {agentId, name, role, createdAt, resumed}. Call agent.status to see who else is working here.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "description": "A known agent id to restore (crash/compaction continuation). When present and in the roster, the identity is resumed with a new lastSeen.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Human label for the roster (default: derived from agentId or a counter).",
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
+      "name": "agent.status",
+      "description": "Full coordination snapshot: who is here, what each is working on, active locks, whether this agent is locked out of any path, and recent inter-agent messages. The 'look around before you start' tool.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "agent.unlock",
+      "description": "Release a lock this agent holds on a path. If the lock has expired (holdMs passed) this is a no-op; if another agent holds it, it is NOT released (you cannot steal a live lock).",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "batch.execute",
-      "description": "Run up to 25 kernel tool calls in ONE round-trip: [{tool, args}]. Each sub-call is individually executed and journaled; failures do not abort the batch. Use for independent multi-step work.",
+      "description": "Run up to 25 kernel tool calls in ONE round-trip: [{tool, args, dependsOn?}]. Each sub-call is individually executed and journaled; failures do not abort the batch. Calls with no dependsOn execute in parallel; calls with dependsOn=[indices] wait for those to finish first. Use for independent multi-step work.",
       "inputSchema": {
         "type": "object",
         "required": [
@@ -22,6 +180,14 @@
                 "args": {
                   "type": "object"
                 },
+                "dependsOn": {
+                  "description": "Indices of calls this one depends on (0-based). The call waits until all dependencies finish before executing. Empty/absent = independent.",
+                  "maxItems": 24,
+                  "type": "array",
+                  "items": {
+                    "type": "integer"
+                  }
+                },
                 "tool": {
                   "type": "string"
                 }
@@ -37,10 +203,14 @@
     },
     {
       "name": "code.symbols",
-      "description": "Extract code symbols (fns, structs, enums, traits, impls, mods, classes, interfaces, defs) with line numbers - a fast lexical scan, not a full parser. Languages: Rust, JS/TS/TSX/JSX, Python.",
+      "description": "Extract code symbols (fns, structs, enums, traits, impls, mods, classes, interfaces, defs) with line numbers AND line spans + doc comments - a fast lexical scan with brace/indent extension, not a full parser. Each symbol returns {name, kind, line, endLine, doc, span-bytes} so you can read exactly the matched range. Languages: Rust, JS/TS/TSX/JSX, Python.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "glob": {
             "type": "string"
           },
@@ -59,6 +229,10 @@
           "path": {
             "description": "Path - relative to the base dir, or absolute (any location allowed)",
             "type": "string"
+          },
+          "withBody": {
+            "description": "Include the full text of each symbol (default true; set false for a lean name/kind/line-only listing).",
+            "type": "boolean"
           }
         },
         "additionalProperties": false,
@@ -121,6 +295,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "content": {
             "type": "string"
           },
@@ -142,6 +320,10 @@
           "to"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "from": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -166,6 +348,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -183,6 +369,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -204,6 +394,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -225,6 +419,10 @@
           "to"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "from": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -246,6 +444,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace). Lets an agent bound to one workspace read files in another without re-rooting the server.",
+            "type": "string"
+          },
           "limit": {
             "minimum": 1,
             "type": "integer"
@@ -272,6 +474,10 @@
           "paths"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "limit": {
             "minimum": 1,
             "type": "integer"
@@ -297,6 +503,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "byteOffset": {
             "description": "Byte offset to start from (0 = file start)",
             "type": "integer"
@@ -324,6 +534,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -338,6 +552,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "depth": {
             "description": "Max depth (default 4, max 12)",
             "minimum": 1,
@@ -369,6 +587,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "content": {
             "type": "string"
           },
@@ -389,6 +611,10 @@
           "files"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "files": {
             "type": "array",
             "items": {
@@ -423,6 +649,10 @@
           "paths"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "paths": {
             "type": "array",
             "items": {
@@ -447,6 +677,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "lineEnd": {
             "type": "integer"
           },
@@ -471,6 +705,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -492,6 +730,10 @@
           "branch"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "branch": {
             "type": "string"
           },
@@ -515,6 +757,10 @@
           "message"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "message": {
             "type": "string"
           },
@@ -532,6 +778,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -551,6 +801,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "maxCount": {
             "minimum": 1,
             "type": "integer",
@@ -571,6 +825,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "branch": {
             "type": "string"
           },
@@ -595,6 +853,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "branch": {
             "type": "string"
           },
@@ -619,6 +881,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir). Pass when working on a different workspace than the server was started on.",
+            "type": "string"
+          },
           "repo": {
             "description": "Repo directory (default: base dir)",
             "type": "string"
@@ -852,7 +1118,7 @@
     },
     {
       "name": "patch.apply",
-      "description": "Apply exact-match search/replace edits to a file. Each edit: {oldText, newText, expectedCount?}. Fails with structured hints (occurrence counts, nearest candidate lines) if not found or ambiguous.",
+      "description": "Apply exact-match search/replace edits to a file. Each edit: {oldText, newText, expectedCount?}. Fails with structured hints (occurrence counts, nearest candidate lines, and a char-level diff of WHICH part differs) if not found or ambiguous. When fuzzy=true, an edit whose oldText is within fuzzyThreshold edits of a candidate is applied with a corrections report — survives whitespace/formatting drift.",
       "inputSchema": {
         "type": "object",
         "required": [
@@ -860,6 +1126,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "edits": {
             "type": "array",
             "items": {
@@ -872,6 +1142,10 @@
                 "expectedCount": {
                   "minimum": 1,
                   "type": "integer"
+                },
+                "fuzzy": {
+                  "description": "When true, an oldText that differs from a candidate by <= fuzzyThreshold single-character edits is applied with a corrections report (survives whitespace/formatting drift). Exact match is still preferred.",
+                  "type": "boolean"
                 },
                 "newText": {
                   "type": "string"
@@ -901,6 +1175,10 @@
           "edits"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "edits": {
             "type": "array",
             "items": {
@@ -922,6 +1200,10 @@
                       "expectedCount": {
                         "minimum": 1,
                         "type": "integer"
+                      },
+                      "fuzzy": {
+                        "description": "When true, an oldText that differs from a candidate by <= fuzzyThreshold single-character edits is applied with a corrections report (survives whitespace/formatting drift). Exact match is still preferred.",
+                        "type": "boolean"
                       },
                       "newText": {
                         "type": "string"
@@ -1124,6 +1406,10 @@
             },
             "type": "array"
           },
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "cwd": {
             "description": "Working directory (default: base dir)",
             "type": "string"
@@ -1165,6 +1451,10 @@
             },
             "type": "array"
           },
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir). Pass when working on a different workspace than the server was started on.",
+            "type": "string"
+          },
           "cmd": {
             "type": "string"
           },
@@ -1195,6 +1485,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
           },
           "cmd": {
             "type": "string"
@@ -1263,6 +1557,10 @@
             },
             "type": "array"
           },
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
           "cmd": {
             "description": "Command to keep running (a server / rebuild loop)",
             "type": "string"
@@ -1303,6 +1601,10 @@
           "pattern"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -1316,13 +1618,35 @@
     },
     {
       "name": "search.grep",
-      "description": "Regex search across files. Returns file/line/text matches. Directory scans are bounded: they skip .git/node_modules/.nc-tools/target/dist/build, skip files over 10MB, and stop after 20k files or 10s (limits.grepMaxScan*) — scanTruncated:true in the result means the budget stopped the scan, so matches may be partial. Directly-targeted file paths are always scanned in full.",
+      "description": "Regex search across files. Returns file/line/text matches. Directory scans are bounded: they skip .git/node_modules/.nc-tools/target/dist/build, skip files over 10MB, and stop after 20k files or 10s (limits.grepMaxScan*) — scanTruncated:true in the result means the budget stopped the scan, so matches may be partial. Directly-targeted file paths are always scanned in full. Supports contextBefore/contextAfter (adjacent lines with line numbers), fileType (extension filter, e.g. \"rs\"), and fixedString (fast literal substring search — no regex compilation).",
       "inputSchema": {
         "type": "object",
         "required": [
           "pattern"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
+          "contextAfter": {
+            "description": "Lines of context after a match (0 = none).",
+            "maximum": 50,
+            "type": "integer"
+          },
+          "contextBefore": {
+            "description": "Lines of context before a match (0 = none).",
+            "maximum": 50,
+            "type": "integer"
+          },
+          "fileType": {
+            "description": "Filter by extension (e.g. \"rs\", \"ts\", \"py\" — no dot). Overrides glob.",
+            "type": "string"
+          },
+          "fixedString": {
+            "description": "Literal substring search (no regex compilation — much faster). The pattern is matched as a plain string, not a regex.",
+            "type": "boolean"
+          },
           "glob": {
             "type": "string"
           },
@@ -1352,6 +1676,10 @@
           "replacement"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for the root path (default: the session workspace).",
+            "type": "string"
+          },
           "dryRun": {
             "description": "true (default) = report only; false = write the changes",
             "type": "boolean"
@@ -1380,13 +1708,17 @@
     },
     {
       "name": "search.semantic",
-      "description": "Locate code by MEANING, not exact text: ask where something is handled (e.g. 'where is journal write integrity validated?') and get files ranked by semantic relevance. Prefer this over search.grep when you do not know the exact identifier or wording — grep matches only literal regex. Runs a local MiniLM transformer (all-MiniLM-L6-v2) fully offline — no API calls; ranking is deterministic per content digest. Returns file, score, bytes; drill into top hits with search.grep or fs.read to pinpoint lines.",
+      "description": "Locate code by MEANING, not exact text: ask where something is handled (e.g. 'where is journal write integrity validated?') and get the EXACT function/struct/line-range ranked by semantic relevance. Each file is chunked at symbol boundaries and each chunk is embedded separately, so the result names the symbol (validate_token, AuthHandler, etc.) and its line range, not just the file. Prefer this over search.grep when you do not know the exact identifier or wording. Runs a local MiniLM transformer (all-MiniLM-L6-v2) fully offline — no API calls; ranking is deterministic per content digest. Drill into top hits with fs.read {offset} to read the matched lines.",
       "inputSchema": {
         "type": "object",
         "required": [
           "query"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "path": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
@@ -1446,7 +1778,7 @@
     },
     {
       "name": "sys.rollback",
-      "description": "Restore the workspace to a snapshot: restores manifest files, removes files created after the snapshot.",
+      "description": "Restore the workspace to a snapshot: restores manifest files, removes files created after the snapshot. Pass paths to restore only those files and leave the rest untouched (partial rollback).",
       "inputSchema": {
         "type": "object",
         "required": [
@@ -1455,6 +1787,13 @@
         "properties": {
           "id": {
             "type": "string"
+          },
+          "paths": {
+            "description": "Restore only these paths from the snapshot; other files are left as-is. This makes a bad edit undoable WITHOUT losing unrelated work.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "additionalProperties": false
@@ -1472,6 +1811,26 @@
         },
         "additionalProperties": false,
         "required": []
+      }
+    },
+    {
+      "name": "sys.snapshotDiff",
+      "description": "Diff two snapshots: what files were added, removed, or modified between them, plus byte totals. Answers 'what changed since I snapshotted before the deploy?' — the review gate before a rollback.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "a",
+          "b"
+        ],
+        "properties": {
+          "a": {
+            "type": "string"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       }
     },
     {
@@ -1522,6 +1881,10 @@
           "path2"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Base dir for relative paths (default: the session workspace).",
+            "type": "string"
+          },
           "context": {
             "description": "Context lines per side (default 3, max 50)",
             "maximum": 50,
@@ -1534,6 +1897,10 @@
           "path2": {
             "description": "Right file - relative to the base dir, or absolute",
             "type": "string"
+          },
+          "wordLevel": {
+            "description": "Word-level diff: when a line pair differs, run a Myers diff on WORD tokens instead of showing the whole line as changed. Returns structured segments (same/added/removed) for each changed line pair.",
+            "type": "boolean"
           }
         },
         "additionalProperties": false

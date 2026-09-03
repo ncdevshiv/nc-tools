@@ -48,6 +48,9 @@ pub struct RepoArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir). Pass when working on a different workspace than the server was started on."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -59,6 +62,9 @@ pub struct DiffArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -69,6 +75,9 @@ pub struct AddArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -78,6 +87,9 @@ pub struct CommitArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -89,6 +101,9 @@ pub struct LogArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -99,6 +114,9 @@ pub struct BranchArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -110,6 +128,9 @@ pub struct CheckoutArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -124,6 +145,9 @@ pub struct PushArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -138,11 +162,14 @@ pub struct PullArgs {
     #[doc = "Repo directory (default: base dir)"]
     #[serde(default)]
     pub repo: Option<String>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 /// Resolve the repo dir for a call; must actually be a git repository.
-fn in_repo(k: &Kernel, repo: Option<&str>) -> Result<PathBuf, ToolError> {
-    let r = resolve_checked(&k.root, repo.unwrap_or("."))?;
+fn in_repo(base: &std::path::Path, repo: Option<&str>) -> Result<PathBuf, ToolError> {
+    let r = resolve_checked(base, repo.unwrap_or("."))?;
     if !r.join(".git").exists() {
         return Err(ToolError::with_hint(
             "ERR_NOT_A_REPO",
@@ -151,6 +178,27 @@ fn in_repo(k: &Kernel, repo: Option<&str>) -> Result<PathBuf, ToolError> {
         ));
     }
     Ok(r)
+}
+
+/// The per-call workspace override every git arg carries (default: kernel base).
+trait HasBaseDir {
+    fn base_dir(&self) -> Option<&str>;
+}
+macro_rules! impl_has_base_dir {
+    ($($t:ty),+ $(,)?) => {
+        $(impl HasBaseDir for $t {
+            fn base_dir(&self) -> Option<&str> {
+                self.baseDir.as_deref()
+            }
+        })+
+    };
+}
+impl_has_base_dir!(RepoArgs, DiffArgs, AddArgs, CommitArgs, LogArgs, BranchArgs, CheckoutArgs, PushArgs, PullArgs, BlameArgs);
+
+/// Effective base directory for a git call: the per-call baseDir override
+/// (workspace override) wins over the server root. Mirrors the fs.* family.
+fn base_of<T: HasBaseDir>(k: &Kernel, a: &T) -> Result<PathBuf, ToolError> {
+    k.base_dir(a.base_dir())
 }
 
 /// Run git in dir with porcelain args; stdout on success, ERR_GIT with
@@ -219,7 +267,8 @@ pub struct StatusHandler;
 impl Handler for StatusHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: RepoArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         let out = git(&r, &["status", "--porcelain=v1", "-b"], k)?;
         let lines: Vec<&str> = out.split('\n').filter(|l| !l.is_empty()).collect();
         let branch = lines
@@ -253,7 +302,8 @@ pub struct DiffHandler;
 impl Handler for DiffHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: DiffArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         let out = match &a.path {
             Some(p) => git(&r, &["diff", "--no-color", "--", p], k)?,
             None => git(&r, &["diff", "--no-color"], k)?,
@@ -266,7 +316,8 @@ pub struct AddHandler;
 impl Handler for AddHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: AddArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         if a.paths.is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "paths must be a non-empty array"));
         }
@@ -283,7 +334,8 @@ pub struct CommitHandler;
 impl Handler for CommitHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: CommitArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         if a.message.trim().is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "message required"));
         }
@@ -297,7 +349,8 @@ pub struct LogHandler;
 impl Handler for LogHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: LogArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         let max_count = a.maxCount.unwrap_or(20);
         let out = git(
             &r,
@@ -333,7 +386,8 @@ pub struct BranchHandler;
 impl Handler for BranchHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: BranchArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         if let Some(name) = &a.name {
             if name.trim().is_empty() {
                 return Err(ToolError::new("ERR_BAD_INPUT", "branch name required"));
@@ -368,7 +422,8 @@ pub struct CheckoutHandler;
 impl Handler for CheckoutHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: CheckoutArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         if a.branch.trim().is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "branch name required"));
         }
@@ -387,7 +442,8 @@ pub struct PushHandler;
 impl Handler for PushHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: PushArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         let remote = a.remote.as_deref().unwrap_or("origin");
         let name = a.branch.as_deref().filter(|s| !s.is_empty());
         let set_upstream = a.setUpstream.unwrap_or(true);
@@ -421,7 +477,8 @@ pub struct PullHandler;
 impl Handler for PullHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: PullArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
         let remote = a.remote.as_deref().unwrap_or("origin");
         let name = a.branch.as_deref().filter(|s| !s.is_empty());
         let ff_only = a.ffOnly.unwrap_or(true);
@@ -462,14 +519,18 @@ pub struct BlameArgs {
     pub lineStart: Option<u64>,
     #[serde(default)]
     pub lineEnd: Option<u64>,
+    #[doc = "Base directory override (default: kernel base dir)"]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct BlameHandler;
 impl Handler for BlameHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: BlameArgs = parse_args(args)?;
-        let r = in_repo(k, a.repo.as_deref())?;
-        let abs = resolve_checked(&k.root, &a.path)?;
+        let base = base_of(k, &a)?;
+        let r = in_repo(&base, a.repo.as_deref())?;
+        let abs = resolve_checked(&base, &a.path)?;
         if !abs.exists() {
             return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such file: {}", a.path), json!({ "path": a.path })));
         }

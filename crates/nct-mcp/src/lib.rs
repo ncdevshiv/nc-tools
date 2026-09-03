@@ -6,6 +6,9 @@ use nct_core::{Kernel, ToolError};
 pub mod sysbatch;
 pub use sysbatch::register_sys_batch;
 
+pub mod coordination;
+pub use coordination::register_coordination;
+
 pub mod doctor;
 pub use doctor::register_sys_doctor;
 
@@ -30,6 +33,7 @@ pub fn build_kernel(workspace: std::path::PathBuf) -> Result<Kernel, ToolError> 
     nct_semantic::register(&mut kernel);
     register_sys_batch(&mut kernel);
     register_sys_doctor(&mut kernel);
+    register_coordination(&mut kernel);
     // Test instrument, opt-in via env so the production surface (and the
     // golden spec) stays untouched: proves the kernel's panic boundary by
     // letting a verifier observe ERR_PANIC + server survival end to end.

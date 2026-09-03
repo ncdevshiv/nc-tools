@@ -118,6 +118,20 @@ impl Kernel {
         self.tools.keys().cloned().collect() // BTreeMap = sorted, like JS listTools()
     }
 
+    /// Resolve the effective base directory for a path-resolving tool. When a
+    /// caller passes an explicit `baseDir` (per-call workspace override) that
+    /// resolves, it wins over the session root — so an agent bound to one
+    /// workspace can still read/observe another without re-rooting the server.
+    /// The override must exist; a bad override is an error, not a silent
+    /// fallback to the session root (that is precisely the "results come back
+    /// relative to the wrong workspace" bug).
+    pub fn base_dir(&self, override_dir: Option<&str>) -> Result<PathBuf, ToolError> {
+        match override_dir {
+            Some(d) if !d.is_empty() => crate::paths::resolve_checked(&self.root, d),
+            _ => Ok(self.root.clone()),
+        }
+    }
+
     /// MCP clients expose kernel names with underscores (fs_stat); kernel
     /// names are dotted (fs.stat). Several agent loops additionally render
     /// MCP tools as "<server-name>-<tool>" (Qwen sent `nc-tools-fs.read` for
@@ -330,13 +344,18 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// Short session id from time+pid — stable per server process, no external rng.
+/// Short session id from time+pid+a monotonic counter, stable per server
+/// process. The counter guarantees two kernels constructed in the same process
+/// at the same millisecond still get DISTINCT sids (time+pid alone collides —
+/// which would wrongly resume one agent's identity onto another server).
 fn session_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("{:x}-{:x}", ms, std::process::id())
+    let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("{:x}-{:x}-{:x}", ms, std::process::id(), c)
 }
 
 #[cfg(test)]
