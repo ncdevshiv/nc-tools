@@ -99,7 +99,10 @@ impl Handler for SemanticHandler {
     // digest-based cache: (file::chunkKey, digest) -> vector, persisted as JSONL
     // Chunk key is symbol name + line range so the same symbol re-scored after a
     // content change gets a fresh vector (digest changes → new key).
-    let index_path = k.root.join(".nc-tools").join("semantic-index.jsonl");
+    // The index lives under the EFFECTIVE search base (baseDir override and
+    // session anchor win over the server root), so indexing workspace X never
+    // writes X's vectors into the tools repo's .nc-tools.
+    let index_path = base.join(".nc-tools").join("semantic-index.jsonl");
     let mut cache = load_index(&index_path);
 
     let mut files: Vec<PathBuf> = Vec::new();

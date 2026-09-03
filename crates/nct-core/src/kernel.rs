@@ -77,6 +77,12 @@ pub struct CallOutcome {
 
 pub struct Kernel {
     pub root: PathBuf,
+    /// Session-scoped default base (the MCP `roots` anchor). When a client
+    /// tells us its workspace after initialize, this is set; `base_dir(None)`
+    /// then resolves relative paths against IT instead of the server root —
+    /// without ever mutating `root` (the startup anchor stays immutable, so
+    /// journal/snapshot/coordination side-channels keep a stable home).
+    pub default_base: std::sync::RwLock<Option<PathBuf>>,
     pub cfg: Config,
     pub journal: Journal,
     pub session_env: SessionEnv,
@@ -96,6 +102,7 @@ impl Kernel {
         let journal = Journal::new(root.join(".nc-tools").join("journal.jsonl"))?;
         Ok(Kernel {
             root,
+            default_base: std::sync::RwLock::new(None),
             cfg,
             journal,
             session_env: SessionEnv::new(),
@@ -134,14 +141,15 @@ impl Kernel {
         self.tools.keys().cloned().collect() // BTreeMap = sorted, like JS listTools()
     }
 
-    /// Resolve the effective base directory for a path-resolving tool. When a
-    /// caller passes an explicit `baseDir` (per-call workspace override) that
-    /// resolves, it wins over the session root — so an agent bound to one
-    /// workspace can still read/observe another without re-rooting the server.
-    /// The override must exist as a directory; a bad override is an error,
-    /// not a silent fallback to the session root and not a lexical path that
-    /// quietly points nowhere (either is precisely the "results come back
-    /// relative to the wrong workspace" bug).
+    /// Resolve the effective base directory for a path-resolving tool.
+    /// Priority: explicit per-call `baseDir` override → session default base
+    /// (set from the client's MCP `roots` at handshake) → the server root.
+    /// When a caller passes an explicit `baseDir` that resolves, it wins over
+    /// everything — so an agent can still observe another workspace without
+    /// re-rooting the session. The override must exist as a directory; a bad
+    /// override is an error, not a silent fallback to the session root and
+    /// not a lexical path that quietly points nowhere (either is precisely
+    /// the "results come back relative to the wrong workspace" bug).
     pub fn base_dir(&self, override_dir: Option<&str>) -> Result<PathBuf, ToolError> {
         match override_dir {
             Some(d) if !d.is_empty() => {
@@ -155,8 +163,34 @@ impl Kernel {
                 }
                 Ok(resolved)
             }
-            _ => Ok(self.root.clone()),
+            _ => {
+                if let Some(db) = self.default_base.read().unwrap().as_ref() {
+                    return Ok(db.clone());
+                }
+                Ok(self.root.clone())
+            }
         }
+    }
+
+    /// Bind the session-scoped default base (the MCP `roots` anchor). Only
+    /// accepts an EXISTING directory; a non-directory candidate is refused
+    /// and the previous value is kept — handshake anchoring can improve the
+    /// session but never silently degrades it. The candidate is canonicalized
+    /// (dunce, matching Kernel::new) so comparisons against base_dir results
+    /// are stable. Returns whether the new base was accepted.
+    pub fn set_default_base(&self, dir: &std::path::Path) -> bool {
+        let canonical = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if !canonical.is_dir() {
+            return false;
+        }
+        *self.default_base.write().unwrap() = Some(canonical);
+        true
+    }
+
+    /// Current session default base, if one was anchored from the client's
+    /// roots (used by sys.workspace to make the anchor observable).
+    pub fn current_default_base(&self) -> Option<PathBuf> {
+        self.default_base.read().unwrap().clone()
     }
 
     /// MCP clients expose kernel names with underscores (fs_stat); kernel
@@ -560,5 +594,45 @@ mod provenance_tests {
         for ev in &events {
             assert_eq!(ev["agentId"], json!(null), "no agent bound -> agentId null: {ev}");
         }
+    }
+
+    /// The session default base (MCP `roots` anchor) drives base_dir(None)
+    /// without ever mutating Kernel.root, and an explicit per-call baseDir
+    /// still wins over it. A non-directory candidate is refused.
+    #[test]
+    fn default_base_drives_none_resolution_but_not_overrides() {
+        let k = kernel();
+        let target = std::env::temp_dir().join(format!(
+            "nct-defbase-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&target).unwrap();
+
+        // before anchoring: base_dir(None) is the server root
+        assert_eq!(k.base_dir(None).unwrap(), k.root);
+
+        // anchor: None now resolves to the anchor; root stays immutable
+        assert!(k.set_default_base(&target), "existing dir must be accepted");
+        assert_eq!(k.base_dir(None).unwrap(), dunce::canonicalize(&target).unwrap());
+        assert_eq!(k.root, /* unchanged */ k.root);
+        assert!(k.current_default_base().is_some());
+
+        // explicit override still wins over the anchor (resolve_checked
+        // canonicalizes, so compare canonical forms)
+        assert_eq!(
+            k.base_dir(Some(k.root.to_str().unwrap())).unwrap(),
+            dunce::canonicalize(&k.root).unwrap_or_else(|_| k.root.clone())
+        );
+
+        // a non-directory candidate is refused, previous anchor kept
+        let bogus = target.join("does-not-exist");
+        assert!(!k.set_default_base(&bogus), "nonexistent dir must be refused");
+        assert_eq!(k.base_dir(None).unwrap(), dunce::canonicalize(&target).unwrap());
+
+        let _ = std::fs::remove_dir_all(&target);
     }
 }

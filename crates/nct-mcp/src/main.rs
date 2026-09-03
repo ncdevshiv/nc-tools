@@ -3,11 +3,10 @@
 // JSON message per line, structured tool results as text content, isError on
 // failures, idle auto-exit (NCTOOLS_MCP_IDLE_MS) so dormant agents free the
 // process until the next call.
-use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::io::{BufRead, Write};use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nct_mcp::{build_kernel, SERVER_NAME, SERVER_VERSION};
+use nct_mcp::{build_kernel, roots, SERVER_NAME, SERVER_VERSION};
 use serde_json::{json, Value};
 
 fn rpc_result(id: Value, result: Value) -> String {
@@ -174,9 +173,14 @@ fn main() {
     }
 
     let stdin = std::io::stdin();
+    let mut stdin_lock = stdin.lock();
     let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    loop {
+        let mut line = String::new();
+        match stdin_lock.read_line(&mut line) {
+            Ok(0) | Err(_) => break, // EOF or read error
+            Ok(_) => {}
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -211,14 +215,60 @@ fn main() {
                         &json!({ "agentId": agent_id }),
                     );
                 }
-                rpc_result(
-                    id,
-                    json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": { "tools": { "listChanged": false } },
-                        "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                    }),
-                )
+                // Spec-correct workspace anchoring (MCP roots): when the
+                // client declares the roots capability, ask IT for its
+                // workspace roots and bind the first filesystem directory as
+                // the session default base. This is what makes an agent
+                // working on F:\ncfs get ncfs results even though the server
+                // was rooted on F:\nc-tools — without mutating Kernel.root,
+                // so journal/coordination side-channels keep their home.
+                // Any failure here is reported in the handshake result
+                // (anchoring.requested/anchored) and NEVER fatal.
+                let client_caps = params.get("capabilities").cloned().unwrap_or(json!({}));
+                let mut anchoring = json!({ "requested": false });
+                if roots::client_supports_roots(&client_caps) {
+                    anchoring["requested"] = json!(true);
+                    match server_roots_list(&mut stdin_lock, &mut stdout) {
+                        Some(result) => {
+                            if let Some(target) = roots::first_root_from_result(&result) {
+                                let accepted = kernel.set_default_base(&target);
+                                anchoring["anchored"] = json!(accepted);
+                                anchoring["base"] = json!(target.display().to_string());
+                                if !accepted {
+                                    anchoring["reason"] =
+                                        json!("first root is not an existing directory");
+                                }
+                            } else {
+                                anchoring["anchored"] = json!(false);
+                                anchoring["reason"] = json!("no filesystem directory in roots/list");
+                            }
+                        }
+                        None => {
+                            anchoring["anchored"] = json!(false);
+                            anchoring["reason"] = json!("client did not answer roots/list");
+                        }
+                    }
+                }
+                let mut result = json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": { "listChanged": false },
+                        "roots": { "listChanged": false },
+                    },
+                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
+                });
+                result["anchoring"] = anchoring;
+                rpc_result(id, result)
+            }
+            "notifications/roots/list_changed" => {
+                // The client moved/changed workspaces mid-session: re-ask for
+                // roots and re-anchor the session default base.
+                if let Some(result) = server_roots_list(&mut stdin_lock, &mut stdout) {
+                    if let Some(target) = roots::first_root_from_result(&result) {
+                        kernel.set_default_base(&target);
+                    }
+                }
+                continue; // notification: no response
             }
             m if m.starts_with("notifications/") => continue, // no response for notifications
             "tools/list" => rpc_result(id, json!({ "tools": kernel.descriptors() })),
@@ -234,4 +284,65 @@ fn main() {
         writeln!(stdout, "{resp}").ok();
         let _ = stdout.flush();
     }
+}
+
+/// Server → client request over stdio: send `roots/list`, then read lines
+/// until the response with our id arrives. Client REQUESTS interleaved before
+/// the response are answered inline (only ping/tools are safe to auto-serve
+/// during a handshake; anything else gets a deferred-method error rather than
+/// being dropped); notifications are ignored. Returns the result object, or
+/// None on EOF/garbage (never panics, never hangs forever — the caller treats
+/// None as "client does not support roots").
+fn server_roots_list(
+    stdin: &mut std::io::StdinLock<'static>,
+    stdout: &mut std::io::Stdout,
+) -> Option<Value> {
+    const SERVER_REQ_ID: i64 = -1_000_001; // negative: cannot collide with client ids
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": SERVER_REQ_ID,
+        "method": "roots/list",
+        "params": {},
+    });
+    writeln!(stdout, "{req}").ok()?;
+    stdout.flush().ok()?;
+    for _ in 0..64 {
+        // bounded: a client that floods 64 non-response lines is broken
+        let mut line = String::new();
+        match stdin.read_line(&mut line) {
+            Ok(0) => return None, // EOF
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
+            continue; // garbage line — skip
+        };
+        let msg_id = msg.get("id").cloned().unwrap_or(Value::Null);
+        if msg.get("method").is_some() {
+            // interleaved client message while our request is in flight
+            let method = msg["method"].as_str().unwrap_or_default();
+            let resp = if method == "ping" {
+                rpc_result(msg_id, json!({}))
+            } else if method.starts_with("notifications/") {
+                continue;
+            } else {
+                rpc_error(msg_id, -32601, "server busy with roots/list; resend after handshake")
+            };
+            writeln!(stdout, "{resp}").ok();
+            stdout.flush().ok();
+            continue;
+        }
+        if msg_id == json!(SERVER_REQ_ID) {
+            if msg.get("error").is_some() {
+                return None; // client explicitly refused (capability lied)
+            }
+            return Some(msg.get("result").cloned().unwrap_or(Value::Null));
+        }
+        // unrelated response — ignore
+    }
+    None
 }

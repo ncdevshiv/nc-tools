@@ -80,7 +80,7 @@ pub fn fetch_content(k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         // load cached validators even on refresh — that's what makes the
         // conditional GET (If-None-Match → 304) possible; refresh only skips
         // the freshness short-circuit
-        let cached = cache::load(&k.root, &a.url);
+        let cached = cache::load(&cache::root_for(k), &a.url);
         if let Some(entry) = &cached {
             if !a.refresh.unwrap_or(false) && cache_fresh(entry, ttl) {
                 return Ok(cached_result(entry, "hit", started, a.maxTokens));
@@ -102,7 +102,7 @@ pub fn fetch_content(k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         // 304 Not Modified → cached copy is still the truth
         if outcome.status == 304 {
             let entry = cached.expect("304 implies a cached entry with validators");
-            let _ = cache::store(&k.root, &cache::CacheEntry {
+            let _ = cache::store(&cache::root_for(k), &cache::CacheEntry {
                 url: entry.url.clone(),
                 etag: entry.etag.clone(),
                 last_modified: entry.last_modified.clone(),
@@ -200,7 +200,7 @@ pub fn fetch_content(k: &Kernel, args: &Value) -> Result<Value, ToolError> {
             body: body_store.clone(),
             fetched_at: nct_core::now_iso(),
         };
-        cache::store(&k.root, &entry)?;
+        cache::store(&cache::root_for(k), &entry)?;
 
         let tokens = estimate_tokens(&body_store);
         let result = json!({

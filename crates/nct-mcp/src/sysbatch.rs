@@ -100,9 +100,17 @@ impl Handler for WorkspaceHandler {
         Ok(json!({
             "root": base.display().to_string(),
             "serverRoot": k.root.display().to_string(),
+            "anchored": k.current_default_base().is_some(),
             "platform": nct_core::platform_str(),
             "node": Value::Null,
             "git": git,
+            "capabilities": {
+                "fs": true,
+                "search": true,
+                "proc": true,
+                "batch": true,
+                "git": git,
+            },
         }))
     }
 }
@@ -523,6 +531,17 @@ mod retry_tests {
         let def = WorkspaceHandler.call(&k, &json!({})).unwrap();
         assert_eq!(def["root"], json!(k.root.display().to_string()));
         assert_eq!(def["serverRoot"], json!(k.root.display().to_string()));
+        assert_eq!(def["anchored"], json!(false), "no anchor yet");
+        assert_eq!(def["capabilities"]["fs"], json!(true));
+
+        // with the session anchor set (as the MCP roots handshake does),
+        // base_dir(None) reports the anchor and anchored flips true
+        k.set_default_base(&target);
+        let anchored = WorkspaceHandler.call(&k, &json!({})).unwrap();
+        assert_eq!(anchored["root"], json!(dunce::canonicalize(&target).unwrap().display().to_string()));
+        assert_eq!(anchored["anchored"], json!(true));
+        k.set_default_base(&std::path::Path::new("/nonexistent-anchor-xyz")); // refused
+        assert_eq!(WorkspaceHandler.call(&k, &json!({})).unwrap()["anchored"], json!(true), "refused anchor keeps the old one");
 
         // baseDir: the OTHER workspace and its real git state
         // (compare canonicalized — resolve_checked returns the long path)

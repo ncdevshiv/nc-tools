@@ -15,6 +15,8 @@ pub use replay::register_replay;
 pub mod doctor;
 pub use doctor::register_sys_doctor;
 
+pub mod roots;
+
 pub const SERVER_NAME: &str = nct_core::MCP_SERVER_NAME;
 pub const SERVER_VERSION: &str = "0.2.0";
 
