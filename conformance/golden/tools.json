@@ -1,6 +1,6 @@
 {
   "generatedFrom": "rust/nct-mcp (build_kernel)",
-  "toolCount": 81,
+  "toolCount": 84,
   "tools": [
     {
       "name": "agent.compact",
@@ -961,6 +961,43 @@
       }
     },
     {
+      "name": "git.cherryPick",
+      "description": "Cherry-pick one or more commits onto the current branch: applies them in order, no-commit mode is testable. Aborts on conflict with structured output.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "commits"
+        ],
+        "properties": {
+          "abort": {
+            "description": "Abort an in-progress cherry-pick instead of applying",
+            "type": "boolean"
+          },
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
+          "commits": {
+            "description": "Commit shas to cherry-pick, applied in order",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "noCommit": {
+            "description": "no-commit mode: apply to index/worktree without committing",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "Repo directory (default: base dir)",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "git.commit",
       "description": "Commit staged changes.",
       "inputSchema": {
@@ -1104,6 +1141,36 @@
       }
     },
     {
+      "name": "git.stash",
+      "description": "Stash working-tree changes: push (save + revert, optional message), pop (restore most recent), apply (restore, keep stash), list (all stashes), drop (delete one). The daily save/resume workflow.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
+          "message": {
+            "description": "Message for push; stash ref for drop (default stash at 0)",
+            "type": "string"
+          },
+          "op": {
+            "description": "push | pop | apply | list | drop (default: list)",
+            "type": "string"
+          },
+          "repo": {
+            "description": "Repo directory (default: base dir)",
+            "type": "string"
+          },
+          "stash": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
       "name": "git.status",
       "description": "Git status: repo path, branch, head, changed files.",
       "inputSchema": {
@@ -1115,6 +1182,41 @@
           },
           "repo": {
             "description": "Repo directory (default: base dir)",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": []
+      }
+    },
+    {
+      "name": "git.tag",
+      "description": "Tags: list (all tags), create (annotated with -m message, or lightweight), delete.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseDir": {
+            "description": "Base directory override (default: kernel base dir)",
+            "type": "string"
+          },
+          "message": {
+            "description": "Message for an annotated tag (omit = lightweight)",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tag name for create/delete",
+            "type": "string"
+          },
+          "op": {
+            "description": "list | create | delete (default: list)",
+            "type": "string"
+          },
+          "repo": {
+            "description": "Repo directory (default: base dir)",
+            "type": "string"
+          },
+          "target": {
+            "description": "Ref the tag points at (create only; default HEAD)",
             "type": "string"
           }
         },

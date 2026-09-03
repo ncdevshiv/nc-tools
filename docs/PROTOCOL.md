@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 81 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 84 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
