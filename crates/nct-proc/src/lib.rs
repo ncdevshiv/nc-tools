@@ -142,6 +142,10 @@ pub struct KillArgs {
 #[serde(deny_unknown_fields)]
 pub struct EnvNameArgs {
     pub name: String,
+    /// When true, reveal a secret-valued variable (name matching
+    /// *KEY/*TOKEN/*SECRET/*PASSWORD) in full. Default masks it as "***".
+    #[serde(default)]
+    pub reveal: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1158,6 +1162,18 @@ fn valid_env_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// True when the env var looks like a credential (API key, token, secret,
+/// password, private key, auth). These are redacted by default on env.get so
+/// they never leak into the journal transcript.
+fn is_secret_env(name: &str) -> bool {
+    const MARKERS: &[&str] = &["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "PRIVATE_KEY", "APIKEY", "ACCESS_KEY"];
+    let upper = name.to_uppercase();
+    if upper.contains("PRIVATE") && upper.contains("KEY") {
+        return true;
+    }
+    MARKERS.iter().any(|m| upper.contains(m))
+}
+
 pub struct EnvGetHandler;
 impl Handler for EnvGetHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
@@ -1169,12 +1185,21 @@ impl Handler for EnvGetHandler {
                 json!({ "got": a.name }),
             ));
         }
+        // Secret masking: names that look like credentials are redacted from
+        // the default output so they never leak into the journal. Only an
+        // explicit reveal=true shows them in full.
+        let is_secret = is_secret_env(&a.name);
+        let reveal = a.reveal.unwrap_or(false);
+        let mask = |v: String| -> String {
+            if is_secret && !reveal { "***".to_string() } else { v }
+        };
         if k.session_env.contains(&a.name) {
-            return Ok(json!({ "name": a.name, "value": k.session_env.get(&a.name), "source": "session" }));
+            let v = k.session_env.get(&a.name).unwrap_or_default();
+            return Ok(json!({ "name": a.name, "value": mask(v), "source": "session", "masked": is_secret && !reveal }));
         }
         match std::env::var(&a.name) {
-            Ok(v) => Ok(json!({ "name": a.name, "value": v, "source": "host" })),
-            Err(_) => Ok(json!({ "name": a.name, "value": Value::Null, "source": "unset" })),
+            Ok(v) => Ok(json!({ "name": a.name, "value": mask(v), "source": "host", "masked": is_secret && !reveal })),
+            Err(_) => Ok(json!({ "name": a.name, "value": Value::Null, "source": "unset", "masked": false })),
         }
     }
 }
@@ -1295,5 +1320,68 @@ mod base_dir_tests {
         let cwd = result["stdout"].as_str().unwrap_or("");
         assert!(!cwd.to_lowercase().contains("srv2"), "must NOT fall back to the server root");
         let _ = fs::remove_dir_all(&server_root);
+    }
+}
+
+#[cfg(test)]
+mod env_mask_tests {
+    use super::*;
+
+    #[test]
+    fn secret_names_are_detected() {
+        for s in ["API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY", "PRIVATE_KEY", "AUTH_TOKEN"] {
+            assert!(is_secret_env(s), "should mask: {s}");
+        }
+        for s in ["PATH", "HOME", "LANG", "NCTOOLS_WORKSPACE", "OPENAI_MODEL"] {
+            assert!(!is_secret_env(s), "should NOT mask: {s}");
+        }
+    }
+
+    #[test]
+    fn env_get_masks_secret_by_default() {
+        std::env::set_var("NCTOOLS_TEST_MASK_KEY", "supersecret");
+        let dir = std::env::temp_dir().join(format!("nct-envmask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = Kernel::new(dir.clone()).unwrap();
+        register(&mut k);
+        let out = k.call("env.get", &json!({ "name": "NCTOOLS_TEST_MASK_KEY" }));
+        assert!(out.ok);
+        let v = out.result.unwrap();
+        assert_eq!(v["value"], json!("***"), "secret must be masked by default");
+        assert_eq!(v["masked"], json!(true));
+        std::env::remove_var("NCTOOLS_TEST_MASK_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_get_reveal_shows_secret() {
+        std::env::set_var("NCTOOLS_TEST_REVEAL_TOKEN", "visible");
+        let dir = std::env::temp_dir().join(format!("nct-envreveal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = Kernel::new(dir.clone()).unwrap();
+        register(&mut k);
+        let out = k.call("env.get", &json!({ "name": "NCTOOLS_TEST_REVEAL_TOKEN", "reveal": true }));
+        assert!(out.ok);
+        let v = out.result.unwrap();
+        assert_eq!(v["value"], json!("visible"));
+        assert_eq!(v["masked"], json!(false));
+        std::env::remove_var("NCTOOLS_TEST_REVEAL_TOKEN");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_secret_env_is_never_masked() {
+        std::env::set_var("NCTOOLS_TEST_PLAIN", "hello");
+        let dir = std::env::temp_dir().join(format!("nct-envplain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = Kernel::new(dir.clone()).unwrap();
+        register(&mut k);
+        let out = k.call("env.get", &json!({ "name": "NCTOOLS_TEST_PLAIN" }));
+        assert!(out.ok);
+        let v = out.result.unwrap();
+        assert_eq!(v["value"], json!("hello"));
+        assert_eq!(v["masked"], json!(false));
+        std::env::remove_var("NCTOOLS_TEST_PLAIN");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

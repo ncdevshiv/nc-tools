@@ -16,6 +16,8 @@ url = { workspace = true }
 encoding_rs = { workspace = true }
 indexmap = { workspace = true }
 chrono = { workspace = true }
+pdf-extract = "0.7"
+feed-rs = "2"
 
 [lints]
 workspace = true

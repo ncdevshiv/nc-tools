@@ -151,6 +151,27 @@ pub fn fetch_content(k: &Kernel, args: &Value) -> Result<Value, ToolError> {
             (format!("```json\n{}\n```", outcome.body.trim()), None, Vec::new(), 1.0, "json".to_string())
         } else if content_type.starts_with("text/plain") {
             (outcome.body.clone(), None, Vec::new(), 1.0, "text".to_string())
+        } else if content_type == "application/pdf" || content_type == "application/x-pdf" || content_type.contains("pdf") {
+            // PDF text extraction (pure Rust via pdf-extract) — an agent can now
+            // read a PDF's text without a browser or an external binary.
+            match crate::pdf::extract_text(outcome.body.as_bytes()) {
+                Ok(text) => (text, None, Vec::new(), 1.0, "pdf".to_string()),
+                Err(e) => return Err(ToolError::with_hint(
+                    "ERR_NET",
+                    format!("pdf extraction failed: {e}"),
+                    json!({ "url": a.url, "status": outcome.status, "hint": "the pdf may be scanned/image-only; use a rendering tool" }),
+                )),
+            }
+        } else if content_type.contains("xml") && outcome.body.contains("<rss") || content_type.contains("xml") && outcome.body.contains("<feed") || content_type.contains("atom") || content_type.contains("rss") {
+            // RSS / Atom feed: parse into structured {title, entries:[{title,link,published,summary}]}.
+            match crate::feed::parse_feed(&outcome.body) {
+                Ok(v) => {
+                    let title = v["title"].as_str().map(|s| s.to_string());
+                    let summary = serde_json::to_string(&v).unwrap_or_default();
+                    (summary, title, Vec::new(), 1.0, "feed".to_string())
+                }
+                Err(_) => (outcome.body.clone(), None, Vec::new(), 1.0, "xml".to_string()),
+            }
         } else {
             return Err(ToolError::with_hint(
                 "ERR_NET",
