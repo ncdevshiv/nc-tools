@@ -11,6 +11,10 @@
           "summary"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          },
           "nextHint": {
             "description": "Optional hint for the next step (e.g. the next file to touch). Returned on resume verbatim.",
             "type": "string"
@@ -29,6 +33,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          },
           "status": {
             "type": "string"
           },
@@ -45,8 +53,13 @@
       "description": "List the workspace agent roster chronologically: every agent identity (id, name, sid, createdAt, lastSeen, status, task, toolCount) that has touched this workspace. Sorted newest-first.",
       "inputSchema": {
         "type": "object",
+        "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
-        "properties": {},
         "required": []
       }
     },
@@ -59,6 +72,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          },
           "holdMs": {
             "description": "Auto-release after this many ms even if this agent crashes (default 10 min).",
             "minimum": 1000,
@@ -78,8 +95,13 @@
       "description": "List active advisory locks: path, agentId, heldAt, expiresAt, expired state. Call this before writing to a path to see whether another agent is mid-edit there.",
       "inputSchema": {
         "type": "object",
+        "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
-        "properties": {},
         "required": []
       }
     },
@@ -89,6 +111,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          },
           "from": {
             "type": "string"
           },
@@ -115,6 +141,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base). Used to exclude this workspace's own agents from the peer list.",
+            "type": "string"
+          },
           "workspace": {
             "description": "Narrow to agents last seen in this workspace path (substring match).",
             "type": "string"
@@ -133,6 +163,10 @@
           "message"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          },
           "kind": {
             "description": "note | question | request | handoff | bug | hold | resume",
             "type": "string"
@@ -158,6 +192,10 @@
             "description": "A known agent id to restore (crash/compaction continuation). When present and in the roster, the identity is resumed with a new lastSeen.",
             "type": "string"
           },
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base). Use this when the agent works on a DIFFERENT workspace than the server root — the roster/locks/global index then target the effective workspace.",
+            "type": "string"
+          },
           "name": {
             "description": "Human label for the roster (default: derived from agentId or a counter).",
             "type": "string"
@@ -179,6 +217,10 @@
           "agentId": {
             "description": "Which agent to resume. Defaults to this session's agent (by sid) if omitted. When omitted and no prior checkpoint exists, no-op.",
             "type": "string"
+          },
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
           }
         },
         "additionalProperties": false,
@@ -190,8 +232,13 @@
       "description": "Full coordination snapshot: who is here, what each is working on, active locks, whether this agent is locked out of any path, and recent inter-agent messages. The 'look around before you start' tool.",
       "inputSchema": {
         "type": "object",
+        "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
-        "properties": {},
         "required": []
       }
     },
@@ -204,6 +251,10 @@
           "path"
         ],
         "properties": {
+          "baseDir": {
+            "description": "Workspace to coordinate against (default: the session base).",
+            "type": "string"
+          },
           "path": {
             "type": "string"
           }
@@ -301,6 +352,10 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "reveal": {
+            "description": "When true, reveal a secret-valued variable (name matching *KEY/*TOKEN/*SECRET/*PASSWORD) in full. Default masks it as \"***\".",
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -382,6 +437,10 @@
           "from": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
+          },
+          "guardLocks": {
+            "description": "When true, refuse the copy if ANOTHER agent holds a live advisory lock on the destination (hard-write-guard). Default false = advisory.",
+            "type": "boolean"
           },
           "recursive": {
             "type": "boolean"
@@ -485,6 +544,10 @@
           "from": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
             "type": "string"
+          },
+          "guardLocks": {
+            "description": "When true, refuse the move if ANOTHER agent holds a live advisory lock on the destination (hard-write-guard). Default false = advisory.",
+            "type": "boolean"
           },
           "to": {
             "description": "Path — relative to the base dir, or absolute (any location allowed)",
@@ -1810,6 +1873,10 @@
         "properties": {
           "deep": {
             "description": "Include runtime probes (writable root, cargo available)",
+            "type": "boolean"
+          },
+          "repair": {
+            "description": "When true, auto-fix the healthy-but-degraded cases the doctor can repair: superseded/stale coordination rows and orphaned lock releases.",
             "type": "boolean"
           }
         },

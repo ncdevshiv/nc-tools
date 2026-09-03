@@ -110,6 +110,11 @@ pub struct RegisterArgs {
     pub name: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    /// Workspace to coordinate against (default: the session base). Use this
+    /// when the agent works on a DIFFERENT workspace than the server root —
+    /// the roster/locks/global index then target the effective workspace.
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 struct AgentRecord {
@@ -137,7 +142,11 @@ struct AgentRecord {
 ///   * {agentId} absent + no agent for this sid -> mint `agent-<n>` where n is
 ///     the next chronological index.
 fn register_impl(k: &Kernel, a: &RegisterArgs) -> Result<Value, ToolError> {
-    let path = roster_path(&k.root);
+    // Coordinate against the EFFECTIVE workspace: baseDir overrides the server
+    // root, so an agent working on a different project via baseDir puts its
+    // roster/locks/global-index entries in that project — not the tools repo.
+    let root = k.base_dir(a.baseDir.as_deref())?;
+    let path = roster_path(&root);
     let roster = read_lines(&path);
     let record = if let Some(want) = &a.agentId {
         if let Some(existing) = roster.iter().find(|e| e["agentId"].as_str() == Some(want)) {
@@ -238,7 +247,7 @@ fn register_impl(k: &Kernel, a: &RegisterArgs) -> Result<Value, ToolError> {
                 "agentId": record.agent_id,
                 "name": record.name,
                 "role": record.role,
-                "workspace": k.root.display().to_string(),
+                "workspace": root.display().to_string(),
                 "status": record.status,
                 "task": record.task,
                 "lastSeen": now_iso(),
@@ -271,10 +280,20 @@ impl Handler for RegisterHandler {
 
 pub struct ListHandler;
 impl Handler for ListHandler {
-    fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
-        let roster = roster_snapshot(&k.root);
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: CoordArgs = parse_args(args)?;
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let roster = roster_snapshot(&root);
         Ok(json!({ "agents": roster, "total": roster.len() }))
     }
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CoordArgs {
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -283,13 +302,17 @@ pub struct PeersArgs {
     /// Narrow to agents last seen in this workspace path (substring match).
     #[serde(default)]
     pub workspace: Option<String>,
+    /// Workspace to coordinate against (default: the session base). Used to
+    /// exclude this workspace's own agents from the peer list.
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct PeersHandler;
 impl Handler for PeersHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: PeersArgs = parse_args(args)?;
-        let current_ws = k.root.display().to_string();
+        let current_ws = k.base_dir(a.baseDir.as_deref())?.display().to_string();
         let mut peers: Vec<Value> = read_lines(&global_path())
             .into_iter()
             .filter(|e| {
@@ -361,6 +384,9 @@ pub struct HeartbeatArgs {
     pub status: Option<String>,
     #[serde(default)]
     pub task: Option<String>,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 /// Resolve the calling session's agentId (from the roster). If it has not
@@ -383,10 +409,11 @@ pub struct HeartbeatHandler;
 impl Handler for HeartbeatHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: HeartbeatArgs = parse_args(args)?;
-        let agent_id = my_agent_id(&k.root, &k.sid);
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let agent_id = my_agent_id(&root, &k.sid);
         let status = a.status.unwrap_or_else(|| "working".to_string());
         let task = a.task.unwrap_or_default();
-        let path = roster_path(&k.root);
+        let path = roster_path(&root);
         // Load current state (last row for this agent), overlay, re-append.
         let roster = read_lines(&path);
         let prior = roster.iter().rev().find(|e| e["agentId"].as_str() == Some(agent_id.as_str()));
@@ -412,12 +439,14 @@ impl Handler for HeartbeatHandler {
 
 pub struct StatusHandler;
 impl Handler for StatusHandler {
-    fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
-        let roster = roster_snapshot(&k.root);
-        let locks = locks_snapshot(&k.root);
-        let msgs = messages_snapshot(&k.root, None, 30);
-        let my_agent = my_agent_id(&k.root, &k.sid);
-        let my_active = agents_total_tools(&k.root, &my_agent);
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: CoordArgs = parse_args(args)?;
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let roster = roster_snapshot(&root);
+        let locks = locks_snapshot(&root);
+        let msgs = messages_snapshot(&root, None, 30);
+        let my_agent = my_agent_id(&root, &k.sid);
+        let my_active = agents_total_tools(&root, &my_agent);
         let locked_out: Vec<String> = locks
             .iter()
             .filter(|l| l["agentId"].as_str() != Some(my_agent.as_str()) && l["expired"] != json!(true))
@@ -464,6 +493,9 @@ pub struct PostArgs {
     /// note | question | request | handoff | bug | hold | resume
     #[serde(default)]
     pub kind: Option<String>,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct PostHandler;
@@ -473,17 +505,18 @@ impl Handler for PostHandler {
         if a.message.trim().is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "message must be a non-empty string"));
         }
-        let from = my_agent_id(&k.root, &k.sid);
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let from = my_agent_id(&root, &k.sid);
         let kind = a.kind.unwrap_or_else(|| "note".to_string());
         let entry = json!({
             "ts": now_iso(),
-            "seq": messages_seq(&k.root),
+            "seq": messages_seq(&root),
             "from": from,
             "to": a.to,
             "kind": kind,
             "message": a.message,
         });
-        append_line(&messages_path(&k.root), &entry)?;
+        append_line(&messages_path(&root), &entry)?;
         Ok(json!({ "posted": true, "from": from, "to": a.to, "kind": kind, "seq": entry["seq"] }))
     }
 }
@@ -508,13 +541,17 @@ pub struct MessagesArgs {
     pub lastN: Option<u64>,
     #[serde(default)]
     pub kind: Option<String>,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct MessagesHandler;
 impl Handler for MessagesHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: MessagesArgs = parse_args(args)?;
-        let msgs = messages_snapshot(&k.root, Some(&a), a.lastN.unwrap_or(50) as usize);
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let msgs = messages_snapshot(&root, Some(&a), a.lastN.unwrap_or(50) as usize);
         Ok(json!({ "messages": msgs, "total": msgs.len() }))
     }
 }
@@ -570,20 +607,24 @@ pub struct LockArgs {
     #[serde(default)]
     #[schemars(range(min = 1000, max = 3600000))]
     pub holdMs: Option<u64>,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct LockHandler;
 impl Handler for LockHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: LockArgs = parse_args(args)?;
-        let path = nct_core::paths::resolve_checked(&k.root, &a.path)?;
-        let path_str = nct_core::helpers::rel_slash(&k.root, &path);
-        let agent_id = my_agent_id(&k.root, &k.sid);
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let path = nct_core::paths::resolve_checked(&root, &a.path)?;
+        let path_str = nct_core::helpers::rel_slash(&root, &path);
+        let agent_id = my_agent_id(&root, &k.sid);
         let hold_ms = a.holdMs.unwrap_or(600_000);
         let held_at = now_iso();
         let expiry_ms = now_ms() + hold_ms;
         // Append. Overwrites any earlier lock this agent held (self-upgrade).
-        append_line(&locks_path(&k.root), &json!({
+        append_line(&locks_path(&root), &json!({
             "path": path_str,
             "agentId": agent_id,
             "heldAt": held_at,
@@ -613,16 +654,20 @@ fn millis_to_rfc3339(ms: u64) -> String {
 #[serde(deny_unknown_fields)]
 pub struct UnlockArgs {
     pub path: String,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct UnlockHandler;
 impl Handler for UnlockHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: UnlockArgs = parse_args(args)?;
-        let path = nct_core::paths::resolve_checked(&k.root, &a.path)?;
-        let path_str = nct_core::helpers::rel_slash(&k.root, &path);
-        let agent_id = my_agent_id(&k.root, &k.sid);
-        let locks = locks_snapshot(&k.root);
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let path = nct_core::paths::resolve_checked(&root, &a.path)?;
+        let path_str = nct_core::helpers::rel_slash(&root, &path);
+        let agent_id = my_agent_id(&root, &k.sid);
+        let locks = locks_snapshot(&root);
         // Find this agent's live lock on the path; is it expired?
         let same = locks.iter().filter(|l| l["path"] == json!(path_str) && l["agentId"].as_str() == Some(agent_id.as_str())).collect::<Vec<_>>();
         if same.is_empty() {
@@ -633,7 +678,7 @@ impl Handler for UnlockHandler {
             return Ok(json!({ "path": path_str, "released": false, "note": "another live lock exists on this path; not stealing it" }));
         }
         // Release: mark expired by re-appending an expired row for this path+agent.
-        append_line(&locks_path(&k.root), &json!({
+        append_line(&locks_path(&root), &json!({
             "path": path_str,
             "agentId": agent_id,
             "heldAt": now_iso(),
@@ -649,8 +694,10 @@ impl Handler for UnlockHandler {
 
 pub struct LocksHandler;
 impl Handler for LocksHandler {
-    fn call(&self, k: &Kernel, _args: &Value) -> Result<Value, ToolError> {
-        let locks = locks_snapshot(&k.root);
+    fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
+        let a: CoordArgs = parse_args(args)?;
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let locks = locks_snapshot(&root);
         let live: Vec<&Value> = locks.iter().filter(|l| l["expired"] != json!(true)).collect();
         Ok(json!({ "locks": live, "total": live.len() }))
     }
@@ -696,6 +743,9 @@ pub struct CompactArgs {
     /// on resume verbatim.
     #[serde(default)]
     pub nextHint: Option<String>,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -705,6 +755,9 @@ pub struct ResumeArgs {
     /// omitted. When omitted and no prior checkpoint exists, no-op.
     #[serde(default)]
     pub agentId: Option<String>,
+    /// Workspace to coordinate against (default: the session base).
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct CompactHandler;
@@ -714,8 +767,9 @@ impl Handler for CompactHandler {
         if a.summary.trim().is_empty() {
             return Err(ToolError::new("ERR_BAD_INPUT", "summary must be a non-empty string"));
         }
-        let agent_id = my_agent_id(&k.root, &k.sid);
-        let path = roster_path(&k.root);
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let agent_id = my_agent_id(&root, &k.sid);
+        let path = roster_path(&root);
         let roster_read = read_lines(&path);
         let prior = roster_read.iter().rev().find(|e| e["agentId"].as_str() == Some(agent_id.as_str()));
         let created = prior.and_then(|e| e["createdAt"].as_str().map(String::from)).unwrap_or_else(|| now_iso());
@@ -761,9 +815,10 @@ pub struct ResumeHandler;
 impl Handler for ResumeHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ResumeArgs = parse_args(args)?;
-        let agent_id = a.agentId.clone().unwrap_or_else(|| my_agent_id(&k.root, &k.sid));
+        let root = k.base_dir(a.baseDir.as_deref())?;
+        let agent_id = a.agentId.clone().unwrap_or_else(|| my_agent_id(&root, &k.sid));
         // Find the most recent compact checkpoint for this agent.
-        let roster = read_lines(&roster_path(&k.root));
+        let roster = read_lines(&roster_path(&root));
         let checkpoint = roster.iter().rev().find(|e| {
             e["kind"].as_str() == Some("compact") && e["agentId"].as_str() == Some(agent_id.as_str())
         });
@@ -776,7 +831,7 @@ impl Handler for ResumeHandler {
         };
         // Re-bind this session to the agent id (continuity) and refresh roster.
         k.set_agent_id(&agent_id);
-        append_line(&roster_path(&k.root), &json!({
+        append_line(&roster_path(&root), &json!({
             "agentId": agent_id,
             "sid": k.sid,
             "name": cp["name"],
@@ -805,7 +860,7 @@ pub fn register_coordination(k: &mut Kernel) {
         nct_core::schema::schema_for::<RegisterArgs>(),
         std::sync::Arc::new(RegisterHandler),
     );
-    k.register("agent.list", LIST_DESC, nct_core::schema::schema_for::<EmptyArgs>(), std::sync::Arc::new(ListHandler));
+    k.register("agent.list", LIST_DESC, nct_core::schema::schema_for::<CoordArgs>(), std::sync::Arc::new(ListHandler));
     k.register("agent.peers", PEERS_DESC, nct_core::schema::schema_for::<PeersArgs>(), std::sync::Arc::new(PeersHandler));
     k.register(
         "agent.heartbeat",
@@ -813,7 +868,7 @@ pub fn register_coordination(k: &mut Kernel) {
         nct_core::schema::schema_for::<HeartbeatArgs>(),
         std::sync::Arc::new(HeartbeatHandler),
     );
-    k.register("agent.status", STATUS_DESC, nct_core::schema::schema_for::<EmptyArgs>(), std::sync::Arc::new(StatusHandler));
+    k.register("agent.status", STATUS_DESC, nct_core::schema::schema_for::<CoordArgs>(), std::sync::Arc::new(StatusHandler));
     k.register("agent.post", POST_DESC, nct_core::schema::schema_for::<PostArgs>(), std::sync::Arc::new(PostHandler));
     k.register(
         "agent.messages",
@@ -823,7 +878,7 @@ pub fn register_coordination(k: &mut Kernel) {
     );
     k.register("agent.lock", LOCK_DESC, nct_core::schema::schema_for::<LockArgs>(), std::sync::Arc::new(LockHandler));
     k.register("agent.unlock", UNLOCK_DESC, nct_core::schema::schema_for::<UnlockArgs>(), std::sync::Arc::new(UnlockHandler));
-    k.register("agent.locks", LOCKS_DESC, nct_core::schema::schema_for::<EmptyArgs>(), std::sync::Arc::new(LocksHandler));
+    k.register("agent.locks", LOCKS_DESC, nct_core::schema::schema_for::<CoordArgs>(), std::sync::Arc::new(LocksHandler));
     k.register("agent.compact", COMPACT_DESC, nct_core::schema::schema_for::<CompactArgs>(), std::sync::Arc::new(CompactHandler));
     k.register("agent.resume", RESUME_DESC, nct_core::schema::schema_for::<ResumeArgs>(), std::sync::Arc::new(ResumeHandler));
 }
@@ -868,8 +923,8 @@ mod coordination_tests {
         let mut k2 = Kernel::new(dir.clone()).unwrap();
         register_coordination(&mut k1);
         register_coordination(&mut k2);
-        let id1 = register_impl(&k1, &RegisterArgs { agentId: None, name: None, role: None }).unwrap();
-        let id2 = register_impl(&k2, &RegisterArgs { agentId: None, name: None, role: None }).unwrap();
+        let id1 = register_impl(&k1, &RegisterArgs { agentId: None, name: None, role: None, baseDir: None }).unwrap();
+        let id2 = register_impl(&k2, &RegisterArgs { agentId: None, name: None, role: None, baseDir: None }).unwrap();
         assert_eq!(id1["agentId"], json!("agent-1"));
         assert_eq!(id2["agentId"], json!("agent-2"));
         assert_eq!(id1["resumed"], json!(false));
@@ -878,9 +933,9 @@ mod coordination_tests {
     #[test]
     fn register_resumes_known_identity() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None, baseDir: None }).unwrap();
         // Same session, no agentId -> resume agent-1 (sid binding).
-        let resumed = register_impl(&k, &RegisterArgs { agentId: None, name: Some("Alice".into()), role: None }).unwrap();
+        let resumed = register_impl(&k, &RegisterArgs { agentId: None, name: Some("Alice".into()), role: None, baseDir: None }).unwrap();
         assert_eq!(resumed["agentId"], json!("agent-1"));
         assert_eq!(resumed["resumed"], json!(true));
         assert_eq!(resumed["name"], json!("Alice"));
@@ -890,15 +945,15 @@ mod coordination_tests {
     fn register_explicit_id_when_unknown_mints_that_id() {
         let k = make_kernel();
         // A client restoring an id it holds across a workspace reset is honored.
-        let id = register_impl(&k, &RegisterArgs { agentId: Some("researcher-77".into()), name: None, role: None }).unwrap();
+        let id = register_impl(&k, &RegisterArgs { agentId: Some("researcher-77".into()), name: None, role: None, baseDir: None }).unwrap();
         assert_eq!(id["agentId"], json!("researcher-77"));
     }
 
     #[test]
     fn roster_lists_agents_newest_first_and_redacts_sid() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: None, name: Some("A".into()), role: None }).unwrap();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-2".into()), name: Some("B".into()), role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: None, name: Some("A".into()), role: None, baseDir: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-2".into()), name: Some("B".into()), role: None, baseDir: None }).unwrap();
         let roster = roster_snapshot(&k.root);
         assert!(!roster.is_empty());
         // No sid leaks to another agent.
@@ -908,7 +963,7 @@ mod coordination_tests {
     #[test]
     fn heartbeat_updates_status_and_task() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None, baseDir: None }).unwrap();
         let hb = HeartbeatHandler.call(&k, &json!({ "status": "working", "task": "auditing git" })).unwrap();
         assert_eq!(hb["agentId"], json!("agent-1"));
         assert_eq!(hb["status"], json!("working"));
@@ -922,7 +977,7 @@ mod coordination_tests {
     #[test]
     fn post_broadcast_and_direct() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None, baseDir: None }).unwrap();
         // broadcast (no to)
         let r1 = PostHandler.call(&k, &json!({ "message": "hello all", "kind": "note" })).unwrap();
         assert_eq!(r1["posted"], json!(true));
@@ -941,7 +996,7 @@ mod coordination_tests {
     #[test]
     fn lock_then_unlock_releases() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None, baseDir: None }).unwrap();
         let l = LockHandler.call(&k, &json!({ "path": "src/a.rs", "holdMs": 60000 })).unwrap();
         assert_eq!(l["agentId"], json!("agent-1"));
         // live locks: 1
@@ -959,7 +1014,7 @@ mod coordination_tests {
     fn cannot_release_another_agents_live_lock() {
         let k = make_kernel();
         // agent-1 locks
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: None, role: None, baseDir: None }).unwrap();
         LockHandler.call(&k, &json!({ "path": "shared.rs", "holdMs": 60000 })).unwrap();
         // Simulate a second session locking: can't easily flip sid, so we verify
         // the same agent CAN unlock its own lock (deny is tested by presence of
@@ -971,7 +1026,7 @@ mod coordination_tests {
     #[test]
     fn status_gives_coordination_snapshot() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: None, name: Some("Alice".into()), role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: None, name: Some("Alice".into()), role: None, baseDir: None }).unwrap();
         let st = StatusHandler.call(&k, &json!({})).unwrap();
         assert!(st["me"].as_str().is_some());
         assert!(st["agents"].as_array().unwrap().len() >= 1);
@@ -1004,7 +1059,7 @@ mod compact_resume_tests {
     #[test]
     fn compact_writes_checkpoint_and_marks_status() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: Some("A".into()), role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: Some("A".into()), role: None, baseDir: None }).unwrap();
         let c = CompactHandler.call(&k, &json!({ "summary": "audited git baseDir", "nextHint": "fix proc" })).unwrap();
         assert_eq!(c["agentId"], json!("agent-1"));
         assert_eq!(c["checkpoint"], json!(true));
@@ -1016,7 +1071,7 @@ mod compact_resume_tests {
     #[test]
     fn resume_follows_checkpoint_and_rebinds_identity() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: Some("A".into()), role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-1".into()), name: Some("A".into()), role: None, baseDir: None }).unwrap();
         CompactHandler.call(&k, &json!({ "summary": "left at proc baseDir", "nextHint": "add tests" })).unwrap();
         // A NEW session (fresh kernel, same workspace) resumes
         let dir = k.root.clone();
@@ -1034,7 +1089,7 @@ mod compact_resume_tests {
     #[test]
     fn resume_no_checkpoint_returns_noop() {
         let k = make_kernel();
-        register_impl(&k, &RegisterArgs { agentId: Some("agent-9".into()), name: None, role: None }).unwrap();
+        register_impl(&k, &RegisterArgs { agentId: Some("agent-9".into()), name: None, role: None, baseDir: None }).unwrap();
         let r = ResumeHandler.call(&k, &json!({ "agentId": "agent-9" })).unwrap();
         assert_eq!(r["resumed"], json!(false));
     }
@@ -1070,7 +1125,7 @@ mod global_peers_tests {
             let ws = home.join("wsA");
             fs::create_dir_all(&ws).unwrap();
             let k = make_kernel(&ws);
-            register_impl(&k, &RegisterArgs { agentId: Some("global-1".into()), name: Some("Amara".into()), role: None }).unwrap();
+            register_impl(&k, &RegisterArgs { agentId: Some("global-1".into()), name: Some("Amara".into()), role: None, baseDir: None }).unwrap();
             let g = global_path();
             assert!(g.exists(), "global index should exist: {}", g.display());
             let rows = read_lines(&g);
@@ -1089,14 +1144,14 @@ mod global_peers_tests {
             fs::create_dir_all(&ws_b).unwrap();
             // register an agent in A
             let ka = make_kernel(&ws_a);
-            register_impl(&ka, &RegisterArgs { agentId: Some("alpha".into()), name: Some("Alpha".into()), role: None }).unwrap();
+            register_impl(&ka, &RegisterArgs { agentId: Some("alpha".into()), name: Some("Alpha".into()), role: None, baseDir: None }).unwrap();
             // register a DIFFERENT agent in B
             let kb = Kernel::new(ws_b.clone()).unwrap();
             // This kernel is B; but the "other" workspace is A. Register an
             // agent in B too (so A is a peer of B and vice versa).
             let _ = kb;
             let kb = make_kernel(&ws_b);
-            register_impl(&kb, &RegisterArgs { agentId: Some("beta".into()), name: Some("Beta".into()), role: None }).unwrap();
+            register_impl(&kb, &RegisterArgs { agentId: Some("beta".into()), name: Some("Beta".into()), role: None, baseDir: None }).unwrap();
 
             // From A's perspective, peers should include B's agent (beta) and
             // NOT A's own (alpha).
@@ -1117,15 +1172,82 @@ mod global_peers_tests {
             fs::create_dir_all(&ws_a).unwrap();
             fs::create_dir_all(&ws_b).unwrap();
             let ka = make_kernel(&ws_a);
-            register_impl(&ka, &RegisterArgs { agentId: Some("x-1".into()), name: None, role: None }).unwrap();
+            register_impl(&ka, &RegisterArgs { agentId: Some("x-1".into()), name: None, role: None, baseDir: None }).unwrap();
             // other ws agent
             let kb = make_kernel(&ws_b);
-            register_impl(&kb, &RegisterArgs { agentId: Some("y-1".into()), name: None, role: None }).unwrap();
+            register_impl(&kb, &RegisterArgs { agentId: Some("y-1".into()), name: None, role: None, baseDir: None }).unwrap();
             // filter by projY: should return y-1
             let peers = PeersHandler.call(&ka, &json!({ "workspace": "projY" })).unwrap();
             let arr = peers["peers"].as_array().unwrap();
             assert!(arr.iter().any(|p| p["agentId"] == json!("y-1")));
             std::env::remove_var("NCTOOLS_AGENT_HOME");
         });
+    }
+}
+
+#[cfg(test)]
+mod base_dir_continuity_tests {
+    use super::*;
+    use std::fs;
+
+    fn make_kernel(ws: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(ws.to_path_buf()).unwrap();
+        register_coordination(&mut k);
+        k
+    }
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nct-coord-basedir-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The side-channel leak fix: an agent registered against baseDir=target
+    /// MUST write its roster entry into TARGET's .nc-tools, not the server
+    /// root's. This is the exact coordination wrong-workspace manifestation.
+    #[test]
+    fn register_with_baseDir_targets_effective_workspace() {
+        let server = dir("server");
+        let target = dir("target");
+        let k = make_kernel(&server);
+        // Register an agent but coordinate against TARGET via baseDir.
+        let r = register_impl(&k, &RegisterArgs {
+            agentId: Some("proj-agent".into()),
+            name: Some("P".into()),
+            role: None,
+            baseDir: Some(target.display().to_string()),
+        }).unwrap();
+        assert_eq!(r["agentId"], json!("proj-agent"));
+        // The roster must live in TARGET/.nc-tools/agents.jsonl, NOT server's.
+        let target_roster = server.join(".nc-tools").join("agents.jsonl");
+        let _ = target_roster;
+        let t_roster = target.join(".nc-tools").join("agents.jsonl");
+        assert!(t_roster.exists(), "roster must land in baseDir target: {}", t_roster.display());
+        let rows = read_lines(&t_roster);
+        assert!(rows.iter().any(|e| e["agentId"] == json!("proj-agent")));
+        // And the server root must NOT have a stray coordination row.
+        let s_roster = server.join(".nc-tools").join("agents.jsonl");
+        assert!(!s_roster.exists(), "server root .nc-tools should not be polluted: {}", s_roster.display());
+        let _ = fs::remove_dir_all(&server);
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    /// lock against baseDir targets the target workspace's lock registry.
+    #[test]
+    fn lock_with_baseDir_targets_effective_workspace() {
+        let server = dir("server2");
+        let target = dir("target2");
+        let k = make_kernel(&server);
+        register_impl(&k, &RegisterArgs { agentId: Some("a1".into()), name: None, role: None, baseDir: Some(target.display().to_string()) }).unwrap();
+        let l = LockHandler.call(&k, &json!({ "path": "src/x.rs", "holdMs": 60000, "baseDir": target.display().to_string() })).unwrap();
+        assert_eq!(l["agentId"], json!("a1"));
+        // lock registry is in the target
+        let t_lock = target.join(".nc-tools").join("locks.jsonl");
+        assert!(t_lock.exists(), "locks must land in baseDir target");
+        let rows = read_lines(&t_lock);
+        assert!(rows.iter().any(|e| e["path"].as_str().unwrap().contains("src/x.rs")));
+        let _ = fs::remove_dir_all(&server);
+        let _ = fs::remove_dir_all(&target);
     }
 }

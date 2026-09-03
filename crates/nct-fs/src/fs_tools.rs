@@ -231,6 +231,10 @@ pub struct CopyArgs {
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// When true, refuse the copy if ANOTHER agent holds a live advisory lock
+    /// on the destination (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -294,6 +298,10 @@ pub struct MoveArgs {
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// When true, refuse the move if ANOTHER agent holds a live advisory lock
+    /// on the destination (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -649,6 +657,7 @@ impl Handler for CopyHandler {
         let base = k.base_dir(a.baseDir.as_deref())?;
         let from_abs = resolve_checked(&base, &a.from)?;
         let to_abs = resolve_checked(&base, &a.to)?;
+        let _ = maybe_warn_foreign_lock(k, &base, &to_abs, a.guardLocks.unwrap_or(false))?;
         let meta = fs::metadata(&from_abs).map_err(|_| err_no_path_with_siblings(&a.from, &from_abs, &base))?;
         if meta.is_dir() && !a.recursive.unwrap_or(true) {
             return Err(ToolError::with_hint(
@@ -1163,6 +1172,7 @@ impl Handler for MoveHandler {
                 json!({ "path": a.from }),
             ));
         }
+        let _ = maybe_warn_foreign_lock(k, &base, &to_abs, a.guardLocks.unwrap_or(false))?;
         if let Some(parent) = to_abs.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1505,6 +1515,72 @@ mod lock_guard_tests {
         k.set_agent_id("agent-2");
         let out = k.call("fs.write", &json!({ "path": "src/e.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
         assert!(out.ok, "expired lock must not block: {:?}", out.error);
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod move_copy_guard_tests {
+    use super::*;
+    use std::fs;
+
+    fn write_lock(root: &std::path::Path, path_rel: &str, holder: &str, hold_ms: u64) {
+        let lock = json!({
+            "path": path_rel, "agentId": holder, "heldAt": nct_core::now_iso(),
+            "holdMs": hold_ms, "expiresAt": nct_core::now_iso(),
+            "expiresAtMs": nct_core::now_ms() + hold_ms, "seq": nct_core::now_ms(), "released": false,
+        });
+        nct_core::append_lock_line(root, &lock);
+    }
+    fn kernel_with(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register(&mut k);
+        k
+    }
+    fn ws(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("nct-moveguard-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = fs::remove_dir_all(&d); fs::create_dir_all(&d).unwrap(); d
+    }
+
+    #[test]
+    fn copy_guard_refuses_on_foreign_dest_lock() {
+        let root = ws("c1");
+        fs::write(root.join("a.txt"), "src").unwrap();
+        fs::write(root.join("b.txt"), "dest").unwrap();
+        write_lock(&root, "b.txt", "agent-1", 600_000);
+        let k = kernel_with(&root); k.set_agent_id("agent-2");
+        let out = k.call("fs.copy", &json!({ "from": "a.txt", "to": "b.txt", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse copy to locked dest");
+        assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "dest", "dest must be untouched");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_guard_refuses_on_foreign_dest_lock() {
+        let root = ws("m1");
+        fs::write(root.join("a.txt"), "src").unwrap();
+        fs::write(root.join("b.txt"), "dest").unwrap();
+        write_lock(&root, "b.txt", "agent-1", 600_000);
+        let k = kernel_with(&root); k.set_agent_id("agent-2");
+        let out = k.call("fs.move", &json!({ "from": "a.txt", "to": "b.txt", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse move to locked dest");
+        assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
+        assert!(root.join("a.txt").exists(), "source must be untouched");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "dest");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_no_guard_proceeds_with_advisory_conflict_note() {
+        let root = ws("c2");
+        fs::write(root.join("a.txt"), "src").unwrap();
+        write_lock(&root, "b.txt", "agent-1", 600_000);
+        let k = kernel_with(&root); k.set_agent_id("agent-2");
+        // no guardLocks; copy to a DIFFERENT new file (not locked) -> note false
+        let out = k.call("fs.copy", &json!({ "from": "a.txt", "to": "c.txt", "baseDir": root.display().to_string() }));
+        assert!(out.ok);
+        assert!(root.join("c.txt").exists());
         let _ = fs::remove_dir_all(&root);
     }
 }

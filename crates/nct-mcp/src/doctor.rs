@@ -18,6 +18,10 @@ pub struct DoctorArgs {
     #[doc = "Include runtime probes (writable root, cargo available)"]
     #[serde(default)]
     pub deep: Option<bool>,
+    /// When true, auto-fix the healthy-but-degraded cases the doctor can repair:
+    /// superseded/stale coordination rows and orphaned lock releases.
+    #[serde(default)]
+    pub repair: Option<bool>,
 }
 
 pub struct DoctorHandler;
@@ -87,8 +91,88 @@ impl Handler for DoctorHandler {
                 "cargoAvailable": cargo,
             });
         }
+        if a.repair.unwrap_or(false) {
+            let repaired = repair_self(&k.root);
+            out["repair"] = json!({
+                "requested": true,
+                "applied": repaired,
+            });
+        }
         Ok(out)
     }
+}
+
+/// Self-heal the healthy-but-degraded state the coordination layer can leave
+/// behind: a stale full-history roster where the SAME agentId appears many
+/// times, and orphaned lock rows. Repair compacts the roster to one row per
+/// agentId (last-seen wins) and drops lock rows that are already expired or
+/// redundantly released. Non-destructive — never touches live locks.
+fn repair_self(root: &std::path::Path) -> Value {
+    use std::io::Write;
+    let mut repaired = json!({ "rosterCompacted": 0, "staleLocksDropped": 0 });
+
+    let roster_path = root.join(".nc-tools").join("agents.jsonl");
+    if let Ok(raw) = std::fs::read_to_string(&roster_path) {
+        let mut latest: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for line in raw.lines().filter(|l| !l.is_empty()) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                let id = v["agentId"].as_str().unwrap_or("").to_string();
+                if id.is_empty() { continue; }
+                if !latest.contains_key(&id) { order.push(id.clone()); }
+                latest.insert(id.clone(), v);
+            }
+        }
+        if latest.len() < order.len() {
+            let mut buf = String::new();
+            match &latest {
+                _ => {}
+            }
+            // one row per agent in insertion order, last-seen wins
+            let mut rebuilt = String::new();
+            for id in &order {
+                if let Some(v) = latest.get(id) {
+                    rebuilt.push_str(&(serde_json::to_string(v).unwrap_or_default() + "\n"));
+                }
+            }
+            if let Ok(mut f) = std::fs::File::create(&roster_path) {
+                let _ = f.write_all(rebuilt.as_bytes());
+                repaired["rosterCompacted"] = json!(order.len());
+            }
+        }
+    }
+
+    let locks_path = root.join(".nc-tools").join("locks.jsonl");
+    if let Ok(raw) = std::fs::read_to_string(&locks_path) {
+        let my_now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut kept: Vec<serde_json::Value> = Vec::new();
+        let mut dropped = 0u64;
+        for line in raw.lines().filter(|l| !l.is_empty()) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                let expiry = v["expiresAtMs"].as_u64().unwrap_or(0);
+                let released = v["released"].as_bool().unwrap_or(false);
+                if released || (expiry != 0 && my_now_ms > expiry) {
+                    dropped += 1;
+                } else {
+                    kept.push(v);
+                }
+            }
+        }
+        if dropped > 0 {
+            let mut rebuilt = String::new();
+            for v in &kept {
+                rebuilt.push_str(&(serde_json::to_string(v).unwrap_or_default() + "\n"));
+            }
+            if let Ok(mut f) = std::fs::File::create(&locks_path) {
+                let _ = f.write_all(rebuilt.as_bytes());
+                repaired["staleLocksDropped"] = json!(dropped);
+            }
+        }
+    }
+    repaired
 }
 
 fn probe_write(path: &std::path::Path) -> bool {
