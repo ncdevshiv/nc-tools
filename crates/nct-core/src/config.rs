@@ -117,10 +117,11 @@ pub struct McpConfig {
 
 impl Default for McpConfig {
     fn default() -> Self {
-        McpConfig { idle_ms: 30 * 60 * 1000 }
+        McpConfig {
+            idle_ms: 30 * 60 * 1000,
+        }
     }
 }
-
 
 impl Config {
     /// defaults < <root>/nc-tools.toml < env overrides

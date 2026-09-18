@@ -31,7 +31,17 @@ pub const SEMANTIC_DESC: &str = "Locate code by MEANING, not exact text: ask whe
 
 /// Generated/vendored dirs excluded from the semantic corpus (same class as
 /// fs.tree TREE_SKIP, plus common build/VCS noise).
-const SKIP_DIRS: &[&str] = &[".git", "node_modules", ".nc-tools", "target", "dist", "build", "vendor", ".venv", "__pycache__"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    ".nc-tools",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    ".venv",
+    "__pycache__",
+];
 
 const MODEL_REPO: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const HF_BASE: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
@@ -61,7 +71,12 @@ pub struct SemanticArgs {
 }
 
 pub fn register(k: &mut Kernel) {
-    k.register("search.semantic", SEMANTIC_DESC, nct_core::schema::schema_for::<SemanticArgs>(), std::sync::Arc::new(SemanticHandler));
+    k.register(
+        "search.semantic",
+        SEMANTIC_DESC,
+        nct_core::schema::schema_for::<SemanticArgs>(),
+        std::sync::Arc::new(SemanticHandler),
+    );
 }
 
 pub struct SemanticHandler;
@@ -70,7 +85,10 @@ impl Handler for SemanticHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: SemanticArgs = parse_args(args)?;
         if a.query.trim().is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "query must be a non-empty string"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "query must be a non-empty string",
+            ));
         }
         // The schema declares topK minimum 1 — enforce it here too, since
         // schemars only describes the bound, it does not parse it.
@@ -93,84 +111,83 @@ impl Handler for SemanticHandler {
         }
         let top_k = a.topK.unwrap_or(5) as usize;
 
-        let embedder = Embedder::get(cache_dir(k))
-            .map_err(|e| model_unavailable(&e))?;
+        let embedder = Embedder::get(cache_dir(k)).map_err(|e| model_unavailable(&e))?;
 
-    // digest-based cache: (file::chunkKey, digest) -> vector, persisted as JSONL
-    // Chunk key is symbol name + line range so the same symbol re-scored after a
-    // content change gets a fresh vector (digest changes → new key).
-    // The index lives under the EFFECTIVE search base (baseDir override and
-    // session anchor win over the server root), so indexing workspace X never
-    // writes X's vectors into the tools repo's .nc-tools.
-    let index_path = base.join(".nc-tools").join("semantic-index.jsonl");
-    let mut cache = load_index(&index_path);
+        // digest-based cache: (file::chunkKey, digest) -> vector, persisted as JSONL
+        // Chunk key is symbol name + line range so the same symbol re-scored after a
+        // content change gets a fresh vector (digest changes → new key).
+        // The index lives under the EFFECTIVE search base (baseDir override and
+        // session anchor win over the server root), so indexing workspace X never
+        // writes X's vectors into the tools repo's .nc-tools.
+        let index_path = base.join(".nc-tools").join("semantic-index.jsonl");
+        let mut cache = load_index(&index_path);
 
-    let mut files: Vec<PathBuf> = Vec::new();
-    walk_text_files(&search_root, 0, &mut files);
+        let mut files: Vec<PathBuf> = Vec::new();
+        walk_text_files(&search_root, 0, &mut files);
 
-    let q_vec = embedder.embed(&a.query)?;
+        let q_vec = embedder.embed(&a.query)?;
 
-    let mut scored: Vec<Value> = Vec::new();
-    for f in &files {
-        let Ok(content) = fs::read_to_string(f) else { continue };
-        if content.contains('\0') {
-            continue;
-        }
-        let file_digest = sha256_hex(content.as_bytes());
-
-        // Chunk the file at symbol boundaries (or ~1200-char overflow windows).
-        let chunks = chunk_file(&content, f);
-
-        for chunk in chunks {
-            let chunk_digest = sha256_hex(chunk.text.as_bytes());
-            // Key includes the symbol name + line range so a digest change
-            // naturally produces a new index entry (superseding the old one,
-            // which the compaction pass below drops).
-            let key = format!(
-                "{}::{}::{}",
-                f.display(),
-                chunk.symbol,
-                chunk_digest
-            );
-            let vec = match cache.get(&key) {
-                Some(v) => v.clone(),
-                None => {
-                    let text: String = chunk.text.chars().take(MAX_EMBED_CHARS).collect();
-                    let vec = embedder.embed(&text)?;
-                    cache.insert(key.clone(), vec.clone());
-                    append_index(&index_path, &json!({
-                        "file": f.display().to_string(),
-                        "symbol": chunk.symbol,
-                        "symbolKind": chunk.kind,
-                        "lineStart": chunk.line_start,
-                        "lineEnd": chunk.line_end,
-                        "digest": chunk_digest,
-                        "fileDigest": file_digest,
-                        "vector": vec,
-                        "ts": nct_core::now_iso(),
-                    }))?;
-                    vec
-                }
+        let mut scored: Vec<Value> = Vec::new();
+        for f in &files {
+            let Ok(content) = fs::read_to_string(f) else {
+                continue;
             };
-            let sim = dot(&q_vec, &vec);
-            scored.push(json!({
-                "file": nct_core::rel_slash(&base, f),
-                "symbol": chunk.symbol,
-                "symbolKind": chunk.kind,
-                "lineStart": chunk.line_start,
-                "lineEnd": chunk.line_end,
-                "score": round4(sim),
-                "bytes": chunk.text.chars().count(),
-            }));
+            if content.contains('\0') {
+                continue;
+            }
+            let file_digest = sha256_hex(content.as_bytes());
+
+            // Chunk the file at symbol boundaries (or ~1200-char overflow windows).
+            let chunks = chunk_file(&content, f);
+
+            for chunk in chunks {
+                let chunk_digest = sha256_hex(chunk.text.as_bytes());
+                // Key includes the symbol name + line range so a digest change
+                // naturally produces a new index entry (superseding the old one,
+                // which the compaction pass below drops).
+                let key = format!("{}::{}::{}", f.display(), chunk.symbol, chunk_digest);
+                let vec = match cache.get(&key) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let text: String = chunk.text.chars().take(MAX_EMBED_CHARS).collect();
+                        let vec = embedder.embed(&text)?;
+                        cache.insert(key.clone(), vec.clone());
+                        append_index(
+                            &index_path,
+                            &json!({
+                                "file": f.display().to_string(),
+                                "symbol": chunk.symbol,
+                                "symbolKind": chunk.kind,
+                                "lineStart": chunk.line_start,
+                                "lineEnd": chunk.line_end,
+                                "digest": chunk_digest,
+                                "fileDigest": file_digest,
+                                "vector": vec,
+                                "ts": nct_core::now_iso(),
+                            }),
+                        )?;
+                        vec
+                    }
+                };
+                let sim = dot(&q_vec, &vec);
+                scored.push(json!({
+                    "file": nct_core::rel_slash(&base, f),
+                    "symbol": chunk.symbol,
+                    "symbolKind": chunk.kind,
+                    "lineStart": chunk.line_start,
+                    "lineEnd": chunk.line_end,
+                    "score": round4(sim),
+                    "bytes": chunk.text.chars().count(),
+                }));
+            }
         }
-    }
-    scored.sort_by(|a, b| {
-        let sa = a["score"].as_f64().unwrap_or(0.0);
-        let sb = b["score"].as_f64().unwrap_or(0.0);
-        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let top: Vec<Value> = scored.iter().take(top_k).cloned().collect();
-    Ok(json!({ "query": a.query, "top": top, "total": scored.len() }))
+        scored.sort_by(|a, b| {
+            let sa = a["score"].as_f64().unwrap_or(0.0);
+            let sb = b["score"].as_f64().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let top: Vec<Value> = scored.iter().take(top_k).cloned().collect();
+        Ok(json!({ "query": a.query, "top": top, "total": scored.len() }))
     }
 }
 
@@ -216,11 +233,28 @@ struct Chunk {
 /// split on a sentence/blank-line boundary, never mid-token, so each chunk
 /// still has coherent content to embed.
 fn chunk_file(content: &str, file: &Path) -> Vec<Chunk> {
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     let is_python = matches!(ext.as_str(), "py" | "pyi");
     let is_brace = matches!(
         ext.as_str(),
-        "rs" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "go" | "c" | "h" | "cpp" | "hpp" | "java" | "css" | "scss"
+        "rs" | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "go"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "java"
+            | "css"
+            | "scss"
     );
 
     let lines: Vec<&str> = content.split('\n').collect();
@@ -254,13 +288,26 @@ fn chunk_python(lines: &[&str], chunks: &mut Vec<Chunk>) {
     while i < lines.len() {
         let line = lines[i];
         let trimmed = line.trim_start();
-        if trimmed.starts_with("def ") || trimmed.starts_with("class ") || trimmed.starts_with("async def ") {
+        if trimmed.starts_with("def ")
+            || trimmed.starts_with("class ")
+            || trimmed.starts_with("async def ")
+        {
             let name = trimmed
                 .trim_start_matches("async ")
                 .split_once('(')
-                .map(|(n, _)| n.trim().trim_start_matches("def ").trim_start_matches("class ").trim().to_string())
+                .map(|(n, _)| {
+                    n.trim()
+                        .trim_start_matches("def ")
+                        .trim_start_matches("class ")
+                        .trim()
+                        .to_string()
+                })
                 .unwrap_or_else(|| trimmed.chars().take(40).collect());
-            let kind = if trimmed.starts_with("class ") { "class" } else { "def" };
+            let kind = if trimmed.starts_with("class ") {
+                "class"
+            } else {
+                "def"
+            };
             let indent = line.len() - line.trim_start().len();
             let start = i;
             let mut end = i + 1;
@@ -318,15 +365,39 @@ fn chunk_brace(lines: &[&str], chunks: &mut Vec<Chunk>) {
             || trimmed.starts_with("pub type ");
         if is_start {
             let name = trimmed
-                .split(|c: char| c == '(' || c == '<' || c == '{' || c == ' ' )
-                .find(|s| !s.is_empty() && !matches!(*s, "fn"|"pub"|"async"|"struct"|"enum"|"impl"|"trait"|"class"|"function"|"export"|"func"|"type"|"->"|"="))
+                .split(['(', '<', '{', ' '])
+                .find(|s| {
+                    !s.is_empty()
+                        && !matches!(
+                            *s,
+                            "fn" | "pub"
+                                | "async"
+                                | "struct"
+                                | "enum"
+                                | "impl"
+                                | "trait"
+                                | "class"
+                                | "function"
+                                | "export"
+                                | "func"
+                                | "type"
+                                | "->"
+                                | "="
+                        )
+                })
                 .map(str::to_string)
                 .unwrap_or_else(|| trimmed.chars().take(40).collect::<String>())
-                .trim().to_string();
-            let kind = if trimmed.starts_with("fn") || trimmed.starts_with("pub fn") || trimmed.starts_with("async fn") || trimmed.starts_with("pub async fn") || trimmed.starts_with("function") || trimmed.starts_with("export function") || trimmed.starts_with("func") {
+                .trim()
+                .to_string();
+            let kind = if trimmed.starts_with("fn")
+                || trimmed.starts_with("pub fn")
+                || trimmed.starts_with("async fn")
+                || trimmed.starts_with("pub async fn")
+                || trimmed.starts_with("function")
+                || trimmed.starts_with("export function")
+                || trimmed.starts_with("func")
+            {
                 "fn"
-            } else if trimmed.starts_with("impl") || trimmed.starts_with("pub impl") || trimmed.starts_with("trait") || trimmed.starts_with("pub trait") || trimmed.starts_with("class") || trimmed.starts_with("export class") {
-                "type"
             } else {
                 "type"
             };
@@ -449,7 +520,11 @@ fn split_oversized(c: Chunk, out: &mut Vec<Chunk>) {
     // `byte_boundaries[k]` is the byte offset of char #k. Build a helper that
     // maps a char index to its byte offset (chars.len()+1 includes the end).
     let char_to_byte = |idx: usize| -> usize {
-        if idx >= byte_boundaries.len() { byte_len } else { byte_boundaries[idx] }
+        if idx >= byte_boundaries.len() {
+            byte_len
+        } else {
+            byte_boundaries[idx]
+        }
     };
     let mut best: Option<usize> = None;
     // Search from the half-char mark forward up to +400 chars for a newline.
@@ -477,8 +552,20 @@ fn split_oversized(c: Chunk, out: &mut Vec<Chunk>) {
     let left = c.text[..split_byte].trim_end().to_string();
     let right = c.text[split_byte..].trim_start().to_string();
     let left_line_count = left.lines().count() as u64;
-    let left_c = Chunk { symbol: c.symbol.clone(), kind: c.kind.clone(), line_start: c.line_start, line_end: c.line_end, text: left };
-    let right_c = Chunk { symbol: c.symbol.clone(), kind: c.kind.clone(), line_start: c.line_start + left_line_count, line_end: c.line_end, text: right };
+    let left_c = Chunk {
+        symbol: c.symbol.clone(),
+        kind: c.kind.clone(),
+        line_start: c.line_start,
+        line_end: c.line_end,
+        text: left,
+    };
+    let right_c = Chunk {
+        symbol: c.symbol.clone(),
+        kind: c.kind.clone(),
+        line_start: c.line_start + left_line_count,
+        line_end: c.line_end,
+        text: right,
+    };
     split_oversized(left_c, out);
     split_oversized(right_c, out);
 }
@@ -506,7 +593,10 @@ fn load_index(index_path: &Path) -> HashMap<String, Vec<f32>> {
                     rec["digest"].as_str(),
                     rec["vector"].as_array(),
                 ) {
-                    let v: Vec<f32> = vec.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+                    let v: Vec<f32> = vec
+                        .iter()
+                        .filter_map(|x| x.as_f64().map(|f| f as f32))
+                        .collect();
                     if !v.is_empty() {
                         map.insert(format!("{file}::{symbol}::{digest}"), v);
                     }
@@ -521,13 +611,19 @@ fn append_index(index_path: &Path, entry: &Value) -> Result<(), ToolError> {
     if let Some(parent) = index_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut f = fs::OpenOptions::new().create(true).append(true).open(index_path)?;
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(index_path)?;
     f.write_all((serde_json::to_string(entry)? + "\n").as_bytes())?;
     Ok(())
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
 }
 
 fn round4(v: f64) -> f64 {
@@ -544,14 +640,19 @@ fn walk_text_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     entries.sort();
     for full in entries {
-        let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = full
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         // Same generated-dir class fs.tree/search.replace skip — indexing
         // cargo/target or node_modules artifacts drowns real hits in
         // fingerprint noise (proven: top-5 all rust/target/.fingerprint).
         if SKIP_DIRS.contains(&name.as_str()) {
             continue;
         }
-        let Ok(lm) = fs::symlink_metadata(&full) else { continue };
+        let Ok(lm) = fs::symlink_metadata(&full) else {
+            continue;
+        };
         if lm.is_symlink() {
             continue;
         }
@@ -589,21 +690,33 @@ impl Embedder {
     /// (the first caller's cache dir wins, mirroring JS pipeline caching).
     pub fn get(cache_dir: PathBuf) -> Result<&'static Embedder, String> {
         use std::sync::OnceLock;
-        static EMBEDDER: OnceLock<Result<Embedder, String>> = OnceLock::new();
-        match EMBEDDER.get_or_init(|| Embedder::init(cache_dir)) {
-            Ok(e) => Ok(e),
-            Err(e) => Err(e.clone()),
+        static EMBEDDER: OnceLock<Embedder> = OnceLock::new();
+        // Only the SUCCESS is cached. The previous `OnceLock<Result<..>>`
+        // stored a transient init failure forever, so one failed HuggingFace
+        // fetch permanently disabled search.semantic, fs.watch and every
+        // net.* rerank for the life of the process — and six of the seven
+        // call sites swallowed that with `.ok()`. On failure we return
+        // without storing, so the next call retries.
+        if let Some(e) = EMBEDDER.get() {
+            return Ok(e);
+        }
+        match Embedder::init(cache_dir) {
+            Ok(e) => Ok(EMBEDDER.get_or_init(|| e)),
+            Err(e) => Err(e),
         }
     }
 
-    fn init(cache_dir: PathBuf) -> Result<Embedder, String> {        // fetch every contract file on first use (idempotent, cached)
+    fn init(cache_dir: PathBuf) -> Result<Embedder, String> {
+        // fetch every contract file on first use (idempotent, cached)
         let mut paths = Vec::new();
         for name in MODEL_FILES {
             paths.push(ensure_file(&cache_dir, name)?);
         }
-        let (config_path, tokenizer_path, weights_path) = (paths[0].clone(), paths[1].clone(), paths[2].clone());
+        let (config_path, tokenizer_path, weights_path) =
+            (paths[0].clone(), paths[1].clone(), paths[2].clone());
 
-        let mut tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| e.to_string())?;
+        let mut tokenizer =
+            tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| e.to_string())?;
         // tokenizer.json ships with a baked-in padding config (observed: every
         // encode() came back padded with 128 [PAD]=0 ids). Mean-pooling over
         // those pads puts every vector in the same PAD-dominated direction —
@@ -621,7 +734,11 @@ impl Embedder {
             .map_err(|e| e.to_string())?;
         let model = candle_transformers::models::bert::BertModel::load(vb, &config)
             .map_err(|e| e.to_string())?;
-        Ok(Embedder { model, tokenizer, device })
+        Ok(Embedder {
+            model,
+            tokenizer,
+            device,
+        })
     }
 
     /// Embed text: BERT hidden states → masked mean over tokens → L2 norm.
@@ -659,19 +776,24 @@ impl Embedder {
             .model
             .forward(&ids_t, &token_type, Some(&mask))
             .map_err(tensor_err)?; // [1, L, H]
-        // masked mean pooling: sum(hidden * mask) / sum(mask)
+                                   // masked mean pooling: sum(hidden * mask) / sum(mask)
         let mask_f = (mask.to_dtype(DType::F32).map_err(tensor_err)?)
             .unsqueeze(2)
             .map_err(tensor_err)?; // [1, L, 1]
         let shape = hidden.shape().clone();
-        let masked = (hidden * mask_f.broadcast_as(shape).map_err(tensor_err)?).map_err(tensor_err)?;
+        let masked =
+            (hidden * mask_f.broadcast_as(shape).map_err(tensor_err)?).map_err(tensor_err)?;
         let sum = masked.sum(1).map_err(tensor_err)?; // [1, H]
         let count = mask_f.sum(1).map_err(tensor_err)?; // [1, 1]
-        // candle's `Div for Tensor` requires identical shapes — plain `sum / count`
-        // fails with "shape mismatch in div, lhs: [1, H], rhs: [1, 1]". Broadcasting
-        // division must be explicit.
+                                                        // candle's `Div for Tensor` requires identical shapes — plain `sum / count`
+                                                        // fails with "shape mismatch in div, lhs: [1, H], rhs: [1, 1]". Broadcasting
+                                                        // division must be explicit.
         let pooled = sum.broadcast_div(&count).map_err(tensor_err)?; // [1, H]
-        let v = pooled.squeeze(0).map_err(tensor_err)?.to_vec1::<f32>().map_err(tensor_err)?;
+        let v = pooled
+            .squeeze(0)
+            .map_err(tensor_err)?
+            .to_vec1::<f32>()
+            .map_err(tensor_err)?;
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
         Ok(v.iter().map(|x| x / norm).collect())
     }
@@ -706,7 +828,10 @@ fn ensure_file(cache_dir: &Path, name: &str) -> Result<PathBuf, String> {
                 // HF redirects are relative paths — absolutize against the host
                 current_url = if loc.starts_with("http://") || loc.starts_with("https://") {
                     loc
-                } else if let Some(scheme_host_end) = current_url.find("://").map(|i| current_url[i + 3..].find('/').map(|j| i + 3 + j)) {
+                } else if let Some(scheme_host_end) = current_url
+                    .find("://")
+                    .map(|i| current_url[i + 3..].find('/').map(|j| i + 3 + j))
+                {
                     match scheme_host_end {
                         Some(end) => format!("{}{}", &current_url[..end], loc),
                         None => format!("{current_url}{}", loc.trim_start_matches('/')),
@@ -756,9 +881,18 @@ impl Handler for Handler {
         let chunks = chunk_file(content, Path::new("lib.rs"));
         // We expect at least the register fn, helper fn, and Handler struct/impl
         let symbols: Vec<&str> = chunks.iter().map(|c| c.symbol.as_str()).collect();
-        assert!(symbols.iter().any(|s| s.contains("register")), "found: {symbols:?}");
-        assert!(symbols.iter().any(|s| s.contains("helper")), "found: {symbols:?}");
-        assert!(symbols.iter().any(|s| s.contains("Handler")), "found: {symbols:?}");
+        assert!(
+            symbols.iter().any(|s| s.contains("register")),
+            "found: {symbols:?}"
+        );
+        assert!(
+            symbols.iter().any(|s| s.contains("helper")),
+            "found: {symbols:?}"
+        );
+        assert!(
+            symbols.iter().any(|s| s.contains("Handler")),
+            "found: {symbols:?}"
+        );
         // line ranges are 1-based and increasing
         for c in &chunks {
             assert!(c.line_start >= 1);
@@ -778,20 +912,27 @@ class Calculator:
 "#;
         let chunks = chunk_file(content, Path::new("calc.py"));
         let symbols: Vec<&str> = chunks.iter().map(|c| c.symbol.as_str()).collect();
-        assert!(symbols.iter().any(|s| s.contains("add")), "found: {symbols:?}");
-        assert!(symbols.iter().any(|s| s.contains("Calculator")), "found: {symbols:?}");
+        assert!(
+            symbols.iter().any(|s| s.contains("add")),
+            "found: {symbols:?}"
+        );
+        assert!(
+            symbols.iter().any(|s| s.contains("Calculator")),
+            "found: {symbols:?}"
+        );
     }
 
     #[test]
     fn markdown_chunks_by_paragraph() {
-        let content = "# Title\n\nFirst paragraph about auth handling.\n\nSecond paragraph about caching.\n";
+        let content =
+            "# Title\n\nFirst paragraph about auth handling.\n\nSecond paragraph about caching.\n";
         let chunks = chunk_file(content, Path::new("README.md"));
         assert!(!chunks.is_empty());
         // First chunk should be the title + first paragraph
         let first = &chunks[0];
         assert!(first.text.contains("Title"));
         // At least 2 chunks (title+para1, para2) — or text fallback
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
     }
 
     #[test]
@@ -799,10 +940,19 @@ class Calculator:
         let content = format!("fn big() {{\n{}\n}}", "    println!(\"x\");\n".repeat(500));
         let chunks = chunk_file(&content, Path::new("big.rs"));
         for c in &chunks {
-            assert!(c.text.chars().count() <= MAX_EMBED_CHARS, "chunk {} chars > {}", c.text.chars().count(), MAX_EMBED_CHARS);
+            assert!(
+                c.text.chars().count() <= MAX_EMBED_CHARS,
+                "chunk {} chars > {}",
+                c.text.chars().count(),
+                MAX_EMBED_CHARS
+            );
         }
         // The big function is split into multiple chunks
-        assert!(chunks.len() > 1, "expected split, got {} chunk(s)", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected split, got {} chunk(s)",
+            chunks.len()
+        );
     }
 
     #[test]

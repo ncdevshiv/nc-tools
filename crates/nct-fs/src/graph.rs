@@ -60,6 +60,7 @@ struct Sym {
     kind: String,
     file: String,
     line: u64,
+    end: u64,
     body: String,
 }
 
@@ -94,14 +95,23 @@ impl Handler for GraphHandler {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            if content[..content.len().min(8192)].contains('\0') {
+            // Byte-slice: `content[..n]` panics when n falls mid-codepoint on a
+            // non-ASCII file, which would fail the whole call with ERR_PANIC.
+            if content.as_bytes()[..content.len().min(8192)].contains(&0) {
                 continue;
             }
             let mut syms = scan(&content, lang, &rel, &mut kinds);
             // Track symbol names (we dedupe later by name for the node set).
             for s in syms.iter() {
                 if symbols.len() < max_nodes {
-                    symbols.push(Sym { name: s.name.clone(), kind: s.kind.clone(), file: s.file.clone(), line: s.line, body: s.body.clone() });
+                    symbols.push(Sym {
+                        name: s.name.clone(),
+                        kind: s.kind.clone(),
+                        file: s.file.clone(),
+                        line: s.line,
+                        end: s.end,
+                        body: s.body.clone(),
+                    });
                 }
             }
             syms.clear();
@@ -137,23 +147,37 @@ impl Handler for GraphHandler {
             }
         }
 
-        let nodes: Vec<Value> = symbols.iter().map(|s| json!({
-            "name": s.name,
-            "kind": s.kind,
-            "file": s.file,
-            "line": s.line,
-        })).collect();
+        let nodes: Vec<Value> = symbols
+            .iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "kind": s.kind,
+                    "file": s.file,
+                    "line": s.line,
+                    "endLine": s.end,
+                })
+            })
+            .collect();
 
         let mut out = json!({ "nodes": nodes, "edges": edges, "nodesTotal": symbols.len(), "edgesTotal": edges.len() });
         if let Some(c) = &a.callees {
             let q = c.clone();
-            let e: Vec<Value> = edges.iter().filter(|e| e["callee"] == json!(q)).cloned().collect();
+            let e: Vec<Value> = edges
+                .iter()
+                .filter(|e| e["callee"] == json!(q))
+                .cloned()
+                .collect();
             out["callers"] = json!(e);
             out["callees"] = json!([]);
         }
         if let Some(c) = &a.callers {
             let q = c.clone();
-            let e: Vec<Value> = edges.iter().filter(|e| e["caller"] == json!(q)).cloned().collect();
+            let e: Vec<Value> = edges
+                .iter()
+                .filter(|e| e["caller"] == json!(q))
+                .cloned()
+                .collect();
             out["callees"] = json!(e);
         }
         Ok(out)
@@ -174,15 +198,40 @@ fn lang_of(path: &Path) -> Option<&'static str> {
 /// Scan a file for symbols + their bodies. Reuses the code.symbols approach
 /// (regex declaration + brace/indent span). Returns also records each symbol's
 /// name->kind for the node set.
-fn scan(content: &str, lang: &str, rel: &str, kinds: &mut HashMap<String, &'static str>) -> Vec<Sym> {
+fn scan(
+    content: &str,
+    lang: &str,
+    rel: &str,
+    kinds: &mut HashMap<String, &'static str>,
+) -> Vec<Sym> {
     let lines: Vec<&str> = content.split('\n').collect();
     let mut out = Vec::new();
     let (pat, is_py, is_brace) = match lang {
-        "py" => (r#"^\s*(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)"#, true, false),
-        "go" => (r#"^\s*(?:func|type|struct|interface)\s+([A-Za-z_]\w*)"#, false, true),
-        "js" => (r#"(?:^|[^\w$])(?:function|class|const|let|var)\s+([A-Za-z_$][\w$]*)"#, false, true),
-        "java" => (r#"^\s*(?:public|private|protected|static|final|abstract|synchronized|native|transient|volatile|default|strictfp)?\s*(?:class|interface|enum)\s+([A-Za-z_]\w*)"#, false, true),
-        _ => (r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?(?:fn|struct|enum|trait|impl|mod)\s+([A-Za-z_][A-Za-z0-9_]*)"#, false, true),
+        "py" => (
+            r#"^\s*(?:async\s+)?(def|class)\s+([A-Za-z_]\w*)"#,
+            true,
+            false,
+        ),
+        "go" => (
+            r#"^\s*(?:func|type|struct|interface)\s+([A-Za-z_]\w*)"#,
+            false,
+            true,
+        ),
+        "js" => (
+            r#"(?:^|[^\w$])(?:function|class|const|let|var)\s+([A-Za-z_$][\w$]*)"#,
+            false,
+            true,
+        ),
+        "java" => (
+            r#"^\s*(?:public|private|protected|static|final|abstract|synchronized|native|transient|volatile|default|strictfp)?\s*(?:class|interface|enum)\s+([A-Za-z_]\w*)"#,
+            false,
+            true,
+        ),
+        _ => (
+            r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?(?:fn|struct|enum|trait|impl|mod)\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            false,
+            true,
+        ),
     };
     let re = match fancy_regex::Regex::new(pat) {
         Ok(r) => r,
@@ -193,19 +242,34 @@ fn scan(content: &str, lang: &str, rel: &str, kinds: &mut HashMap<String, &'stat
             Ok(Some(c)) => c,
             _ => continue,
         };
-        let name = caps.get(if is_py { 2 } else { 1 }).map(|m| m.as_str()).unwrap_or("").to_string();
+        let name = caps
+            .get(if is_py { 2 } else { 1 })
+            .map(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
         if name.is_empty() {
             continue;
         }
         let (end, body) = span(&lines, i, is_py, is_brace);
         let kind = if is_py {
-            if line.trim_start().starts_with("class") { "class" } else { "def" }
+            if line.trim_start().starts_with("class") {
+                "class"
+            } else {
+                "def"
+            }
         } else {
             decl_kind(line)
         };
         kinds.insert(name.clone(), kind);
         let body_s: String = body;
-        out.push(Sym { name, kind: kind.to_string(), file: rel.to_string(), line: (i + 1) as u64, body: body_s });
+        out.push(Sym {
+            name,
+            kind: kind.to_string(),
+            file: rel.to_string(),
+            line: (i + 1) as u64,
+            end,
+            body: body_s,
+        });
     }
     out
 }
@@ -216,12 +280,24 @@ fn decl_kind(line: &str) -> &'static str {
     let t = line.trim_start();
     // order matters: the first matching keyword wins
     for (needle, kind) in [
-        ("fn ", "fn"), ("pub fn", "fn"), ("def ", "def"), ("func ", "func"),
-        ("struct ", "struct"), ("enum ", "enum"), ("trait ", "trait"),
-        ("impl ", "impl"), ("class ", "class"), ("interface ", "interface"),
-        ("mod ", "mod"), ("type ", "type"), ("const ", "const"), ("let ", "let"),
+        ("fn ", "fn"),
+        ("pub fn", "fn"),
+        ("def ", "def"),
+        ("func ", "func"),
+        ("struct ", "struct"),
+        ("enum ", "enum"),
+        ("trait ", "trait"),
+        ("impl ", "impl"),
+        ("class ", "class"),
+        ("interface ", "interface"),
+        ("mod ", "mod"),
+        ("type ", "type"),
+        ("const ", "const"),
+        ("let ", "let"),
     ] {
-        if t.contains(needle) && t.find(needle).unwrap_or(usize::MAX) < 12 { return kind; }
+        if t.contains(needle) && t.find(needle).unwrap_or(usize::MAX) < 12 {
+            return kind;
+        }
     }
     "symbol"
 }
@@ -281,9 +357,13 @@ fn span(lines: &[&str], start: usize, is_py: bool, is_brace: bool) -> (u64, Stri
 
 /// Word-boundary references in `body` to names in `name_to_files`, excluding
 /// `self_name`. Returns the set of referenced symbol names (deduped).
-fn referenced_names(body: &str, name_to_files: &HashMap<String, Vec<usize>>, self_name: &str) -> Vec<String> {
+fn referenced_names(
+    body: &str,
+    name_to_files: &HashMap<String, Vec<usize>>,
+    self_name: &str,
+) -> Vec<String> {
     let mut hits = HashSet::new();
-    for (name, _idxs) in name_to_files {
+    for name in name_to_files.keys() {
         // Skip self, empties, and 1-2 char names — at word scale a tiny match
         // is far more likely a local/parameter/comment word than a symbol.
         if name == self_name || name.is_empty() || name.chars().count() < 3 {
@@ -327,7 +407,12 @@ fn word_boundary_contains(text: &str, word: &str) -> bool {
 }
 
 pub fn register_graph(k: &mut Kernel) {
-    k.register("code.graph", GRAPH_DESC, nct_core::schema::schema_for::<GraphArgs>(), std::sync::Arc::new(GraphHandler));
+    k.register(
+        "code.graph",
+        GRAPH_DESC,
+        nct_core::schema::schema_for::<GraphArgs>(),
+        std::sync::Arc::new(GraphHandler),
+    );
 }
 
 #[cfg(test)]
@@ -336,12 +421,27 @@ mod graph_tests {
 
     #[test]
     fn word_boundary_match_is_identifier_aware() {
-        assert!(word_boundary_contains("call validate_token(5)", "validate_token"));
-        assert!(!word_boundary_contains("validate_token2 is different", "validate_token"));
-        assert!(word_boundary_contains("fn main() { validate_token(); }", "validate_token"));
+        assert!(word_boundary_contains(
+            "call validate_token(5)",
+            "validate_token"
+        ));
+        assert!(!word_boundary_contains(
+            "validate_token2 is different",
+            "validate_token"
+        ));
+        assert!(word_boundary_contains(
+            "fn main() { validate_token(); }",
+            "validate_token"
+        ));
         assert!(!word_boundary_contains("nothing here", "validate_token"));
-        assert!(word_boundary_contains("a validate_token b", "validate_token"));
-        assert!(!word_boundary_contains("a validatetoken b", "validate_token"));
+        assert!(word_boundary_contains(
+            "a validate_token b",
+            "validate_token"
+        ));
+        assert!(!word_boundary_contains(
+            "a validatetoken b",
+            "validate_token"
+        ));
     }
 
     #[test]
@@ -356,10 +456,56 @@ mod graph_tests {
 
     #[test]
     fn span_stops_at_dedent_in_python() {
-        let lines = &["def a():", "    x = 1", "    return x", "def b():", "    pass"];
+        let lines = &[
+            "def a():",
+            "    x = 1",
+            "    return x",
+            "def b():",
+            "    pass",
+        ];
         let (end, body) = span(lines, 0, true, false);
         assert_eq!(end, 3);
         assert!(body.contains("return x"));
+    }
+
+    #[test]
+    fn scan_records_symbol_span_end() {
+        let mut kinds = HashMap::new();
+        let syms = scan(
+            "fn add(a: i32) -> i32 {\n    a + 1\n}\n",
+            "rust",
+            "x.rs",
+            &mut kinds,
+        );
+        assert_eq!(syms.len(), 1);
+        assert_eq!(syms[0].line, 1);
+        assert_eq!(syms[0].end, 3, "end must be the closing-brace line");
+    }
+
+    #[test]
+    fn code_graph_node_json_emits_end_line() {
+        // The scan test above covers the internal span; this walks the real
+        // handler so the `endLine` key in the emitted node JSON is pinned too.
+        let dir = std::env::temp_dir().join(format!(
+            "nct-graph-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x.rs"), "fn add(a: i32) -> i32 {\n    a + 1\n}\n").unwrap();
+        let k = Kernel::new(dir.clone()).unwrap();
+        let out = GraphHandler.call(&k, &json!({ "path": "x.rs" })).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(out["nodes"][0]["line"], json!(1));
+        assert_eq!(
+            out["nodes"][0]["endLine"],
+            json!(3),
+            "code.graph node JSON must carry endLine: {out}"
+        );
     }
 
     #[test]
@@ -369,7 +515,10 @@ mod graph_tests {
         name_to_files.insert("main".to_string(), vec![1]);
         let body = "fn main() {\n    let ok = validate_token(5);\n}";
         let refs = referenced_names(body, &name_to_files, "main");
-        assert!(refs.contains(&"validate_token".to_string()), "got: {refs:?}");
+        assert!(
+            refs.contains(&"validate_token".to_string()),
+            "got: {refs:?}"
+        );
         // self is excluded
         let refs2 = referenced_names(body, &name_to_files, "validate_token");
         assert!(!refs2.contains(&"validate_token".to_string()));

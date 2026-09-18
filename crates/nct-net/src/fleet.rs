@@ -38,7 +38,8 @@ struct FleetState {
 }
 
 fn state() -> std::sync::MutexGuard<'static, FleetState> {
-    static STATE: std::sync::LazyLock<Mutex<FleetState>> = std::sync::LazyLock::new(|| Mutex::new(FleetState::default()));
+    static STATE: std::sync::LazyLock<Mutex<FleetState>> =
+        std::sync::LazyLock::new(|| Mutex::new(FleetState::default()));
     STATE.lock().unwrap()
 }
 
@@ -56,7 +57,11 @@ pub fn fleet_status() -> (usize, Vec<String>) {
 
 /// Query one instance of the fleet. Returns Err when the fleet is empty or
 /// every tried member failed — the caller degrades gracefully.
-pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec<RawResult>), ToolError> {
+pub fn search(
+    query: &str,
+    limit: usize,
+    timeout_ms: u64,
+) -> Result<(String, Vec<RawResult>), ToolError> {
     ensure_fresh()?;
     let (members, start_idx) = {
         let s = state();
@@ -82,11 +87,21 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
         let url = format!(
             "{}{}search?q={}&format=json",
             member.base_url,
-            if member.base_url.ends_with('/') { "" } else { "/" },
+            if member.base_url.ends_with('/') {
+                ""
+            } else {
+                "/"
+            },
             super::engines::urlencode(query)
         );
-        let Ok(parsed) = super::ssrf::parse_http_url(&url) else { continue };
-        let fetched = super::httpx::fetch(super::httpx::FetchOpts::get(parsed).timeout(timeout_ms.min(PROBE_TIMEOUT_MS)).max_body(1_000_000));
+        let Ok(parsed) = super::ssrf::parse_http_url(&url) else {
+            continue;
+        };
+        let fetched = super::httpx::fetch(
+            super::httpx::FetchOpts::get(parsed)
+                .timeout(timeout_ms.min(PROBE_TIMEOUT_MS))
+                .max_body(1_000_000),
+        );
         match fetched {
             Ok(outcome) if outcome.ok => match sources::parse_searxng(&outcome.body, limit) {
                 Ok(results) if !results.is_empty() => {
@@ -107,7 +122,11 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
                     let html_url = format!(
                         "{}{}search?q={}",
                         member.base_url,
-                        if member.base_url.ends_with('/') { "" } else { "/" },
+                        if member.base_url.ends_with('/') {
+                            ""
+                        } else {
+                            "/"
+                        },
                         super::engines::urlencode(query)
                     );
                     if let Ok(html_parsed) = super::ssrf::parse_http_url(&html_url) {
@@ -115,10 +134,14 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
                             super::httpx::FetchOpts::get(html_parsed)
                                 .timeout(timeout_ms.min(PROBE_TIMEOUT_MS))
                                 .max_body(1_000_000)
-                                .header("Accept", "text/html")
+                                .header("Accept", "text/html"),
                         ) {
                             if html_outcome.ok {
-                                let results = sources::parse_searxng_html(&html_outcome.body, &member.base_url, limit);
+                                let results = sources::parse_searxng_html(
+                                    &html_outcome.body,
+                                    &member.base_url,
+                                    limit,
+                                );
                                 if !results.is_empty() {
                                     mark_health(&member.base_url, true, None);
                                     return Ok((member.base_url.clone(), results));
@@ -137,7 +160,11 @@ pub fn search(query: &str, limit: usize, timeout_ms: u64) -> Result<(String, Vec
             }
         }
     }
-    Err(ToolError::with_hint("ERR_ENGINE", "all tried fleet members failed", json!({ "lastError": last_err })))
+    Err(ToolError::with_hint(
+        "ERR_ENGINE",
+        "all tried fleet members failed",
+        json!({ "lastError": last_err }),
+    ))
 }
 
 fn mark_health(base_url: &str, ok: bool, error: Option<String>) {
@@ -176,11 +203,13 @@ fn ensure_fresh() -> Result<(), ToolError> {
             // another thread is refreshing; proceed with whatever we have
             return Ok(());
         }
-        s.refreshing.store(true, std::sync::atomic::Ordering::Relaxed);
+        s.refreshing
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let result = refresh_inner();
     let mut s = state();
-    s.refreshing.store(false, std::sync::atomic::Ordering::Relaxed);
+    s.refreshing
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     s.refreshed_at = Some(Instant::now());
     if let Err(e) = result {
         s.last_error = Some(e.message.clone());
@@ -191,17 +220,29 @@ fn ensure_fresh() -> Result<(), ToolError> {
 fn refresh_inner() -> Result<(), ToolError> {
     // 1. registry fetch (cached by the net cache? no — separate tiny fetch)
     let registry = super::ssrf::parse_http_url(REGISTRY_URL)?;
-    let outcome = super::httpx::fetch(super::httpx::FetchOpts::get(registry).timeout(20_000).max_body(4_000_000))?;
+    let outcome = super::httpx::fetch(
+        super::httpx::FetchOpts::get(registry)
+            .timeout(20_000)
+            .max_body(4_000_000),
+    )?;
     if !outcome.ok {
-        return Err(ToolError::with_hint("ERR_ENGINE", format!("searx.space registry returned HTTP {}", outcome.status), json!({})));
+        return Err(ToolError::with_hint(
+            "ERR_ENGINE",
+            format!("searx.space registry returned HTTP {}", outcome.status),
+            json!({}),
+        ));
     }
     // 2. candidates = https, status 200, highest uptime first
     let candidates = sources::instances_from_searxspace(&outcome.body, FLEET_SIZE * 4);
     if candidates.is_empty() {
-        return Err(ToolError::new("ERR_ENGINE", "registry listed no usable candidates"));
+        return Err(ToolError::new(
+            "ERR_ENGINE",
+            "registry listed no usable candidates",
+        ));
     }
     // 3. probe in parallel: format=json?q=test, keep 200+parseable, rank by latency
-    let probes: Vec<std::sync::Arc<String>> = candidates.into_iter().map(std::sync::Arc::new).collect();
+    let probes: Vec<std::sync::Arc<String>> =
+        candidates.into_iter().map(std::sync::Arc::new).collect();
     let (tx, rx) = std::sync::mpsc::channel::<(String, u64)>();
     let mut handles = Vec::new();
     for chunk in probes.chunks((probes.len() / 8).max(1)) {
@@ -209,13 +250,26 @@ fn refresh_inner() -> Result<(), ToolError> {
         let chunk: Vec<_> = chunk.to_vec();
         handles.push(std::thread::spawn(move || {
             for url in chunk {
-                let probe = format!("{url}{}search?q=test&format=json", if url.ends_with('/') { "" } else { "/" });
+                let probe = format!(
+                    "{url}{}search?q=test&format=json",
+                    if url.ends_with('/') { "" } else { "/" }
+                );
                 let started = Instant::now();
-                let ok = super::ssrf::parse_http_url(&probe).ok()
-                    .and_then(|p| super::httpx::fetch(super::httpx::FetchOpts::get(p).timeout(PROBE_TIMEOUT_MS).max_body(512_000)).ok())
+                let ok = super::ssrf::parse_http_url(&probe)
+                    .ok()
+                    .and_then(|p| {
+                        super::httpx::fetch(
+                            super::httpx::FetchOpts::get(p)
+                                .timeout(PROBE_TIMEOUT_MS)
+                                .max_body(512_000),
+                        )
+                        .ok()
+                    })
                     .map(|o| {
                         o.status == 200
-                            && sources::parse_searxng(&o.body, 1).map(|r| !r.is_empty()).unwrap_or(false)
+                            && sources::parse_searxng(&o.body, 1)
+                                .map(|r| !r.is_empty())
+                                .unwrap_or(false)
                     })
                     .unwrap_or(false);
                 if ok {
@@ -230,7 +284,10 @@ fn refresh_inner() -> Result<(), ToolError> {
     }
     let mut members: Vec<FleetMember> = rx
         .into_iter()
-        .map(|(base_url, latency_ms)| FleetMember { base_url, latency_ms })
+        .map(|(base_url, latency_ms)| FleetMember {
+            base_url,
+            latency_ms,
+        })
         .collect();
     members.sort_by_key(|m| m.latency_ms);
     members.truncate(FLEET_SIZE);

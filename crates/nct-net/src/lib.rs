@@ -33,8 +33,18 @@ pub const HTTP_DESC: &str = "Perform a raw HTTP request. Returns status, headers
 pub const PROBE_DESC: &str = "Check whether a TCP port is open. Replaces nc/netstat probing.";
 
 pub fn register(k: &mut Kernel) {
-    k.register("net.http", HTTP_DESC, nct_core::schema::schema_for::<HttpArgs>(), std::sync::Arc::new(HttpHandler));
-    k.register("net.probePort", PROBE_DESC, nct_core::schema::schema_for::<ProbeArgs>(), std::sync::Arc::new(ProbeHandler));
+    k.register(
+        "net.http",
+        HTTP_DESC,
+        nct_core::schema::schema_for::<HttpArgs>(),
+        std::sync::Arc::new(HttpHandler),
+    );
+    k.register(
+        "net.probePort",
+        PROBE_DESC,
+        nct_core::schema::schema_for::<ProbeArgs>(),
+        std::sync::Arc::new(ProbeHandler),
+    );
     fetch::register(k);
     cite::register(k);
     research::register_research(k);
@@ -119,12 +129,16 @@ impl Handler for HttpHandler {
             ssrf::assert_public(&a.url)?;
         }
         if !(a.url.starts_with("http://") || a.url.starts_with("https://")) {
-            return Err(ToolError::with_hint("ERR_BAD_INPUT", "url must be an http(s) URL", json!({ "got": a.url })));
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                "url must be an http(s) URL",
+                json!({ "got": a.url }),
+            ));
         }
         let timeout = a.timeoutMs.unwrap_or(30_000);
         let follow = a.followRedirects.unwrap_or(true);
         let max_redir = a.maxRedirects.unwrap_or(10) as usize;
-        let agent_redirects = (if follow { max_redir.max(1).min(20) } else { 0 }) as u32;
+        let agent_redirects = (if follow { max_redir.clamp(1, 20) } else { 0 }) as u32;
         let started = Instant::now();
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_millis(timeout))
@@ -134,18 +148,35 @@ impl Handler for HttpHandler {
         // `headers` win on key conflict (set below).
         let mut auth_header: Option<(String, String)> = None;
         if let Some(auth) = &a.auth {
-            let auth_type = auth.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+            let auth_type = auth
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_lowercase();
             match auth_type.as_str() {
                 "basic" => {
-                    let user = auth.get("user").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                    let pass = auth.get("pass").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                    let user = auth
+                        .get("user")
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let pass = auth
+                        .get("pass")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let creds = format!("{user}:{pass}");
                     use base64::Engine as _;
-                    let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
+                    let encoded =
+                        base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
                     auth_header = Some(("Authorization".to_string(), format!("Basic {encoded}")));
                 }
                 "bearer" => {
-                    let token = auth.get("token").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                    let token = auth
+                        .get("token")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     auth_header = Some(("Authorization".to_string(), format!("Bearer {token}")));
                 }
                 other => {
@@ -168,7 +199,11 @@ impl Handler for HttpHandler {
                 let boundary = format!("nc-tools-{:x}", started.elapsed().as_nanos());
                 let mut buf = Vec::new();
                 for part in parts {
-                    let name = part.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let name = part
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let value = match part.get("value") {
                         Some(Value::String(s)) => s.clone(),
                         Some(v) => v.to_string(),
@@ -183,7 +218,9 @@ impl Handler for HttpHandler {
                             buf.push(format!("Content-Type: {ct}\r\n"));
                         }
                     } else {
-                        buf.push(format!("Content-Disposition: form-data; name=\"{name}\"\r\n"));
+                        buf.push(format!(
+                            "Content-Disposition: form-data; name=\"{name}\"\r\n"
+                        ));
                     }
                     buf.push("\r\n".to_string());
                     buf.push(value);
@@ -203,20 +240,32 @@ impl Handler for HttpHandler {
             "PATCH" => agent.patch(&a.url),
             "DELETE" => agent.delete(&a.url),
             "HEAD" => agent.head(&a.url),
-            other => return Err(ToolError::new("ERR_BAD_INPUT", format!("unsupported method: {other}"))),
+            other => {
+                return Err(ToolError::new(
+                    "ERR_BAD_INPUT",
+                    format!("unsupported method: {other}"),
+                ))
+            }
         };
         if let Some((hk, hv)) = &auth_header {
             req = req.set(hk, hv);
         }
         if let Some(headers) = &a.headers {
             for (k, v) in headers {
-                let vs = v.as_str().map(String::from).unwrap_or_else(|| v.to_string());
+                let vs = v
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| v.to_string());
                 req = req.set(k, &vs);
             }
         }
         // multipart forces its Content-Type unless the caller set one in headers.
         if let Some((multipart_ct, _)) = &multipart_body {
-            let has_ct = a.headers.as_ref().map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type"))).unwrap_or(false);
+            let has_ct = a
+                .headers
+                .as_ref()
+                .map(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")))
+                .unwrap_or(false);
             if !has_ct {
                 req = req.set("Content-Type", multipart_ct);
             }
@@ -248,7 +297,11 @@ impl Handler for HttpHandler {
                     }
                 }
                 let resp_url = r.get_url().to_string();
-                let redirect_chain: Vec<String> = if resp_url != a.url { vec![a.url.clone(), resp_url.clone()] } else { vec![a.url.clone()] };
+                let redirect_chain: Vec<String> = if resp_url != a.url {
+                    vec![a.url.clone(), resp_url.clone()]
+                } else {
+                    vec![a.url.clone()]
+                };
                 let mut body = String::new();
                 let mut capped = r.into_reader().take((k.cfg.limits.net_max_body + 1) as u64);
                 let _ = capped.read_to_string(&mut body);
@@ -296,9 +349,9 @@ impl Handler for ProbeHandler {
         let timeout = a.timeoutMs.unwrap_or(2000);
         let started = Instant::now();
         let open = TcpStream::connect_timeout(
-            &format!("{host}:{}", a.port)
-                .parse()
-                .map_err(|_| ToolError::with_hint("ERR_BAD_INPUT", "invalid host", json!({ "got": host })))?,
+            &format!("{host}:{}", a.port).parse().map_err(|_| {
+                ToolError::with_hint("ERR_BAD_INPUT", "invalid host", json!({ "got": host }))
+            })?,
             Duration::from_millis(timeout),
         )
         .is_ok();
@@ -331,7 +384,10 @@ mod http_ext_tests {
     #[test]
     fn unsupported_auth_type_errors() {
         let k = kernel();
-        let out = k.call("net.http", &json!({ "url": "https://example.com", "auth": { "type": "digest", "user": "u" } }));
+        let out = k.call(
+            "net.http",
+            &json!({ "url": "https://example.com", "auth": { "type": "digest", "user": "u" } }),
+        );
         assert!(!out.ok);
         assert_eq!(out.error.unwrap().code, "ERR_BAD_INPUT");
     }
@@ -348,7 +404,10 @@ mod http_ext_tests {
     #[test]
     fn max_redirects_bound_is_schema_enforced() {
         let k = kernel();
-        let out = k.call("net.http", &json!({ "url": "https://example.com", "maxRedirects": 99 }));
+        let out = k.call(
+            "net.http",
+            &json!({ "url": "https://example.com", "maxRedirects": 99 }),
+        );
         // serde_json parse: schemars describes the bound; parse_args does not enforce. Just verify maxRedirects is accepted.
         let _ = out;
     }

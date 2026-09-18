@@ -99,7 +99,10 @@ mod tests {
     #[test]
     fn authority_grows_logarithmically_and_is_bounded() {
         let dir = std::env::temp_dir().join(format!("nct-auth-{}", std::process::id()));
-        let mut a = AuthorityStore { domains: HashMap::new(), path: dir.join("authority.json") };
+        let mut a = AuthorityStore {
+            domains: HashMap::new(),
+            path: dir.join("authority.json"),
+        };
         assert_eq!(a.score("example.com"), 0.0);
         for _ in 0..10 {
             a.bump("example.com", 1);
@@ -110,7 +113,10 @@ mod tests {
         }
         let s1000 = a.score("example.com");
         assert!(s1000 > s10, "more usage must score higher");
-        assert!(s1000 <= 4.0 + f64::EPSILON, "score must clamp at 4.0, got {s1000}");
+        assert!(
+            s1000 <= 4.0 + f64::EPSILON,
+            "score must clamp at 4.0, got {s1000}"
+        );
         // www-stripping: same host
         assert_eq!(a.score("www.example.com"), s1000);
         let _ = fs::remove_dir_all(dir);
@@ -126,7 +132,10 @@ mod tests {
             a.bump("docs.python.org", 3);
         }
         let reloaded = AuthorityStore::load(&dir);
-        assert!(reloaded.score("docs.python.org") > 0.0, "reload must restore the map");
+        assert!(
+            reloaded.score("docs.python.org") > 0.0,
+            "reload must restore the map"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }

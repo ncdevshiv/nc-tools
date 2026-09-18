@@ -112,7 +112,12 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             "POST" => agent.post(current.as_str()),
             "GET" => agent.get(current.as_str()),
             "HEAD" => agent.head(current.as_str()),
-            m => return Err(ToolError::new("ERR_BAD_INPUT", format!("unsupported method: {m}"))),
+            m => {
+                return Err(ToolError::new(
+                    "ERR_BAD_INPUT",
+                    format!("unsupported method: {m}"),
+                ))
+            }
         };
         for (k, v) in &opts.headers {
             req = req.set(k, v);
@@ -153,11 +158,17 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             if loc.is_empty() || redirects.len() >= opts.max_redirects {
                 return Err(ToolError::with_hint(
                     "ERR_NET",
-                    if loc.is_empty() { "redirect with no Location header" } else { "too many redirects" },
+                    if loc.is_empty() {
+                        "redirect with no Location header"
+                    } else {
+                        "too many redirects"
+                    },
                     json!({ "url": current.as_str(), "redirects": redirects.len() }),
                 ));
             }
-            let next = current.join(&loc).map_err(|e| ToolError::new("ERR_NET", format!("bad redirect Location: {e}")))?;
+            let next = current
+                .join(&loc)
+                .map_err(|e| ToolError::new("ERR_NET", format!("bad redirect Location: {e}")))?;
             if opts.guard_private {
                 crate::ssrf::assert_public_redirect(next.as_str(), redirects.len() + 1)?;
             }
@@ -175,7 +186,12 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             headers.push((name, v.to_string()));
         }
     }
-    let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
 
     let content_type = header("content-type").unwrap_or_default();
     let mut raw: Vec<u8> = Vec::new();

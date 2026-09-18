@@ -24,8 +24,16 @@ pub fn parse_rss(body: &str, limit: usize) -> Vec<RawResult> {
         if title.is_empty() || link.is_empty() {
             continue;
         }
-        let snippet = strip_html(&tag(&block, "description").or_else(|| tag(&block, "summary")).unwrap_or_default());
-        out.push(RawResult { title, url: link, snippet });
+        let snippet = strip_html(
+            &tag(&block, "description")
+                .or_else(|| tag(&block, "summary"))
+                .unwrap_or_default(),
+        );
+        out.push(RawResult {
+            title,
+            url: link,
+            snippet,
+        });
         if out.len() >= limit {
             break;
         }
@@ -34,8 +42,16 @@ pub fn parse_rss(body: &str, limit: usize) -> Vec<RawResult> {
 }
 
 fn split_blocks(body: &str, limit: usize) -> Vec<String> {
-    let open = if body.contains("<item>") { "<item>" } else { "<entry>" };
-    let close = if body.contains("<item>") { "</item>" } else { "</entry>" };
+    let open = if body.contains("<item>") {
+        "<item>"
+    } else {
+        "<entry>"
+    };
+    let close = if body.contains("<item>") {
+        "</item>"
+    } else {
+        "</entry>"
+    };
     let mut blocks = Vec::new();
     let mut rest = body;
     while let Some(start) = rest.find(open) {
@@ -56,20 +72,12 @@ fn split_blocks(body: &str, limit: usize) -> Vec<String> {
 
 fn tag(block: &str, name: &str) -> Option<String> {
     // matches <name>…</name> and <name attr="…">…</name>
-    let search = 0;
-    let _ = search;
-    while let Some(rel) = block[search..].find(&format!("<{name}")) {
-        let start = search + rel;
-        let after_open = match block[start..].find('>') {
-            Some(i) => start + i + 1,
-            None => return None,
-        };
-        let close = format!("</{name}>");
-        let end = block[after_open..].find(&close).map(|i| after_open + i)?;
-        let raw = &block[after_open..end];
-        return Some(decode_xml(raw));
-    }
-    None
+    let start = block.find(&format!("<{name}"))?;
+    let after_open = block[start..].find('>').map(|i| start + i + 1)?;
+    let end = block[after_open..]
+        .find(&format!("</{name}>"))
+        .map(|i| after_open + i)?;
+    Some(decode_xml(&block[after_open..end]))
 }
 
 fn link_of(block: &str) -> String {
@@ -122,23 +130,46 @@ fn strip_html(s: &str) -> String {
 // ---- StackExchange ---------------------------------------------------------------
 
 pub fn parse_stackexchange(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
-    let v: Value = serde_json::from_str(body)
-        .map_err(|e| ToolError::new("ERR_ENGINE", format!("stackexchange returned invalid json: {e}")))?;
+    let v: Value = serde_json::from_str(body).map_err(|e| {
+        ToolError::new(
+            "ERR_ENGINE",
+            format!("stackexchange returned invalid json: {e}"),
+        )
+    })?;
     let mut out = Vec::new();
     if let Some(items) = v["items"].as_array() {
         for item in items {
-            let title = decode_xml(item["title"].as_str().unwrap_or_default()).trim().to_string();
+            let title = decode_xml(item["title"].as_str().unwrap_or_default())
+                .trim()
+                .to_string();
             let link = item["link"].as_str().unwrap_or_default().to_string();
             if title.is_empty() || link.is_empty() {
                 continue;
             }
             let score = item["score"].as_i64().unwrap_or(0);
             let answered = item["is_answered"].as_bool().unwrap_or(false);
-            let tags = item["tags"].as_array().map(|t| t.iter().filter_map(|x| x.as_str()).take(3).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+            let tags = item["tags"]
+                .as_array()
+                .map(|t| {
+                    t.iter()
+                        .filter_map(|x| x.as_str())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             out.push(RawResult {
                 title,
                 url: link,
-                snippet: format!("score {score}{}{}", if answered { ", answered" } else { "" }, if tags.is_empty() { String::new() } else { format!(", tags: {tags}") }),
+                snippet: format!(
+                    "score {score}{}{}",
+                    if answered { ", answered" } else { "" },
+                    if tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", tags: {tags}")
+                    }
+                ),
             });
             if out.len() >= limit {
                 break;
@@ -151,21 +182,38 @@ pub fn parse_stackexchange(body: &str, limit: usize) -> Result<Vec<RawResult>, T
 // ---- OpenAlex --------------------------------------------------------------------
 
 pub fn parse_openalex(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
-    let v: Value = serde_json::from_str(body)
-        .map_err(|e| ToolError::new("ERR_ENGINE", format!("openalex returned invalid json: {e}")))?;
+    let v: Value = serde_json::from_str(body).map_err(|e| {
+        ToolError::new("ERR_ENGINE", format!("openalex returned invalid json: {e}"))
+    })?;
     let mut out = Vec::new();
     if let Some(results) = v["results"].as_array() {
         for r in results {
-            let title = r["display_name"].as_str().unwrap_or_default().trim().to_string();
+            let title = r["display_name"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             if title.is_empty() {
                 continue;
             }
             let doi = r["doi"].as_str().unwrap_or_default().to_string();
-            let landing = r["primary_location"]["landing_page_url"].as_str().unwrap_or_default().to_string();
-            let url = if !landing.is_empty() { landing } else if !doi.is_empty() { doi } else { continue };
+            let landing = r["primary_location"]["landing_page_url"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let url = if !landing.is_empty() {
+                landing
+            } else if !doi.is_empty() {
+                doi
+            } else {
+                continue;
+            };
             let year = r["publication_year"].as_i64().unwrap_or(0);
             let cited_by = r["cited_by_count"].as_i64().unwrap_or(0);
-            let venue = r["primary_location"]["source"]["display_name"].as_str().unwrap_or_default().to_string();
+            let venue = r["primary_location"]["source"]["display_name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let mut bits: Vec<String> = Vec::new();
             if year > 0 {
                 bits.push(year.to_string());
@@ -176,7 +224,11 @@ pub fn parse_openalex(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolEr
             if !venue.is_empty() {
                 bits.push(venue);
             }
-            out.push(RawResult { title, url, snippet: bits.join(", ") });
+            out.push(RawResult {
+                title,
+                url,
+                snippet: bits.join(", "),
+            });
             if out.len() >= limit {
                 break;
             }
@@ -190,13 +242,24 @@ pub fn parse_openalex(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolEr
 pub fn parse_arxiv(body: &str, limit: usize) -> Vec<RawResult> {
     let mut out = Vec::new();
     for block in split_blocks(body, limit) {
-        let title = tag(&block, "title").unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+        let title = tag(&block, "title")
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if title.is_empty() {
             continue;
         }
         let link = link_of(&block);
-        let summary = strip_html(&tag(&block, "summary").unwrap_or_default()).chars().take(300).collect::<String>();
-        out.push(RawResult { title, url: link, snippet: summary });
+        let summary = strip_html(&tag(&block, "summary").unwrap_or_default())
+            .chars()
+            .take(300)
+            .collect::<String>();
+        out.push(RawResult {
+            title,
+            url: link,
+            snippet: summary,
+        });
         if out.len() >= limit {
             break;
         }
@@ -219,8 +282,22 @@ pub fn parse_npm(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> 
             }
             let desc = pkg["description"].as_str().unwrap_or_default().to_string();
             let version = pkg["version"].as_str().unwrap_or_default().to_string();
-            let link = pkg["links"]["npm"].as_str().map(String::from).unwrap_or_else(|| format!("https://www.npmjs.com/package/{name}"));
-            out.push(RawResult { title: format!("{name} (npm{})", if version.is_empty() { String::new() } else { format!(" v{version}") }), url: link, snippet: desc });
+            let link = pkg["links"]["npm"]
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| format!("https://www.npmjs.com/package/{name}"));
+            out.push(RawResult {
+                title: format!(
+                    "{name} (npm{})",
+                    if version.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" v{version}")
+                    }
+                ),
+                url: link,
+                snippet: desc,
+            });
             if out.len() >= limit {
                 break;
             }
@@ -230,8 +307,12 @@ pub fn parse_npm(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> 
 }
 
 pub fn parse_crates(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolError> {
-    let v: Value = serde_json::from_str(body)
-        .map_err(|e| ToolError::new("ERR_ENGINE", format!("crates.io returned invalid json: {e}")))?;
+    let v: Value = serde_json::from_str(body).map_err(|e| {
+        ToolError::new(
+            "ERR_ENGINE",
+            format!("crates.io returned invalid json: {e}"),
+        )
+    })?;
     let mut out = Vec::new();
     if let Some(crates) = v["crates"].as_array() {
         for c in crates {
@@ -243,9 +324,24 @@ pub fn parse_crates(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolErro
             let downloads = c["downloads"].as_i64().unwrap_or(0);
             let version = c["max_version"].as_str().unwrap_or_default().to_string();
             out.push(RawResult {
-                title: format!("{name} (crates.io{})", if version.is_empty() { String::new() } else { format!(" v{version}") }),
+                title: format!(
+                    "{name} (crates.io{})",
+                    if version.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" v{version}")
+                    }
+                ),
                 url: format!("https://crates.io/crates/{name}"),
-                snippet: format!("{}{}", desc, if downloads > 0 { format!(" — {downloads} downloads") } else { String::new() }),
+                snippet: format!(
+                    "{}{}",
+                    desc,
+                    if downloads > 0 {
+                        format!(" — {downloads} downloads")
+                    } else {
+                        String::new()
+                    }
+                ),
             });
             if out.len() >= limit {
                 break;
@@ -286,19 +382,27 @@ pub fn parse_searxng(body: &str, limit: usize) -> Result<Vec<RawResult>, ToolErr
 /// p.result-content for snippets — structures that are stable across themes.
 /// Only called when JSON 429s/403s (the fleet falls back to HTML explicitly).
 pub fn parse_searxng_html(body: &str, base_url: &str, limit: usize) -> Vec<RawResult> {
-    use scraper::{ElementRef, Selector};
+    use scraper::Selector;
     let doc = scraper::Html::parse_document(body);
-    let sel = Selector::parse("article.result, div.result").unwrap_or_else(|_| Selector::parse("article").unwrap());
-    let title_sel = Selector::parse("h3 a, h3 > a, a.result-link").unwrap_or_else(|_| Selector::parse("h3 a").unwrap());
-    let snippet_sel = Selector::parse("p.result-content, p.content").unwrap_or_else(|_| Selector::parse("p").unwrap());
+    let sel = Selector::parse("article.result, div.result")
+        .unwrap_or_else(|_| Selector::parse("article").unwrap());
+    let title_sel = Selector::parse("h3 a, h3 > a, a.result-link")
+        .unwrap_or_else(|_| Selector::parse("h3 a").unwrap());
+    let snippet_sel = Selector::parse("p.result-content, p.content")
+        .unwrap_or_else(|_| Selector::parse("p").unwrap());
     let link_sel = Selector::parse("a").unwrap();
     let mut out = Vec::new();
     for article in doc.select(&sel) {
-        let title_el = article.select(&title_sel).next().or_else(|| article.select(&link_sel).next());
+        let title_el = article
+            .select(&title_sel)
+            .next()
+            .or_else(|| article.select(&link_sel).next());
         let Some(a) = title_el else { continue };
         let title = a.text().collect::<String>().trim().to_string();
         let href = a.value().attr("href").unwrap_or_default().to_string();
-        if title.is_empty() || href.is_empty() { continue }
+        if title.is_empty() || href.is_empty() {
+            continue;
+        }
         // searxng proxies external URLs via /search?q=… or returns the raw
         // absolute URL — absolutize against the instance for proxy paths.
         let url = if href.starts_with("http://") || href.starts_with("https://") {
@@ -311,9 +415,19 @@ pub fn parse_searxng_html(body: &str, base_url: &str, limit: usize) -> Vec<RawRe
                 format!("{root}/{href}")
             }
         };
-        let snippet = article.select(&snippet_sel).next().map(|e| e.text().collect::<String>().trim().to_string()).unwrap_or_default();
-        out.push(RawResult { title, url, snippet });
-        if out.len() >= limit { break }
+        let snippet = article
+            .select(&snippet_sel)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default();
+        out.push(RawResult {
+            title,
+            url,
+            snippet,
+        });
+        if out.len() >= limit {
+            break;
+        }
     }
     out
 }
@@ -321,8 +435,12 @@ pub fn parse_searxng_html(body: &str, base_url: &str, limit: usize) -> Vec<RawRe
 /// Extract candidate SearXNG instance URLs from the searx.space registry JSON.
 /// Keeps https instances whose last probe was 200, skips onion/i2p/ygg hosts.
 pub fn instances_from_searxspace(body: &str, max_candidates: usize) -> Vec<String> {
-    let Ok(v) = serde_json::from_str::<Value>(body) else { return Vec::new() };
-    let Some(instances) = v["instances"].as_object() else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let Some(instances) = v["instances"].as_object() else {
+        return Vec::new();
+    };
     let mut candidates: Vec<(String, u64)> = Vec::new();
     for (url, info) in instances {
         if !url.starts_with("https://") {
@@ -338,11 +456,19 @@ pub fn instances_from_searxspace(body: &str, max_candidates: usize) -> Vec<Strin
         }
         // uptime field is an object with day/week/month percentages when present
         // (Map index PANICS on missing keys — .get only)
-        let uptime = info["uptime"].as_object().and_then(|u| u.get("month")).and_then(|m| m.as_f64()).unwrap_or(0.0);
+        let uptime = info["uptime"]
+            .as_object()
+            .and_then(|u| u.get("month"))
+            .and_then(|m| m.as_f64())
+            .unwrap_or(0.0);
         candidates.push((url.to_string(), (uptime * 1000.0) as u64));
     }
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    candidates.into_iter().take(max_candidates).map(|(u, _)| u).collect()
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
+    candidates
+        .into_iter()
+        .take(max_candidates)
+        .map(|(u, _)| u)
+        .collect()
 }
 
 #[cfg(test)]
@@ -393,7 +519,10 @@ mod tests {
     fn stackexchange_fixture_parses() {
         let body = r#"{"items":[{"tags":["rust"],"score":4,"is_answered":true,"title":"rust async update of HashMap with &quot;or_insert_with&quot;","link":"https://stackoverflow.com/questions/75504895/x"}]}"#;
         let rs = parse_stackexchange(body, 10).unwrap();
-        assert_eq!(rs[0].title, "rust async update of HashMap with \"or_insert_with\"");
+        assert_eq!(
+            rs[0].title,
+            "rust async update of HashMap with \"or_insert_with\""
+        );
         assert!(rs[0].snippet.contains("score 4") && rs[0].snippet.contains("answered"));
     }
 
@@ -462,6 +591,9 @@ mod tests {
             "https://better.example/":{"http":{"status_code":200},"uptime":{"month":100.0}}
         }}"#;
         let urls = instances_from_searxspace(body, 10);
-        assert_eq!(urls, vec!["https://better.example/", "https://good.example/"]);
+        assert_eq!(
+            urls,
+            vec!["https://better.example/", "https://good.example/"]
+        );
     }
 }

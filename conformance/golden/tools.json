@@ -76,6 +76,10 @@
             "description": "Workspace to coordinate against (default: the session base).",
             "type": "string"
           },
+          "force": {
+            "description": "Take over a path another agent still holds. Refused by default.",
+            "type": "boolean"
+          },
           "holdMs": {
             "description": "Auto-release after this many ms even if this agent crashes (default 10 min).",
             "minimum": 1000,
@@ -621,7 +625,8 @@
           },
           "limit": {
             "minimum": 1,
-            "type": "integer"
+            "type": "integer",
+            "maximum": 100000
           },
           "offset": {
             "description": "1-based line to start from",
@@ -651,7 +656,8 @@
           },
           "limit": {
             "minimum": 1,
-            "type": "integer"
+            "type": "integer",
+            "maximum": 100000
           },
           "paths": {
             "type": "array",
@@ -2198,7 +2204,7 @@
     },
     {
       "name": "search.replace",
-      "description": "Regex search/replace across files. dryRun=true (default) reports per-file match counts without writing; dryRun=false rewrites files (run sys.snapshot first for rollback). Supports $0-$9 capture backrefs ($$ = literal $). Skips binaries and .git/node_modules/target/dist/build/.nc-tools.",
+      "description": "Regex search/replace across files. dryRun=true (default) reports per-file match counts without writing; dryRun=false rewrites files atomically (temp → fsync → rename) and returns a previousHash per changed file so a bad edit is undoable without a snapshot. Supports $0-$9 capture backrefs ($$ = literal $). Skips binaries and .git/node_modules/target/dist/build/.nc-tools.",
       "inputSchema": {
         "type": "object",
         "required": [
@@ -2216,6 +2222,10 @@
           },
           "glob": {
             "type": "string"
+          },
+          "guardLocks": {
+            "description": "When true, refuse the write if ANOTHER agent holds a live advisory lock on any file that would change (hard-write-guard). Default false = the write proceeds but the affected file carries a lockConflict note.",
+            "type": "boolean"
           },
           "maxFiles": {
             "minimum": 1,
@@ -2280,7 +2290,7 @@
             "type": "boolean"
           },
           "repair": {
-            "description": "When true, auto-fix the healthy-but-degraded cases the doctor can repair: superseded/stale coordination rows and orphaned lock releases.",
+            "description": "When true, auto-fix the healthy-but-degraded cases the doctor can repair: superseded rows in the coordination logs and expired lock rows. Runs under the same cross-process file locks the live writers take.",
             "type": "boolean"
           }
         },
@@ -2321,10 +2331,14 @@
     },
     {
       "name": "sys.replay",
-      "description": "Replay journal entries as tool calls (time-machine debugging). Reads tool.call events in a seq range, and by default (dryRun=true) shows what WOULD be re-executed with the original args + recorded result — no side effects. dryRun=false actually re-runs each call through the kernel and returns fresh results next to the originals so you can diff and find the divergence. Restrict with tool= / from= / to=. Each replay call is itself journaled.",
+      "description": "Replay journal entries as tool calls (time-machine debugging). Reads tool.call events in a seq range, and by default (dryRun=true) shows what WOULD be re-executed with the original args + recorded result — no side effects. dryRun=false actually re-runs each call through the kernel and returns fresh results next to the originals so you can diff and find the divergence. Irreversible calls (file writes/deletes, git mutations, proc/exec) are SKIPPED unless confirmWrite=true, because the journal can be weeks old and stale args re-applied to the current tree can destroy it. Restrict with tool= / from= / to= / lastN=. Each replay call is itself journaled.",
       "inputSchema": {
         "type": "object",
         "properties": {
+          "confirmWrite": {
+            "description": "Execute irreversible calls under dryRun=false. Without it they are skipped and reported, since the journal's args are stale.",
+            "type": "boolean"
+          },
           "dryRun": {
             "description": "Dry-run (default true): show what would run, no execution.",
             "type": "boolean"
@@ -2334,6 +2348,7 @@
             "type": "integer"
           },
           "lastN": {
+            "description": "Keep only the most recent `lastN` matching calls (the tail of the range).",
             "minimum": 1,
             "type": "integer",
             "maximum": 500
@@ -2363,6 +2378,10 @@
           "baseDir": {
             "description": "Per-call workspace override: restore into THIS base dir (same one the snapshot was taken from). Default: the session workspace.",
             "type": "string"
+          },
+          "dryRun": {
+            "description": "Preview only: report what a full rollback would restore and delete without touching the tree. A full rollback DELETES every file created after the snapshot — including unrelated work — so preview first.",
+            "type": "boolean"
           },
           "id": {
             "type": "string"

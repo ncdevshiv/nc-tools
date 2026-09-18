@@ -3,7 +3,10 @@
 // kernel's job is to turn its output into data. Each tool accepts `repo`
 // (default: the base dir) so remote agents can work on ANY repository.
 pub mod extra;
-pub use extra::{STASH_DESC, CHERRY_PICK_DESC, TAG_DESC, StashArgs, StashHandler, CherryPickArgs, CherryPickHandler, TagArgs, TagHandler};
+pub use extra::{
+    CherryPickArgs, CherryPickHandler, StashArgs, StashHandler, TagArgs, TagHandler,
+    CHERRY_PICK_DESC, STASH_DESC, TAG_DESC,
+};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,21 +32,85 @@ pub const PUSH_DESC: &str = "Push to a remote (optionally sets upstream).";
 pub const PULL_DESC: &str = "Pull from a remote (ff-only by default — no surprise merge commits).";
 pub const BLAME_DESC: &str = "Per-line blame for a file: commit sha, author, timestamp, content, line number. Uses git blame --line-porcelain.";
 
-
 pub fn register(k: &mut Kernel) {
-    k.register("git.status", STATUS_DESC, nct_core::schema::schema_for::<RepoArgs>(), Arc::new(StatusHandler));
-    k.register("git.diff", DIFF_DESC, nct_core::schema::schema_for::<DiffArgs>(), Arc::new(DiffHandler));
-    k.register("git.add", ADD_DESC, nct_core::schema::schema_for::<AddArgs>(), Arc::new(AddHandler));
-    k.register("git.commit", COMMIT_DESC, nct_core::schema::schema_for::<CommitArgs>(), Arc::new(CommitHandler));
-    k.register("git.log", LOG_DESC, nct_core::schema::schema_for::<LogArgs>(), Arc::new(LogHandler));
-    k.register("git.branch", BRANCH_DESC, nct_core::schema::schema_for::<BranchArgs>(), Arc::new(BranchHandler));
-    k.register("git.checkout", CHECKOUT_DESC, nct_core::schema::schema_for::<CheckoutArgs>(), Arc::new(CheckoutHandler));
-    k.register("git.push", PUSH_DESC, nct_core::schema::schema_for::<PushArgs>(), Arc::new(PushHandler));
-    k.register("git.pull", PULL_DESC, nct_core::schema::schema_for::<PullArgs>(), Arc::new(PullHandler));
-    k.register("git.blame", BLAME_DESC, nct_core::schema::schema_for::<BlameArgs>(), Arc::new(BlameHandler));
-    k.register("git.stash", STASH_DESC, nct_core::schema::schema_for::<StashArgs>(), Arc::new(StashHandler));
-    k.register("git.cherryPick", CHERRY_PICK_DESC, nct_core::schema::schema_for::<CherryPickArgs>(), Arc::new(CherryPickHandler));
-    k.register("git.tag", TAG_DESC, nct_core::schema::schema_for::<TagArgs>(), Arc::new(TagHandler));
+    k.register(
+        "git.status",
+        STATUS_DESC,
+        nct_core::schema::schema_for::<RepoArgs>(),
+        Arc::new(StatusHandler),
+    );
+    k.register(
+        "git.diff",
+        DIFF_DESC,
+        nct_core::schema::schema_for::<DiffArgs>(),
+        Arc::new(DiffHandler),
+    );
+    k.register(
+        "git.add",
+        ADD_DESC,
+        nct_core::schema::schema_for::<AddArgs>(),
+        Arc::new(AddHandler),
+    );
+    k.register(
+        "git.commit",
+        COMMIT_DESC,
+        nct_core::schema::schema_for::<CommitArgs>(),
+        Arc::new(CommitHandler),
+    );
+    k.register(
+        "git.log",
+        LOG_DESC,
+        nct_core::schema::schema_for::<LogArgs>(),
+        Arc::new(LogHandler),
+    );
+    k.register(
+        "git.branch",
+        BRANCH_DESC,
+        nct_core::schema::schema_for::<BranchArgs>(),
+        Arc::new(BranchHandler),
+    );
+    k.register(
+        "git.checkout",
+        CHECKOUT_DESC,
+        nct_core::schema::schema_for::<CheckoutArgs>(),
+        Arc::new(CheckoutHandler),
+    );
+    k.register(
+        "git.push",
+        PUSH_DESC,
+        nct_core::schema::schema_for::<PushArgs>(),
+        Arc::new(PushHandler),
+    );
+    k.register(
+        "git.pull",
+        PULL_DESC,
+        nct_core::schema::schema_for::<PullArgs>(),
+        Arc::new(PullHandler),
+    );
+    k.register(
+        "git.blame",
+        BLAME_DESC,
+        nct_core::schema::schema_for::<BlameArgs>(),
+        Arc::new(BlameHandler),
+    );
+    k.register(
+        "git.stash",
+        STASH_DESC,
+        nct_core::schema::schema_for::<StashArgs>(),
+        Arc::new(StashHandler),
+    );
+    k.register(
+        "git.cherryPick",
+        CHERRY_PICK_DESC,
+        nct_core::schema::schema_for::<CherryPickArgs>(),
+        Arc::new(CherryPickHandler),
+    );
+    k.register(
+        "git.tag",
+        TAG_DESC,
+        nct_core::schema::schema_for::<TagArgs>(),
+        Arc::new(TagHandler),
+    );
 }
 
 use std::sync::Arc;
@@ -211,7 +278,18 @@ macro_rules! impl_has_base_dir {
         })+
     };
 }
-impl_has_base_dir!(RepoArgs, DiffArgs, AddArgs, CommitArgs, LogArgs, BranchArgs, CheckoutArgs, PushArgs, PullArgs, BlameArgs);
+impl_has_base_dir!(
+    RepoArgs,
+    DiffArgs,
+    AddArgs,
+    CommitArgs,
+    LogArgs,
+    BranchArgs,
+    CheckoutArgs,
+    PushArgs,
+    PullArgs,
+    BlameArgs
+);
 
 /// Effective base directory for a git call: the per-call baseDir override
 /// (workspace override) wins over the server root. Mirrors the fs.* family.
@@ -238,9 +316,17 @@ pub(crate) fn git(dir: &std::path::Path, args: &[&str], k: &Kernel) -> Result<St
     let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ToolError::new("ERR_GIT_SPAWN", "git failed to start: spawn git ENOENT"));
+            return Err(ToolError::new(
+                "ERR_GIT_SPAWN",
+                "git failed to start: spawn git ENOENT",
+            ));
         }
-        Err(e) => return Err(ToolError::new("ERR_GIT_SPAWN", format!("git failed to start: {e}"))),
+        Err(e) => {
+            return Err(ToolError::new(
+                "ERR_GIT_SPAWN",
+                format!("git failed to start: {e}"),
+            ))
+        }
     };
     // bounded wait: git is expected to be fast; on timeout the child is killed
     loop {
@@ -263,20 +349,34 @@ pub(crate) fn git(dir: &std::path::Path, args: &[&str], k: &Kernel) -> Result<St
                         .collect();
                     return Err(ToolError::with_hint(
                         "ERR_GIT",
-                        format!("git {} failed (exit {}): {}", args[0], status.code().unwrap_or(-1), tail),
+                        format!(
+                            "git {} failed (exit {}): {}",
+                            args[0],
+                            status.code().unwrap_or(-1),
+                            tail
+                        ),
                         json!({ "args": args, "stderr": err.chars().take(2000).collect::<String>() }),
                     ));
                 }
                 return Ok(out);
             }
             Ok(None) => {
+                if nct_core::is_cancelled() {
+                    nct_core::kill_child_tree(&mut child);
+                    return Err(nct_core::cancelled_error(&format!("git.{}", args[0])));
+                }
                 if started.elapsed() > timeout {
-                    let _ = child.kill();
+                    nct_core::kill_child_tree(&mut child);
                     return Err(ToolError::new("ERR_GIT", "git timed out after 60s"));
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => return Err(ToolError::new("ERR_GIT_SPAWN", format!("git failed to start: {e}"))),
+            Err(e) => {
+                return Err(ToolError::new(
+                    "ERR_GIT_SPAWN",
+                    format!("git failed to start: {e}"),
+                ))
+            }
         }
     }
 }
@@ -298,11 +398,18 @@ impl Handler for StatusHandler {
             .skip(1)
             .map(|l| {
                 let status_code = l.chars().take(2).collect::<String>().trim().to_string();
-                let status_code = if status_code.is_empty() { "?".to_string() } else { status_code };
+                let status_code = if status_code.is_empty() {
+                    "?".to_string()
+                } else {
+                    status_code
+                };
                 let path = l.get(3..).map(|s| s.trim().to_string()).unwrap_or_default();
                 json!({ "status": status_code, "path": path })
             })
-            .filter(|f| f["path"] != json!(".nc-tools") && !f["path"].as_str().unwrap_or("").starts_with(".nc-tools/"))
+            .filter(|f| {
+                f["path"] != json!(".nc-tools")
+                    && !f["path"].as_str().unwrap_or("").starts_with(".nc-tools/")
+            })
             .collect();
         let head = git(&r, &["rev-parse", "--short", "HEAD"], k)
             .ok()
@@ -337,7 +444,10 @@ impl Handler for AddHandler {
         let base = base_of(k, &a)?;
         let r = in_repo(&base, a.repo.as_deref())?;
         if a.paths.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "paths must be a non-empty array"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "paths must be a non-empty array",
+            ));
         }
         let mut git_args: Vec<&str> = vec!["add", "--"];
         for p in &a.paths {
@@ -358,7 +468,9 @@ impl Handler for CommitHandler {
             return Err(ToolError::new("ERR_BAD_INPUT", "message required"));
         }
         git(&r, &["commit", "-m", &a.message], k)?;
-        let sha = git(&r, &["rev-parse", "--short", "HEAD"], k)?.trim().to_string();
+        let sha = git(&r, &["rev-parse", "--short", "HEAD"], k)?
+            .trim()
+            .to_string();
         Ok(json!({ "repo": r.display().to_string(), "sha": sha, "message": a.message }))
     }
 }
@@ -426,10 +538,11 @@ impl Handler for LogHandler {
                 .map(|c| {
                     let mut c = c;
                     let sha = c["sha"].as_str().unwrap_or("").to_string();
-                    let stat_out = git(&r, &["show", "--stat", "--format=", &sha], k)
-                        .unwrap_or_default();
+                    let stat_out =
+                        git(&r, &["show", "--stat", "--format=", &sha], k).unwrap_or_default();
                     let (files, ins, del) = parse_stat(&stat_out);
-                    c["stat"] = json!({ "filesChanged": files, "insertions": ins, "deletions": del });
+                    c["stat"] =
+                        json!({ "filesChanged": files, "insertions": ins, "deletions": del });
                     c
                 })
                 .collect()
@@ -446,16 +559,32 @@ fn parse_stat(out: &str) -> (u64, u64, u64) {
     let mut files = 0u64;
     let mut ins = 0u64;
     let mut del = 0u64;
-    let tail = out.lines().rev().find(|l| l.contains("file") && l.contains("changed")).unwrap_or("");
+    let tail = out
+        .lines()
+        .rev()
+        .find(|l| l.contains("file") && l.contains("changed"))
+        .unwrap_or("");
     // split at commas: " 3 files changed", " 10 insertions(+)", " 2 deletions(-)"
     for part in tail.split(',') {
         let t = part.trim();
         if t.contains("file") && t.contains("changed") {
-            files = t.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            files = t
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
         } else if t.contains("insertion") {
-            ins = t.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            ins = t
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
         } else if t.contains("deletion") {
-            del = t.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            del = t
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
         }
     }
     (files, ins, del)
@@ -472,7 +601,9 @@ impl Handler for BranchHandler {
                 return Err(ToolError::new("ERR_BAD_INPUT", "branch name required"));
             }
             git(&r, &["branch", name.trim()], k)?;
-            return Ok(json!({ "repo": r.display().to_string(), "branch": name.trim(), "created": true }));
+            return Ok(
+                json!({ "repo": r.display().to_string(), "branch": name.trim(), "created": true }),
+            );
         }
         let out = git(&r, &["branch", "--list"], k)?;
         let branches: Vec<Value> = out
@@ -611,7 +742,11 @@ impl Handler for BlameHandler {
         let r = in_repo(&base, a.repo.as_deref())?;
         let abs = resolve_checked(&base, &a.path)?;
         if !abs.exists() {
-            return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such file: {}", a.path), json!({ "path": a.path })));
+            return Err(ToolError::with_hint(
+                "ERR_NOT_FOUND",
+                format!("no such file: {}", a.path),
+                json!({ "path": a.path }),
+            ));
         }
         let rel = nct_core::helpers::rel_slash(&r, &abs);
         let mut gargs: Vec<String> = vec!["blame".to_string(), "--line-porcelain".to_string()];
@@ -683,13 +818,21 @@ mod base_dir_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         std::process::Command::new("git")
-            .args(["init", "-b", "main"])
+            .args(["-c", "core.autocrlf=false", "init", "-b", "main"])
             .current_dir(&dir)
             .status()
             .unwrap();
         fs::write(dir.join("README.md"), format!("{tag}\n")).unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(&dir).status().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(&dir).status().unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.autocrlf=false", "add", "."])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.autocrlf=false", "commit", "-m", "init"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
         dir
     }
 
@@ -706,17 +849,36 @@ mod base_dir_tests {
         let def = git_kernel(&server_root).call("git.status", &json!({}));
         assert!(def.ok, "status default should succeed: {:?}", def.error);
         let def_repo = def.result.unwrap()["repo"].as_str().unwrap().to_string();
-        assert!(def_repo.contains("server"), "default should be the server root repo: {def_repo}");
+        assert!(
+            def_repo.contains("server"),
+            "default should be the server root repo: {def_repo}"
+        );
 
         // with baseDir=target: the OTHER workspace's repo
-        let overridden = k.call("git.status", &json!({ "baseDir": target.display().to_string() }));
-        assert!(overridden.ok, "status baseDir should succeed: {:?}", overridden.error);
-        let o_repo = overridden.result.unwrap()["repo"].as_str().unwrap().to_string();
-        assert!(o_repo.contains("target"), "baseDir should route to the target repo: {o_repo}");
+        let overridden = k.call(
+            "git.status",
+            &json!({ "baseDir": target.display().to_string() }),
+        );
+        assert!(
+            overridden.ok,
+            "status baseDir should succeed: {:?}",
+            overridden.error
+        );
+        let o_repo = overridden.result.unwrap()["repo"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            o_repo.contains("target"),
+            "baseDir should route to the target repo: {o_repo}"
+        );
 
         // both must read the same file; target README says "target", so diff
         // the committed tree to prove we touched the right repo.
-        let head = k.call("git.log", &json!({ "baseDir": target.display().to_string(), "maxCount": 1 }));
+        let head = k.call(
+            "git.log",
+            &json!({ "baseDir": target.display().to_string(), "maxCount": 1 }),
+        );
         assert!(head.ok);
         let head_val = head.result.unwrap();
         let commits = head_val["commits"].as_array().unwrap();
@@ -736,11 +898,18 @@ mod base_dir_tests {
     fn bad_baseDir_errors_instead_of_silent_fallback() {
         let server_root = init_repo("server2");
         let k = git_kernel(&server_root);
-        let out = k.call("git.status", &json!({ "baseDir": "/definitely/not/a/real/dir" }));
+        let out = k.call(
+            "git.status",
+            &json!({ "baseDir": "/definitely/not/a/real/dir" }),
+        );
         assert!(!out.ok, "bad baseDir must fail, got false-ok");
         let e = out.error.unwrap();
         // Kernel rejects the non-existent dir before any git work happens.
-        assert_eq!(e.code, "ERR_BAD_PATH", "should reject the dir as a bad path: {}", e.code);
+        assert_eq!(
+            e.code, "ERR_BAD_PATH",
+            "should reject the dir as a bad path: {}",
+            e.code
+        );
         let _ = fs::remove_dir_all(&server_root);
     }
 
@@ -752,15 +921,31 @@ mod base_dir_tests {
         let k = git_kernel(&server_root);
         // mutate a file in the target
         fs::write(target.join("feature.txt"), "feature work\n").unwrap();
-        let add = k.call("git.add", &json!({ "paths": ["feature.txt"], "baseDir": target.display().to_string() }));
+        let add = k.call(
+            "git.add",
+            &json!({ "paths": ["feature.txt"], "baseDir": target.display().to_string() }),
+        );
         assert!(add.ok, "add should succeed: {:?}", add.error);
-        let commit = k.call("git.commit", &json!({ "message": "feat: via baseDir", "baseDir": target.display().to_string() }));
+        let commit = k.call(
+            "git.commit",
+            &json!({ "message": "feat: via baseDir", "baseDir": target.display().to_string() }),
+        );
         assert!(commit.ok, "commit should succeed: {:?}", commit.error);
         // target repo now has 2 commits; server root still 1 (untouched).
-        let tgt_log = k.call("git.log", &json!({ "baseDir": target.display().to_string(), "maxCount": 10 }));
-        assert_eq!(tgt_log.result.unwrap()["commits"].as_array().unwrap().len(), 2);
+        let tgt_log = k.call(
+            "git.log",
+            &json!({ "baseDir": target.display().to_string(), "maxCount": 10 }),
+        );
+        assert_eq!(
+            tgt_log.result.unwrap()["commits"].as_array().unwrap().len(),
+            2
+        );
         let srv_log = k.call("git.log", &json!({ "maxCount": 10 }));
-        assert_eq!(srv_log.result.unwrap()["commits"].as_array().unwrap().len(), 1, "server root must be untouched");
+        assert_eq!(
+            srv_log.result.unwrap()["commits"].as_array().unwrap().len(),
+            1,
+            "server root must be untouched"
+        );
         let _ = fs::remove_dir_all(&server_root);
         let _ = fs::remove_dir_all(&target);
     }
@@ -778,17 +963,36 @@ mod log_filter_tests {
     }
 
     fn repo(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("nct-logfilter-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-logfilter-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        std::process::Command::new("git").args(["init", "-b", "main"]).current_dir(&dir).status().unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.autocrlf=false", "init", "-b", "main"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
         dir
     }
 
     fn commit(dir: &std::path::Path, file: &str, content: &str, msg: &str) {
         fs::write(dir.join(file), content).unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(dir).status().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", msg]).current_dir(dir).status().unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.autocrlf=false", "add", "."])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-c", "core.autocrlf=false", "commit", "-m", msg])
+            .current_dir(dir)
+            .status()
+            .unwrap();
     }
 
     #[test]
@@ -797,7 +1001,10 @@ mod log_filter_tests {
         let k = git_kernel(&r);
         commit(&r, "a.txt", "v1", "feat: add a");
         commit(&r, "b.txt", "v1", "feat: add b");
-        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "path": "b.txt" }));
+        let out = k.call(
+            "git.log",
+            &json!({ "repo": r.display().to_string(), "path": "b.txt" }),
+        );
         assert!(out.ok);
         let commits = out.result.unwrap()["commits"].as_array().unwrap().len();
         assert_eq!(commits, 1, "only the b.txt commit should match");
@@ -810,7 +1017,10 @@ mod log_filter_tests {
         let k = git_kernel(&r);
         commit(&r, "a.txt", "v1", "feat: shiny new thing");
         commit(&r, "a.txt", "v2", "fix: a bug");
-        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "grep": "shiny" }));
+        let out = k.call(
+            "git.log",
+            &json!({ "repo": r.display().to_string(), "grep": "shiny" }),
+        );
         assert!(out.ok);
         let commits = out.result.unwrap()["commits"].as_array().unwrap().len();
         assert_eq!(commits, 1, "only the shiny commit should match");
@@ -822,7 +1032,10 @@ mod log_filter_tests {
         let r = repo("stat");
         let k = git_kernel(&r);
         commit(&r, "a.txt", "one\ntwo\nthree\n", "feat: three lines");
-        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "withStat": true, "maxCount": 1 }));
+        let out = k.call(
+            "git.log",
+            &json!({ "repo": r.display().to_string(), "withStat": true, "maxCount": 1 }),
+        );
         assert!(out.ok);
         let out_val = out.result.unwrap();
         let commits = out_val["commits"].as_array().unwrap();
@@ -839,12 +1052,29 @@ mod log_filter_tests {
         let r = repo("author");
         let k = git_kernel(&r);
         commit(&r, "a.txt", "v1", "init");
-        let author = std::process::Command::new("git").args(["log","-1","--pretty=format:%an"]).current_dir(&r).output().unwrap();
+        let author = std::process::Command::new("git")
+            .args([
+                "-c",
+                "core.autocrlf=false",
+                "log",
+                "-1",
+                "--pretty=format:%an",
+            ])
+            .current_dir(&r)
+            .output()
+            .unwrap();
         let name = String::from_utf8_lossy(&author.stdout).trim().to_string();
         let prefix: String = name.chars().take(4).collect();
-        let out = k.call("git.log", &json!({ "repo": r.display().to_string(), "author": prefix }));
+        let out = k.call(
+            "git.log",
+            &json!({ "repo": r.display().to_string(), "author": prefix }),
+        );
         assert!(out.ok);
-        assert!(out.result.unwrap()["commits"].as_array().unwrap().len() >= 1);
+        assert!(out.result.unwrap()["commits"]
+            .as_array()
+            .unwrap()
+            .last()
+            .is_some());
         let _ = fs::remove_dir_all(&r);
     }
 }

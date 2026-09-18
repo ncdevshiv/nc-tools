@@ -17,7 +17,8 @@ use sha2::{Digest, Sha256};
 pub const READ_DESC: &str = "Read a text file with line numbers. Supports offset/limit paging. Returns a digest (hash+mtime) — use it to avoid re-reading unchanged files.";
 pub const READ_MANY_DESC: &str = "Read up to 50 files in ONE call. Each item returns ok/content or a structured error. Prefer this over N separate fs.read calls.";
 pub const WRITE_DESC: &str = "Write a file (creates parent dirs). Returns created/overwrote.";
-pub const WRITE_MANY_DESC: &str = "Write up to 50 files in ONE call: [{path, content}]. Per-item ok/error results.";
+pub const WRITE_MANY_DESC: &str =
+    "Write up to 50 files in ONE call: [{path, content}]. Per-item ok/error results.";
 pub const APPEND_DESC: &str = "Append content to a file (creates it and parent dirs if missing).";
 pub const COPY_DESC: &str = "Copy a file or directory (recursive default). Overwrites existing destinations (journal records the event).";
 pub const LIST_DESC: &str = "List directory entries.";
@@ -25,7 +26,6 @@ pub const STAT_DESC: &str = "Stat a path (exists, type, size).";
 pub const MKDIR_DESC: &str = "Create a directory.";
 pub const DELETE_DESC: &str = "Delete a file or directory (needs recursive for dirs).";
 pub const MOVE_DESC: &str = "Move/rename a file or directory.";
-
 
 /// Generic adapter: deserialize typed args, then run the body. Args are
 /// validated against the same struct that generated the schema.
@@ -51,7 +51,10 @@ where
     T: serde::de::DeserializeOwned + Send + Sync + 'static,
     F: Fn(&Kernel, T) -> Result<Value, ToolError> + Send + Sync + 'static,
 {
-    std::sync::Arc::new(Typed { handler: f, _marker: std::marker::PhantomData })
+    std::sync::Arc::new(Typed {
+        handler: f,
+        _marker: std::marker::PhantomData,
+    })
 }
 
 // ---- shared helpers --------------------------------------------------------
@@ -131,7 +134,11 @@ pub fn err_no_path_with_siblings(path: &str, abs: &Path, root: &Path) -> ToolErr
 }
 
 pub fn err_no_path(path: &str) -> ToolError {
-    ToolError::with_hint("ERR_NOT_FOUND", format!("No such path: {path}"), json!({ "path": path }))
+    ToolError::with_hint(
+        "ERR_NOT_FOUND",
+        format!("No such path: {path}"),
+        json!({ "path": path }),
+    )
 }
 
 /// sha256-16 + rounded mtime (ms) — fs.mjs digestOf.
@@ -166,7 +173,7 @@ pub struct ReadArgs {
     #[schemars(range(min = 1))]
     pub offset: Option<u64>,
     #[serde(default)]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 100000))]
     pub limit: Option<u64>,
     #[doc = "Base dir for relative paths (default: the session workspace). Lets an agent bound to one workspace read files in another without re-rooting the server."]
     #[serde(default)]
@@ -179,7 +186,7 @@ pub struct ReadManyArgs {
     #[schemars(length(min = 1, max = 50))]
     pub paths: Vec<String>,
     #[serde(default)]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 100000))]
     pub limit: Option<u64>,
     #[doc = "Base dir for relative paths (default: the session workspace)."]
     #[serde(default)]
@@ -318,12 +325,24 @@ impl Handler for ReadHandler {
     }
 }
 
-pub fn read_impl(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64>, base_dir: Option<&str>) -> Result<Value, ToolError> {
+pub fn read_impl(
+    k: &Kernel,
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    base_dir: Option<&str>,
+) -> Result<Value, ToolError> {
     let base = k.base_dir(base_dir)?;
     read_impl_base(k, path, offset, limit, &base)
 }
 
-fn read_impl_base(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64>, base: &Path) -> Result<Value, ToolError> {
+fn read_impl_base(
+    k: &Kernel,
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    base: &Path,
+) -> Result<Value, ToolError> {
     let abs = resolve_checked(base, path)?;
     let meta = fs::metadata(&abs).map_err(|_| err_no_file(path, &abs, base))?;
     if meta.is_dir() {
@@ -350,7 +369,11 @@ fn read_impl_base(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64
         if n > 0 && (nul_count as f64 / n as f64) > 0.30 {
             return Err(ToolError::with_hint(
                 "ERR_BINARY_FILE",
-                format!("{path} is a binary file ({} bytes, {}% NUL bytes)", file_size, (nul_count * 100) / n),
+                format!(
+                    "{path} is a binary file ({} bytes, {}% NUL bytes)",
+                    file_size,
+                    (nul_count * 100) / n
+                ),
                 json!({ "path": path, "binaryDetected": true, "fileSize": file_size, "hint": "use fs.readRange for raw byte access or net.fetch for extraction" }),
             ));
         }
@@ -360,7 +383,8 @@ fn read_impl_base(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64
     // Always seek back to 0: the sample consumed bytes [0, sample_size), and
     // the streaming reader must start from the beginning of the file.
     use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(0)).map_err(ToolError::from)?;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(ToolError::from)?;
 
     let off = offset.unwrap_or(1).max(1).saturating_sub(1) as usize;
     let lim = limit.unwrap_or(k.cfg.limits.read_limit as u64) as usize;
@@ -427,7 +451,10 @@ impl Handler for ReadManyHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ReadManyArgs = parse_args(args)?;
         if a.paths.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "paths must be a non-empty array"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "paths must be a non-empty array",
+            ));
         }
         if a.paths.len() > k.cfg.limits.fs_many {
             return Err(ToolError::new(
@@ -449,17 +476,15 @@ impl Handler for ReadManyHandler {
                 .map(|p| {
                     let p = p.clone();
                     let base_ref: &Path = &base;
-                    scope.spawn(move || {
-                        match read_impl_base(k, &p, None, limit, base_ref) {
-                            Ok(mut v) => {
-                                if let Value::Object(m) = &mut v {
-                                    m.insert("path".into(), json!(p));
-                                    m.insert("ok".into(), json!(true));
-                                }
-                                v
+                    scope.spawn(move || match read_impl_base(k, &p, None, limit, base_ref) {
+                        Ok(mut v) => {
+                            if let Value::Object(m) = &mut v {
+                                m.insert("path".into(), json!(p));
+                                m.insert("ok".into(), json!(true));
                             }
-                            Err(e) => json!({ "path": p, "ok": false, "error": e }),
+                            v
                         }
+                        Err(e) => json!({ "path": p, "ok": false, "error": e }),
                     })
                 })
                 .collect();
@@ -549,10 +574,15 @@ pub fn write_resolved(path: &str, abs: &Path, content: &str) -> Result<Value, To
 /// `lockConflict` note so the agent knows it collided. Guard (guard=true):
 /// the write is refused with ERR_REFUSED + the lock holder's identity.
 /// Returns the merge-able note JSON on no-foreign-lock, or the conflict note.
-pub fn maybe_warn_foreign_lock(k: &Kernel, base: &Path, abs: &Path, guard: bool) -> Result<Value, ToolError> {
+pub fn maybe_warn_foreign_lock(
+    k: &Kernel,
+    base: &Path,
+    abs: &Path,
+    guard: bool,
+) -> Result<Value, ToolError> {
     let self_agent = k.current_agent_id().unwrap_or_default();
-    let rel = nct_core::rel_path(base, abs);
-    if let Some(lock) = nct_core::foreign_live_lock(&k.root, &rel, &self_agent) {
+    let rel = nct_core::rel_key(base, abs);
+    if let Some(lock) = nct_core::foreign_live_lock(base, &rel, &self_agent) {
         let holder = lock["agentId"].as_str().unwrap_or("?").to_string();
         let locked_path = lock["path"].as_str().unwrap_or(&rel).to_string();
         if guard {
@@ -562,13 +592,15 @@ pub fn maybe_warn_foreign_lock(k: &Kernel, base: &Path, abs: &Path, guard: bool)
                 json!({ "path": rel, "lockedBy": holder, "lockedPath": locked_path, "hint": "ask the holder to agent.unlock, or retry without guardLocks" }),
             ));
         }
-        return Ok(json!({ "lockConflict": true, "lockedBy": holder, "lockedPath": locked_path, "note": "advisory write proceeded despite an active foreign lock" }));
+        return Ok(
+            json!({ "lockConflict": true, "lockedBy": holder, "lockedPath": locked_path, "note": "advisory write proceeded despite an active foreign lock" }),
+        );
     }
     Ok(json!({ "lockConflict": false }))
 }
 
 /// Merge a lockConflict note into a write result when one was produced.
-fn merge_lock_note(mut result: Value, note: Value) -> Value {
+pub fn merge_lock_note(mut result: Value, note: Value) -> Value {
     if let Value::Object(m) = &mut result {
         if note["lockConflict"] == json!(true) {
             m.insert("lockConflict".into(), json!(true));
@@ -579,7 +611,6 @@ fn merge_lock_note(mut result: Value, note: Value) -> Value {
     result
 }
 
-
 pub struct WriteHandler;
 impl Handler for WriteHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
@@ -588,7 +619,10 @@ impl Handler for WriteHandler {
         let abs = resolve_checked(&base, &a.path)?;
         let guard = a.guardLocks.unwrap_or(false);
         let lock_note = maybe_warn_foreign_lock(k, &base, &abs, guard)?;
-        Ok(merge_lock_note(write_resolved(&a.path, &abs, &a.content)?, lock_note))
+        Ok(merge_lock_note(
+            write_resolved(&a.path, &abs, &a.content)?,
+            lock_note,
+        ))
     }
 }
 
@@ -597,7 +631,10 @@ impl Handler for WriteManyHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: WriteManyArgs = parse_args(args)?;
         if a.files.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "files must be a non-empty array of {path, content}"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "files must be a non-empty array of {path, content}",
+            ));
         }
         if a.files.len() > k.cfg.limits.fs_many {
             return Err(ToolError::new(
@@ -611,7 +648,10 @@ impl Handler for WriteManyHandler {
             let write_result = (|| -> Result<Value, ToolError> {
                 let abs = resolve_checked(&base, &f.path)?;
                 let lock_note = maybe_warn_foreign_lock(k, &base, &abs, false)?;
-                Ok(merge_lock_note(write_resolved(&f.path, &abs, &f.content)?, lock_note))
+                Ok(merge_lock_note(
+                    write_resolved(&f.path, &abs, &f.content)?,
+                    lock_note,
+                ))
             })();
             match write_result {
                 Ok(mut v) => {
@@ -646,7 +686,9 @@ impl Handler for AppendHandler {
             .open(&abs)
             .map_err(ToolError::from)?;
         f.write_all(a.content.as_bytes())?;
-        Ok(json!({ "path": a.path, "bytes": a.content.len(), "created": !existed, "appended": true }))
+        Ok(
+            json!({ "path": a.path, "bytes": a.content.len(), "created": !existed, "appended": true }),
+        )
     }
 }
 
@@ -658,12 +700,37 @@ impl Handler for CopyHandler {
         let from_abs = resolve_checked(&base, &a.from)?;
         let to_abs = resolve_checked(&base, &a.to)?;
         let _ = maybe_warn_foreign_lock(k, &base, &to_abs, a.guardLocks.unwrap_or(false))?;
-        let meta = fs::metadata(&from_abs).map_err(|_| err_no_path_with_siblings(&a.from, &from_abs, &base))?;
+        let meta = fs::metadata(&from_abs)
+            .map_err(|_| err_no_path_with_siblings(&a.from, &from_abs, &base))?;
         if meta.is_dir() && !a.recursive.unwrap_or(true) {
             return Err(ToolError::with_hint(
                 "ERR_IS_DIRECTORY",
                 format!("{} is a directory; pass recursive=true to copy it", a.from),
                 json!({ "path": a.from }),
+            ));
+        }
+        // Self-copy guards. `cp -R src src` (or a dir into any descendant of
+        // itself) would recurse forever: each level re-reads a directory that
+        // keeps gaining new children, until the filesystem's path-depth limit.
+        if to_abs == from_abs {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!(
+                    "from and to resolve to the same path ({}); nothing to copy",
+                    from_abs.display()
+                ),
+                json!({ "from": a.from, "to": a.to, "hint": "resolve both paths — they are identical" }),
+            ));
+        }
+        if meta.is_dir() && is_within(&from_abs, &to_abs) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!(
+                    "cannot copy a directory into itself: {} is inside {}",
+                    to_abs.display(),
+                    from_abs.display()
+                ),
+                json!({ "from": a.from, "to": a.to, "hint": "copy to a sibling path outside the source tree, e.g. ../backup" }),
             ));
         }
         if let Some(parent) = to_abs.parent() {
@@ -672,6 +739,19 @@ impl Handler for CopyHandler {
         copy_any(&from_abs, &to_abs)?;
         Ok(json!({ "from": a.from, "to": a.to, "copied": true }))
     }
+}
+
+/// Component-wise containment: `inner` is strictly inside `outer`, decided on
+/// normalized path components rather than a string prefix so `a/b` is never
+/// reported as inside `a/`. Inputs come from resolve_checked, so no `..`
+/// components survive here.
+fn is_within(outer: &Path, inner: &Path) -> bool {
+    let o: Vec<_> = outer.components().collect();
+    let i: Vec<_> = inner.components().collect();
+    if i.len() <= o.len() {
+        return false;
+    }
+    o.iter().zip(i.iter()).all(|(a, b)| a == b)
 }
 
 /// Recursive copy mirroring Node cpSync {recursive:true} (probed): merge into
@@ -698,7 +778,10 @@ fn copy_any(from: &Path, to: &Path) -> Result<(), ToolError> {
         if to.is_dir() {
             return Err(ToolError::new(
                 "ERR_INTERNAL",
-                format!("ERR_FS_CP_NON_DIR_TO_DIR: cannot copy {} onto a directory", from.display()),
+                format!(
+                    "ERR_FS_CP_NON_DIR_TO_DIR: cannot copy {} onto a directory",
+                    from.display()
+                ),
             ));
         }
         fs::copy(from, to).map_err(ToolError::from)?;
@@ -709,10 +792,16 @@ fn copy_any(from: &Path, to: &Path) -> Result<(), ToolError> {
 #[cfg(test)]
 mod read_streaming_tests {
     use super::*;
-    use std::io::Write;
 
     fn make_kernel() -> Kernel {
-        let dir = std::env::temp_dir().join(format!("nct-fs-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-fs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Kernel::new(dir).unwrap()
@@ -766,11 +855,11 @@ mod read_streaming_tests {
     fn binary_file_is_detected_and_rejected() {
         let k = make_kernel();
         let mut bin = vec![0u8; 4096];
-        for i in 0..bin.len() {
+        for (i, byte) in bin.iter_mut().enumerate() {
             if i % 3 != 0 {
-                bin[i] = 0;
+                *byte = 0;
             } else {
-                bin[i] = b'X';
+                *byte = b'X';
             }
         }
         std::fs::write(k.root.join("bin.dat"), &bin).unwrap();
@@ -786,9 +875,7 @@ mod read_streaming_tests {
     #[test]
     fn large_file_pages_without_loading_whole() {
         let k = make_kernel();
-        let content: String = (0..100_000)
-            .map(|i| format!("line {i}\n"))
-            .collect();
+        let content: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
         std::fs::write(k.root.join("big.txt"), content).unwrap();
         let result = read_impl(&k, "big.txt", None, Some(10), None).unwrap();
         assert_eq!(result["totalLines"], json!(100_000));
@@ -804,9 +891,7 @@ mod read_streaming_tests {
     #[test]
     fn offset_pages_correctly() {
         let k = make_kernel();
-        let content: String = (0..100)
-            .map(|i| format!("line {i}\n"))
-            .collect();
+        let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(k.root.join("offset.txt"), content).unwrap();
         let result = read_impl(&k, "offset.txt", Some(50), Some(10), None).unwrap();
         assert_eq!(result["totalLines"], json!(100));
@@ -832,10 +917,16 @@ mod read_streaming_tests {
 #[cfg(test)]
 mod write_atomic_tests {
     use super::*;
-    use std::io::Read;
 
     fn make_kernel() -> Kernel {
-        let dir = std::env::temp_dir().join(format!("nct-fs-write-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-fs-write-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Kernel::new(dir).unwrap()
@@ -928,7 +1019,14 @@ mod readmany_parallel_tests {
     use std::time::Instant;
 
     fn make_kernel() -> Kernel {
-        let dir = std::env::temp_dir().join(format!("nct-fs-readmany-test-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-fs-readmany-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Kernel::new(dir).unwrap()
@@ -1030,7 +1128,14 @@ impl Handler for ListHandler {
             return Err(err_no_path(&path_str));
         }
         let mut entries = Vec::new();
-        list_walk(&base, &abs, 0, a.recursive.unwrap_or(false), k.cfg.limits.list_depth, &mut entries)?;
+        list_walk(
+            &base,
+            &abs,
+            0,
+            a.recursive.unwrap_or(false),
+            k.cfg.limits.list_depth,
+            &mut entries,
+        )?;
         Ok(json!({ "entries": entries, "total": entries.len() }))
     }
 }
@@ -1050,7 +1155,10 @@ fn list_walk(
         .collect();
     entries.sort();
     for full in entries {
-        let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = full
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         if name == ".nc-tools" || name == ".git" || name == "node_modules" {
             continue;
         }
@@ -1221,7 +1329,10 @@ impl Handler for ReadRangeHandler {
         if offset >= total_bytes && total_bytes > 0 {
             return Err(ToolError::with_hint(
                 "ERR_BAD_INPUT",
-                format!("byteOffset {} is past end of file ({} bytes)", offset, total_bytes),
+                format!(
+                    "byteOffset {} is past end of file ({} bytes)",
+                    offset, total_bytes
+                ),
                 json!({ "byteOffset": offset, "fileSize": total_bytes }),
             ));
         }
@@ -1236,9 +1347,7 @@ impl Handler for ReadRangeHandler {
             let mut buf = [0u8; 65_536];
             while remaining > 0 {
                 let take = remaining.min(buf.len());
-                let n = f
-                    .read(&mut buf[..take])
-                    .map_err(ToolError::from)?;
+                let n = f.read(&mut buf[..take]).map_err(ToolError::from)?;
                 if n == 0 {
                     break;
                 }
@@ -1250,9 +1359,7 @@ impl Handler for ReadRangeHandler {
         let mut window = vec![0u8; max_bytes];
         let mut filled = 0usize;
         while filled < max_bytes {
-            let n = f
-                .read(&mut window[filled..])
-                .map_err(ToolError::from)?;
+            let n = f.read(&mut window[filled..]).map_err(ToolError::from)?;
             if n == 0 {
                 break;
             }
@@ -1325,7 +1432,15 @@ impl Handler for TreeHandler {
         let mut lines: Vec<String> = Vec::new();
         let mut truncated = false;
         tree_walk(
-            &abs, "", "", 0, max_depth, max_entries, &mut entries, &mut lines, &mut truncated,
+            &abs,
+            "",
+            "",
+            0,
+            max_depth,
+            max_entries,
+            &mut entries,
+            &mut lines,
+            &mut truncated,
         )?;
         Ok(json!({
             "path": path_str,
@@ -1398,7 +1513,11 @@ fn tree_walk(
             "{}{}{}",
             ascii_prefix,
             branch,
-            if is_dir { format!("{name}/") } else { name.clone() }
+            if is_dir {
+                format!("{name}/")
+            } else {
+                name.clone()
+            }
         ));
         entries.push(json!({
             "path": rel,
@@ -1409,13 +1528,20 @@ fn tree_walk(
         if is_dir {
             let child_ascii = format!("{}{}", ascii_prefix, if last { "    " } else { "│   " });
             tree_walk(
-                &full, &rel, &child_ascii, depth + 1, max_depth, max_entries, entries, lines, truncated,
+                &full,
+                &rel,
+                &child_ascii,
+                depth + 1,
+                max_depth,
+                max_entries,
+                entries,
+                lines,
+                truncated,
             )?;
         }
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod lock_guard_tests {
@@ -1445,7 +1571,14 @@ mod lock_guard_tests {
     }
 
     fn ws(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("nct-lockguard-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-lockguard-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -1458,10 +1591,17 @@ mod lock_guard_tests {
         write_lock(&root, "src/a.rs", "agent-1", 600_000);
         let k = kernel_with(&root);
         k.set_agent_id("agent-2");
-        let out = k.call("fs.write", &json!({ "path": "src/a.rs", "content": "x", "baseDir": root.display().to_string() }));
+        let out = k.call(
+            "fs.write",
+            &json!({ "path": "src/a.rs", "content": "x", "baseDir": root.display().to_string() }),
+        );
         assert!(out.ok, "advisory write should succeed: {:?}", out.error);
         let r = out.result.unwrap();
-        assert_eq!(r["lockConflict"], json!(true), "should report conflict: {r}");
+        assert_eq!(
+            r["lockConflict"],
+            json!(true),
+            "should report conflict: {r}"
+        );
         assert_eq!(r["lockedBy"], json!("agent-1"));
         assert_eq!(fs::read_to_string(root.join("src/a.rs")).unwrap(), "x");
         let _ = fs::remove_dir_all(&root);
@@ -1477,7 +1617,11 @@ mod lock_guard_tests {
         assert!(!out.ok, "guard must refuse");
         let e = out.error.unwrap();
         assert_eq!(e.code, "ERR_REFUSED");
-        assert!(e.message.contains("agent-1"), "should name the holder: {}", e.message);
+        assert!(
+            e.message.contains("agent-1"),
+            "should name the holder: {}",
+            e.message
+        );
         assert!(!root.join("src/b.rs").exists(), "must NOT have written");
         let _ = fs::remove_dir_all(&root);
     }
@@ -1538,8 +1682,17 @@ mod move_copy_guard_tests {
         k
     }
     fn ws(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("nct-moveguard-{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let _ = fs::remove_dir_all(&d); fs::create_dir_all(&d).unwrap(); d
+        let d = std::env::temp_dir().join(format!(
+            "nct-moveguard-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
     }
 
     #[test]
@@ -1548,11 +1701,16 @@ mod move_copy_guard_tests {
         fs::write(root.join("a.txt"), "src").unwrap();
         fs::write(root.join("b.txt"), "dest").unwrap();
         write_lock(&root, "b.txt", "agent-1", 600_000);
-        let k = kernel_with(&root); k.set_agent_id("agent-2");
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
         let out = k.call("fs.copy", &json!({ "from": "a.txt", "to": "b.txt", "baseDir": root.display().to_string(), "guardLocks": true }));
         assert!(!out.ok, "guard must refuse copy to locked dest");
         assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
-        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "dest", "dest must be untouched");
+        assert_eq!(
+            fs::read_to_string(root.join("b.txt")).unwrap(),
+            "dest",
+            "dest must be untouched"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1562,7 +1720,8 @@ mod move_copy_guard_tests {
         fs::write(root.join("a.txt"), "src").unwrap();
         fs::write(root.join("b.txt"), "dest").unwrap();
         write_lock(&root, "b.txt", "agent-1", 600_000);
-        let k = kernel_with(&root); k.set_agent_id("agent-2");
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
         let out = k.call("fs.move", &json!({ "from": "a.txt", "to": "b.txt", "baseDir": root.display().to_string(), "guardLocks": true }));
         assert!(!out.ok, "guard must refuse move to locked dest");
         assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
@@ -1576,11 +1735,216 @@ mod move_copy_guard_tests {
         let root = ws("c2");
         fs::write(root.join("a.txt"), "src").unwrap();
         write_lock(&root, "b.txt", "agent-1", 600_000);
-        let k = kernel_with(&root); k.set_agent_id("agent-2");
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
         // no guardLocks; copy to a DIFFERENT new file (not locked) -> note false
-        let out = k.call("fs.copy", &json!({ "from": "a.txt", "to": "c.txt", "baseDir": root.display().to_string() }));
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "a.txt", "to": "c.txt", "baseDir": root.display().to_string() }),
+        );
         assert!(out.ok);
         assert!(root.join("c.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The guard must hold when the caller omits baseDir — the default case for
+    /// a harness that never routes calls explicitly. Without rel_key, the
+    /// server's raw root and the canonicalized target did not share a prefix,
+    /// so every lock key mismatched and the guard silently passed.
+    #[test]
+    fn guard_works_without_baseDir() {
+        let root = ws("nobase");
+        write_lock(&root, "a.txt", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+
+        let out = k.call(
+            "fs.write",
+            &json!({ "path": "a.txt", "content": "x", "guardLocks": true }),
+        );
+        assert!(
+            !out.ok,
+            "guard must refuse without baseDir: {:?}",
+            out.result
+        );
+        assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
+        assert!(
+            !root.join("a.txt").exists(),
+            "the locked file must not be written"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod copy_selfnest_tests {
+    use super::*;
+    use std::fs;
+
+    fn ws(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-copytest-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn kernel_with(root: &Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    #[test]
+    fn is_within_is_component_wise() {
+        assert!(is_within(Path::new("a"), Path::new("a/b")));
+        assert!(is_within(Path::new("a/b"), Path::new("a/b/c/d")));
+        assert!(
+            !is_within(Path::new("a"), Path::new("a")),
+            "equal is not inside"
+        );
+        assert!(
+            !is_within(Path::new("a"), Path::new("a2")),
+            "no string-prefix matches"
+        );
+        assert!(
+            !is_within(Path::new("a"), Path::new("x/a")),
+            "leading components must differ"
+        );
+        assert!(!is_within(Path::new("a/b"), Path::new("a")));
+    }
+
+    /// `fs.copy f f` must fail with a typed input error, not an OS error from
+    /// fs::copy, and must not touch the file.
+    #[test]
+    fn copy_same_path_is_refused_cleanly() {
+        let root = ws("same");
+        fs::write(root.join("a.txt"), "original").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "a.txt", "to": "a.txt", "baseDir": root.display().to_string() }),
+        );
+        assert!(!out.ok, "self-copy must be refused");
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_BAD_INPUT");
+        assert!(
+            e.message.contains("same path"),
+            "should explain the collision: {}",
+            e.message
+        );
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "original");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The regression that motivated the guard: copying a directory into itself
+    /// re-reads a tree that keeps gaining children and recursed until the path
+    /// depth limit. A subtree-only source (no files) is the case that looped
+    /// forever instead of erroring early.
+    #[test]
+    fn copy_dir_into_itself_is_refused() {
+        let root = ws("selfdir");
+        fs::create_dir_all(root.join("tree/sub")).unwrap();
+        fs::write(root.join("tree/sub/x.txt"), "x").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "tree", "to": "tree", "baseDir": root.display().to_string() }),
+        );
+        assert!(!out.ok, "dir-into-itself must be refused");
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_BAD_INPUT");
+        assert!(
+            e.message.contains("same path"),
+            "should explain the collision: {}",
+            e.message
+        );
+        let names: Vec<String> = fs::read_dir(root.join("tree"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["sub"],
+            "the source tree must be untouched: {names:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A destination anywhere under the source is the same infinite-recursion
+    /// case, even when the source has files at its root.
+    #[test]
+    fn copy_dir_into_a_descendant_is_refused() {
+        let root = ws("desc");
+        fs::create_dir_all(root.join("tree/nested")).unwrap();
+        fs::write(root.join("tree/leaf.txt"), "leaf").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call("fs.copy", &json!({ "from": "tree", "to": "tree/nested/deep", "baseDir": root.display().to_string() }));
+        assert!(!out.ok);
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_BAD_INPUT");
+        assert!(
+            e.message.contains("into itself"),
+            "should name the failure: {}",
+            e.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("tree/leaf.txt")).unwrap(),
+            "leaf"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The guard is containment-specific: copying to a sibling outside the
+    /// source tree still works.
+    #[test]
+    fn copy_dir_to_a_sibling_still_works() {
+        let root = ws("sib");
+        fs::create_dir_all(root.join("tree/sub")).unwrap();
+        fs::write(root.join("tree/sub/x.txt"), "x").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "tree", "to": "tree2", "baseDir": root.display().to_string() }),
+        );
+        assert!(out.ok, "sibling copy must succeed: {:?}", out.error);
+        assert_eq!(
+            fs::read_to_string(root.join("tree2/sub/x.txt")).unwrap(),
+            "x"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// File-level copies to an unrelated path inside the tree are unaffected —
+    /// the containment rule only applies when the source is a directory.
+    #[test]
+    fn copy_file_inside_the_source_tree_is_allowed() {
+        let root = ws("filein");
+        fs::create_dir_all(root.join("tree/nested")).unwrap();
+        fs::write(root.join("tree/leaf.txt"), "leaf").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call("fs.copy", &json!({ "from": "tree/leaf.txt", "to": "tree/nested/leaf.txt", "baseDir": root.display().to_string() }));
+        assert!(
+            out.ok,
+            "file copy inside the tree must succeed: {:?}",
+            out.error
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("tree/nested/leaf.txt")).unwrap(),
+            "leaf"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

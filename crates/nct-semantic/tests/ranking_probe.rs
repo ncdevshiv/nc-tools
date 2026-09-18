@@ -22,8 +22,7 @@ fn embeddings_discriminate_like_the_oracle() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             // repo-root/.nc-tools/model-cache (crate sits at <root>/crates/nct-semantic)
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../.nc-tools/model-cache")
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.nc-tools/model-cache")
         });
     if !cache.join("model.safetensors").exists() {
         eprintln!("skipping: model cache not populated at {}", cache.display());
@@ -44,12 +43,29 @@ fn embeddings_discriminate_like_the_oracle() {
 
     // Discrimination (the pad bug compressed EVERYTHING to 0.7+; oracle's
     // reference values are in parentheses):
-    assert!(cos(&v_q, &v_ja) < 0.30, "junk file vs journal query must NOT be a hit (got {:.4}, oracle 0.16)", cos(&v_q, &v_ja));
-    assert!(cos(&v_q, &v_jb) < 0.15, "unrelated text vs query must be near-orthogonal (got {:.4}, oracle 0.06)", cos(&v_q, &v_jb));
+    assert!(
+        cos(&v_q, &v_ja) < 0.30,
+        "junk file vs journal query must NOT be a hit (got {:.4}, oracle 0.16)",
+        cos(&v_q, &v_ja)
+    );
+    assert!(
+        cos(&v_q, &v_jb) < 0.15,
+        "unrelated text vs query must be near-orthogonal (got {:.4}, oracle 0.06)",
+        cos(&v_q, &v_jb)
+    );
     // Signal (near-paraphrase outranks everything else):
     let sim_p = cos(&v_q, &v_p);
-    assert!(sim_p > cos(&v_q, &v_ja) + 0.2, "paraphrase must clearly outrank junk (para {:.4} vs junk {:.4})", sim_p, cos(&v_q, &v_ja));
-    assert!(sim_p > 0.4, "paraphrase similarity in oracle band (got {:.4}, oracle 0.55)", sim_p);
+    assert!(
+        sim_p > cos(&v_q, &v_ja) + 0.2,
+        "paraphrase must clearly outrank junk (para {:.4} vs junk {:.4})",
+        sim_p,
+        cos(&v_q, &v_ja)
+    );
+    assert!(
+        sim_p > 0.4,
+        "paraphrase similarity in oracle band (got {:.4}, oracle 0.55)",
+        sim_p
+    );
     // Identity sanity:
     assert!((cos(&v_q, &v_q) - 1.0).abs() < 1e-4);
 }

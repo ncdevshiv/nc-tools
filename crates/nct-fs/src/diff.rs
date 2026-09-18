@@ -120,12 +120,16 @@ fn word_diff(a: &str, b: &str) -> Vec<Value> {
                 if old_line.is_empty() || new_trim.is_empty() {
                     // pure insertion/deletion — emit plain markers
                     if !new_trim.is_empty() {
-                        segs.push(json!({ "oldLine": old_line, "newLine": new_trim, "segments": [] }));
+                        segs.push(
+                            json!({ "oldLine": old_line, "newLine": new_trim, "segments": [] }),
+                        );
                     }
                     continue;
                 }
                 let segs_for = word_segments(old_line, new_trim);
-                segs.push(json!({ "oldLine": old_line, "newLine": new_trim, "segments": segs_for }));
+                segs.push(
+                    json!({ "oldLine": old_line, "newLine": new_trim, "segments": segs_for }),
+                );
             }
         }
     }
@@ -152,10 +156,16 @@ fn word_segments(old: &str, new: &str) -> Vec<WordSeg> {
                 if !pending.is_empty() {
                     // flush removed words first, then show the equal word
                     for w in pending.drain(..) {
-                        out.push(WordSeg { text: w.to_string(), kind: SegKind::Removed });
+                        out.push(WordSeg {
+                            text: w.to_string(),
+                            kind: SegKind::Removed,
+                        });
                     }
                 }
-                out.push(WordSeg { text: ow[i].to_string(), kind: SegKind::Same });
+                out.push(WordSeg {
+                    text: ow[i].to_string(),
+                    kind: SegKind::Same,
+                });
                 i += 1;
                 j += 1;
             }
@@ -164,13 +174,19 @@ fn word_segments(old: &str, new: &str) -> Vec<WordSeg> {
                 i += 1;
             }
             Op::Insert => {
-                out.push(WordSeg { text: nw[j].to_string(), kind: SegKind::Added });
+                out.push(WordSeg {
+                    text: nw[j].to_string(),
+                    kind: SegKind::Added,
+                });
                 j += 1;
             }
         }
     }
     for w in pending {
-        out.push(WordSeg { text: w.to_string(), kind: SegKind::Removed });
+        out.push(WordSeg {
+            text: w.to_string(),
+            kind: SegKind::Removed,
+        });
     }
     out
 }
@@ -308,8 +324,7 @@ fn build_diff(a: &str, b: &str, ctx: usize) -> String {
         let he = (e + ctx).min(tlen - 1);
         let (os, oc, ns, nc) = hunk_hdr(&tagged, hs, he);
         out.push_str(&format!("@@ -{},{} +{},{} @@\n", os, oc, ns, nc));
-        for k in hs..=he {
-            let (t, l) = tagged[k];
+        for &(t, l) in &tagged[hs..=he] {
             out.push(t);
             out.push_str(l);
             out.push('\n');
@@ -321,8 +336,8 @@ fn build_diff(a: &str, b: &str, ctx: usize) -> String {
 fn hunk_hdr(tagged: &[(char, &str)], hs: usize, he: usize) -> (usize, usize, usize, usize) {
     let mut old_before = 0usize;
     let mut new_before = 0usize;
-    for k in 0..hs {
-        match tagged[k].0 {
+    for &(tag, _) in tagged.iter().take(hs) {
+        match tag {
             ' ' => {
                 old_before += 1;
                 new_before += 1;
@@ -334,8 +349,8 @@ fn hunk_hdr(tagged: &[(char, &str)], hs: usize, he: usize) -> (usize, usize, usi
     }
     let mut old_count = 0usize;
     let mut new_count = 0usize;
-    for k in hs..=he {
-        match tagged[k].0 {
+    for &(tag, _) in &tagged[hs..=he] {
+        match tag {
             ' ' => {
                 old_count += 1;
                 new_count += 1;
@@ -345,8 +360,16 @@ fn hunk_hdr(tagged: &[(char, &str)], hs: usize, he: usize) -> (usize, usize, usi
             _ => {}
         }
     }
-    let os = if old_count == 0 { old_before } else { old_before + 1 };
-    let ns = if new_count == 0 { new_before } else { new_before + 1 };
+    let os = if old_count == 0 {
+        old_before
+    } else {
+        old_before + 1
+    };
+    let ns = if new_count == 0 {
+        new_before
+    } else {
+        new_before + 1
+    };
     (os, old_count, ns, new_count)
 }
 
@@ -404,11 +427,16 @@ mod diff_word_tests {
         let segments = recs[0]["segments"].as_array().unwrap();
         // Segments should include the equal words "the", "quick" and the added
         // "red" (removed "brown" is either removed or omitted based on pairing)
-        let texts: Vec<&str> = segments.iter().map(|s| s["text"].as_str().unwrap()).collect();
+        let texts: Vec<&str> = segments
+            .iter()
+            .map(|s| s["text"].as_str().unwrap())
+            .collect();
         assert!(texts.contains(&"the"));
         assert!(texts.contains(&"quick"));
         // The changed word appears: either "red" added / "brown" removed
-        assert!(segments.iter().any(|s| s["text"] == json!("red") || s["text"] == json!("brown")));
+        assert!(segments
+            .iter()
+            .any(|s| s["text"] == json!("red") || s["text"] == json!("brown")));
     }
 
     #[test]
@@ -426,7 +454,11 @@ mod diff_word_tests {
     fn line_diff_still_works_with_word_level() {
         let k = make_kernel();
         fs::write(k.root.join("a.txt"), "line one\nline two\nline three\n").unwrap();
-        fs::write(k.root.join("b.txt"), "line one\nline 2 changed\nline three\n").unwrap();
+        fs::write(
+            k.root.join("b.txt"),
+            "line one\nline 2 changed\nline three\n",
+        )
+        .unwrap();
         let args = json!({ "path": "a.txt", "path2": "b.txt", "wordLevel": true });
         let v = DiffHandler.call(&k, &args).unwrap();
         assert_eq!(v["equal"], json!(false));
@@ -436,7 +468,10 @@ mod diff_word_tests {
         let recs = v["wordSegments"].as_array().unwrap();
         assert_eq!(recs.len(), 1);
         assert!(recs[0]["oldLine"].as_str().unwrap().contains("line two"));
-        assert!(recs[0]["newLine"].as_str().unwrap().contains("line 2 changed"));
+        assert!(recs[0]["newLine"]
+            .as_str()
+            .unwrap()
+            .contains("line 2 changed"));
     }
 
     #[test]

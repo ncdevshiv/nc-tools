@@ -12,7 +12,8 @@ use super::{base_of, in_repo, HasBaseDir};
 
 pub const STASH_DESC: &str = "Stash working-tree changes: push (save + revert, optional message), pop (restore most recent), apply (restore, keep stash), list (all stashes), drop (delete one). The daily save/resume workflow.";
 pub const CHERRY_PICK_DESC: &str = "Cherry-pick one or more commits onto the current branch: applies them in order, no-commit mode is testable. Aborts on conflict with structured output.";
-pub const TAG_DESC: &str = "Tags: list (all tags), create (annotated with -m message, or lightweight), delete.";
+pub const TAG_DESC: &str =
+    "Tags: list (all tags), create (annotated with -m message, or lightweight), delete.";
 
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -65,18 +66,35 @@ impl Handler for StashHandler {
             }
             "list" => {
                 let out = super::git(&r, &["stash", "list", "--pretty=format:%gd%x1f%gs"], k)?;
-                let stashes: Vec<Value> = out.split('\n').filter(|l| !l.is_empty()).filter_map(|l| {
-                    let parts: Vec<&str> = l.split('\x1f').collect();
-                    if parts.len() >= 2 { Some(json!({ "ref": parts[0], "message": parts[1] })) } else { None }
-                }).collect();
-                Ok(json!({ "repo": r.display().to_string(), "op": "list", "stashes": stashes, "count": stashes.len() }))
+                let stashes: Vec<Value> = out
+                    .split('\n')
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|l| {
+                        let parts: Vec<&str> = l.split('\x1f').collect();
+                        if parts.len() >= 2 {
+                            Some(json!({ "ref": parts[0], "message": parts[1] }))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Ok(
+                    json!({ "repo": r.display().to_string(), "op": "list", "stashes": stashes, "count": stashes.len() }),
+                )
             }
             "drop" => {
-                let stash_ref = if a.stash.is_some() { a.stash.clone().unwrap() } else { "stash@{0}".to_string() };
+                let stash_ref = if a.stash.is_some() {
+                    a.stash.clone().unwrap()
+                } else {
+                    "stash@{0}".to_string()
+                };
                 let out = super::git(&r, &["stash", "drop", &stash_ref], k)?;
                 Ok(json!({ "repo": r.display().to_string(), "op": "drop", "output": out.trim() }))
             }
-            other => Err(ToolError::new("ERR_BAD_INPUT", format!("unknown stash op: {other} (push|pop|apply|list|drop)"))),
+            other => Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                format!("unknown stash op: {other} (push|pop|apply|list|drop)"),
+            )),
         }
     }
 }
@@ -114,10 +132,15 @@ impl Handler for CherryPickHandler {
         let r = in_repo(&base, a.repo.as_deref())?;
         if a.abort.unwrap_or(false) {
             let out = super::git(&r, &["cherry-pick", "--abort"], k)?;
-            return Ok(json!({ "repo": r.display().to_string(), "aborted": true, "output": out.trim() }));
+            return Ok(
+                json!({ "repo": r.display().to_string(), "aborted": true, "output": out.trim() }),
+            );
         }
         if a.commits.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "commits must be a non-empty array of shas"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "commits must be a non-empty array of shas",
+            ));
         }
         let mut ga: Vec<String> = vec!["cherry-pick".to_string()];
         if a.noCommit.unwrap_or(false) {
@@ -125,13 +148,18 @@ impl Handler for CherryPickHandler {
         }
         for c in &a.commits {
             if c.trim().is_empty() {
-                return Err(ToolError::new("ERR_BAD_INPUT", "cherry-pick shas must be non-empty"));
+                return Err(ToolError::new(
+                    "ERR_BAD_INPUT",
+                    "cherry-pick shas must be non-empty",
+                ));
             }
             ga.push(c.trim().to_string());
         }
         let refs: Vec<&str> = ga.iter().map(|s| s.as_str()).collect();
         let out = super::git(&r, &refs, k)?;
-        Ok(json!({ "repo": r.display().to_string(), "applied": a.commits, "noCommit": a.noCommit.unwrap_or(false), "output": out.trim() }))
+        Ok(
+            json!({ "repo": r.display().to_string(), "applied": a.commits, "noCommit": a.noCommit.unwrap_or(false), "output": out.trim() }),
+        )
     }
 }
 
@@ -173,16 +201,28 @@ impl Handler for TagHandler {
         match op.as_str() {
             "list" => {
                 let out = super::git(&r, &["tag", "--list"], k)?;
-                let tags: Vec<String> = out.split('\n').filter(|l| !l.is_empty()).map(String::from).collect();
-                Ok(json!({ "repo": r.display().to_string(), "op": "list", "tags": tags, "count": tags.len() }))
+                let tags: Vec<String> = out
+                    .split('\n')
+                    .filter(|l| !l.is_empty())
+                    .map(String::from)
+                    .collect();
+                Ok(
+                    json!({ "repo": r.display().to_string(), "op": "list", "tags": tags, "count": tags.len() }),
+                )
             }
             "create" => {
-                let name = a.name.as_deref().filter(|n| !n.trim().is_empty()).ok_or_else(|| {
-                    ToolError::new("ERR_BAD_INPUT", "tag create needs a name")
-                })?;
+                let name = a
+                    .name
+                    .as_deref()
+                    .filter(|n| !n.trim().is_empty())
+                    .ok_or_else(|| ToolError::new("ERR_BAD_INPUT", "tag create needs a name"))?;
                 let out = if let Some(m) = a.target.as_deref().filter(|t| !t.trim().is_empty()) {
                     if let Some(msg) = a.message.as_deref().filter(|mm| !mm.trim().is_empty()) {
-                        super::git(&r, &["tag", "-a", name.trim(), m.trim(), "-m", msg.trim()], k)?
+                        super::git(
+                            &r,
+                            &["tag", "-a", name.trim(), m.trim(), "-m", msg.trim()],
+                            k,
+                        )?
                     } else {
                         super::git(&r, &["tag", name.trim(), m.trim()], k)?
                     }
@@ -191,16 +231,25 @@ impl Handler for TagHandler {
                 } else {
                     super::git(&r, &["tag", name.trim()], k)?
                 };
-                Ok(json!({ "repo": r.display().to_string(), "op": "create", "tag": name.trim(), "output": out.trim() }))
+                Ok(
+                    json!({ "repo": r.display().to_string(), "op": "create", "tag": name.trim(), "output": out.trim() }),
+                )
             }
             "delete" => {
-                let name = a.name.as_deref().filter(|n| !n.trim().is_empty()).ok_or_else(|| {
-                    ToolError::new("ERR_BAD_INPUT", "tag delete needs a name")
-                })?;
+                let name = a
+                    .name
+                    .as_deref()
+                    .filter(|n| !n.trim().is_empty())
+                    .ok_or_else(|| ToolError::new("ERR_BAD_INPUT", "tag delete needs a name"))?;
                 let out = super::git(&r, &["tag", "-d", name.trim()], k)?;
-                Ok(json!({ "repo": r.display().to_string(), "op": "delete", "tag": name.trim(), "output": out.trim() }))
+                Ok(
+                    json!({ "repo": r.display().to_string(), "op": "delete", "tag": name.trim(), "output": out.trim() }),
+                )
             }
-            other => Err(ToolError::new("ERR_BAD_INPUT", format!("unknown tag op: {other} (list|create|delete)"))),
+            other => Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                format!("unknown tag op: {other} (list|create|delete)"),
+            )),
         }
     }
 }
@@ -229,7 +278,7 @@ mod extra_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         std::process::Command::new("git")
-            .args(["init", "-b", "main"])
+            .args(["-c", "core.autocrlf=false", "init", "-b", "main"])
             .current_dir(&dir)
             .status()
             .unwrap();
@@ -239,12 +288,12 @@ mod extra_tests {
     fn commit(dir: &std::path::Path, file: &str, content: &str, msg: &str) {
         fs::write(dir.join(file), content).unwrap();
         std::process::Command::new("git")
-            .args(["add", "."])
+            .args(["-c", "core.autocrlf=false", "add", "."])
             .current_dir(dir)
             .status()
             .unwrap();
         std::process::Command::new("git")
-            .args(["commit", "-m", msg])
+            .args(["-c", "core.autocrlf=false", "commit", "-m", msg])
             .current_dir(dir)
             .status()
             .unwrap();
@@ -256,7 +305,10 @@ mod extra_tests {
     }
 
     fn read_trim(dir: &std::path::Path, file: &str) -> String {
-        fs::read_to_string(dir.join(file)).unwrap().trim().to_string()
+        fs::read_to_string(dir.join(file))
+            .unwrap()
+            .trim()
+            .to_string()
     }
 
     #[test]
@@ -291,19 +343,19 @@ mod extra_tests {
         let k = git_kernel(&r);
         commit(&r, "a.txt", "v1", "init");
         std::process::Command::new("git")
-            .args(["checkout", "-b", "feat"])
+            .args(["-c", "core.autocrlf=false", "checkout", "-b", "feat"])
             .current_dir(&r)
             .status()
             .unwrap();
         commit(&r, "b.txt", "feature", "feat: work");
         let sha_out = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
+            .args(["-c", "core.autocrlf=false", "rev-parse", "HEAD"])
             .current_dir(&r)
             .output()
             .unwrap();
         let sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
         std::process::Command::new("git")
-            .args(["checkout", "main"])
+            .args(["-c", "core.autocrlf=false", "checkout", "main"])
             .current_dir(&r)
             .status()
             .unwrap();
@@ -330,9 +382,7 @@ mod extra_tests {
             "git.tag",
             &serde_json::json!({ "repo": r.display().to_string(), "op": "list" }),
         );
-        let found = l
-            .result
-            .unwrap()["tags"]
+        let found = l.result.unwrap()["tags"]
             .as_array()
             .unwrap()
             .iter()

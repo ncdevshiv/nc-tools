@@ -12,13 +12,27 @@ use nct_core::errors::ToolError;
 /// Candidate browser executables, most-likely-first.
 fn browser_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-    let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let program_files =
+        std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
+    let program_files_x86 =
+        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
     let local_appdata = std::env::var("LocalAppData").unwrap_or_else(|_| String::new());
     for (root, rels) in [
-        (&program_files_x86, vec![r"Microsoft\Edge\Application\msedge.exe"]),
-        (&program_files, vec![r"Microsoft\Edge\Application\msedge.exe", r"Google\Chrome\Application\chrome.exe"]),
-        (&local_appdata, vec![r"Google\Chrome\Application\chrome.exe"]),
+        (
+            &program_files_x86,
+            vec![r"Microsoft\Edge\Application\msedge.exe"],
+        ),
+        (
+            &program_files,
+            vec![
+                r"Microsoft\Edge\Application\msedge.exe",
+                r"Google\Chrome\Application\chrome.exe",
+            ],
+        ),
+        (
+            &local_appdata,
+            vec![r"Google\Chrome\Application\chrome.exe"],
+        ),
     ] {
         for rel in rels {
             let p = PathBuf::from(root).join(rel);
@@ -77,7 +91,10 @@ pub fn render_dom(url: &str, allow_private: bool, timeout_ms: u64) -> Result<Str
     if elapsed > Duration::from_millis(timeout_ms) || elapsed > Duration::from_secs(30) {
         return Err(ToolError::with_hint(
             "ERR_TIMEOUT",
-            format!("headless render exceeded budget ({}ms)", elapsed.as_millis()),
+            format!(
+                "headless render exceeded budget ({}ms)",
+                elapsed.as_millis()
+            ),
             serde_json::json!({ "url": url, "elapsedMs": elapsed.as_millis() as u64 }),
         ));
     }
@@ -90,7 +107,10 @@ pub fn render_dom(url: &str, allow_private: bool, timeout_ms: u64) -> Result<Str
     }
     let dom = String::from_utf8_lossy(&output.stdout).into_owned();
     if dom.trim().is_empty() {
-        return Err(ToolError::new("ERR_RENDER", "headless render produced no DOM"));
+        return Err(ToolError::new(
+            "ERR_RENDER",
+            "headless render produced no DOM",
+        ));
     }
     Ok(dom)
 }

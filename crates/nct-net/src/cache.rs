@@ -100,7 +100,7 @@ mod root_for_tests {
         ));
         fs::create_dir_all(&server_root).unwrap();
         fs::create_dir_all(&anchored).unwrap();
-        let mut k = nct_core::Kernel::new(server_root.clone()).unwrap();
+        let k = nct_core::Kernel::new(server_root.clone()).unwrap();
         let _ = fs::remove_dir_all(join_cache(&server_root));
         let _ = fs::remove_dir_all(join_cache(&anchored));
 
@@ -114,20 +114,29 @@ mod root_for_tests {
         assert_eq!(root_for(&k), dunce::canonicalize(&anchored).unwrap());
 
         // env wins over the anchor
-        std::env::set_var("NCTOOLS_NET_CACHE", anchored.join("shared-cache").display().to_string());
+        std::env::set_var(
+            "NCTOOLS_NET_CACHE",
+            anchored.join("shared-cache").display().to_string(),
+        );
         assert_eq!(root_for(&k), anchored.join("shared-cache"));
 
         // store/load actually land under the env-overridden dir
-        store(&root_for(&k), &CacheEntry {
-            url: "https://example.com/x".into(),
-            etag: None,
-            last_modified: None,
-            content_type: "text/plain".into(),
-            body: "hi".into(),
-            fetched_at: "2026-01-01T00:00:00Z".into(),
-        })
+        store(
+            &root_for(&k),
+            &CacheEntry {
+                url: "https://example.com/x".into(),
+                etag: None,
+                last_modified: None,
+                content_type: "text/plain".into(),
+                body: "hi".into(),
+                fetched_at: "2026-01-01T00:00:00Z".into(),
+            },
+        )
         .unwrap();
-        assert!(join_cache(&anchored.join("shared-cache")).exists(), "cache file must be under the env dir");
+        assert!(
+            join_cache(&anchored.join("shared-cache")).exists(),
+            "cache file must be under the env dir"
+        );
         assert!(load(&root_for(&k), "https://example.com/x").is_some());
 
         // restore

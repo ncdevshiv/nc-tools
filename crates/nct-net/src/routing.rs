@@ -9,32 +9,73 @@ use nct_semantic::Embedder;
 use super::engines::Intent;
 
 pub const LABELS: &[(Intent, &str)] = &[
-    (Intent::General, "general web search for information about a topic"),
-    (Intent::News, "recent news, current events, something that happened today or this week"),
-    (Intent::HowTo, "how to solve a technical problem, fix an error, debug code, tutorial"),
-    (Intent::Academic, "scientific research paper, academic publication, study, arxiv, doi"),
-    (Intent::Package, "software package, library, npm module, crate, install a dependency"),
+    (
+        Intent::General,
+        "general web search for information about a topic",
+    ),
+    (
+        Intent::News,
+        "recent news, current events, something that happened today or this week",
+    ),
+    (
+        Intent::HowTo,
+        "how to solve a technical problem, fix an error, debug code, tutorial",
+    ),
+    (
+        Intent::Academic,
+        "scientific research paper, academic publication, study, arxiv, doi",
+    ),
+    (
+        Intent::Package,
+        "software package, library, npm module, crate, install a dependency",
+    ),
 ];
 
 /// Keyword fast-path: cheap, deterministic, catches the strongest signals.
 /// Returns None when the query doesn't scream any intent.
 pub fn keyword_intent(query: &str) -> Option<Intent> {
     let q = query.to_lowercase();
-    if ["npm", "crate", "pypi", "gem", "pip install", "package", "library for", "dependency"]
-        .iter()
-        .any(|k| q.contains(k))
+    if [
+        "npm",
+        "crate",
+        "pypi",
+        "gem",
+        "pip install",
+        "package",
+        "library for",
+        "dependency",
+    ]
+    .iter()
+    .any(|k| q.contains(k))
     {
         return Some(Intent::Package);
     }
-    if ["paper", "arxiv", "doi", "study", "research paper", "publication", "preprint", "et al"]
-        .iter()
-        .any(|k| q.contains(k))
+    if [
+        "paper",
+        "arxiv",
+        "doi",
+        "study",
+        "research paper",
+        "publication",
+        "preprint",
+        "et al",
+    ]
+    .iter()
+    .any(|k| q.contains(k))
     {
         return Some(Intent::Academic);
     }
-    if ["news", "breaking", "today", "yesterday", "this week", "latest on", "just announced"]
-        .iter()
-        .any(|k| q.contains(k))
+    if [
+        "news",
+        "breaking",
+        "today",
+        "yesterday",
+        "this week",
+        "latest on",
+        "just announced",
+    ]
+    .iter()
+    .any(|k| q.contains(k))
     {
         return Some(Intent::News);
     }
@@ -50,7 +91,8 @@ pub fn keyword_intent(query: &str) -> Option<Intent> {
     {
         return Some(Intent::HowTo);
     }
-    if (q.starts_with("official") && (q.contains("site") || q.contains("website") || q.contains("page")))
+    if (q.starts_with("official")
+        && (q.contains("site") || q.contains("website") || q.contains("page")))
         || q.contains("official website")
         || q.contains("homepage")
         || q.contains("download page")
@@ -104,7 +146,10 @@ pub fn sources_for(intent: Intent) -> &'static [&'static str] {
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
 }
 
 #[cfg(test)]
@@ -113,17 +158,38 @@ mod tests {
 
     #[test]
     fn keyword_paths_cover_strong_signals() {
-        assert_eq!(keyword_intent("how to fix E0509 borrow checker error"), Some(Intent::HowTo));
-        assert_eq!(keyword_intent("react library for state management"), Some(Intent::Package));
-        assert_eq!(keyword_intent("attention is all you need arxiv paper"), Some(Intent::Academic));
-        assert_eq!(keyword_intent("latest news on rust 2026"), Some(Intent::News));
+        assert_eq!(
+            keyword_intent("how to fix E0509 borrow checker error"),
+            Some(Intent::HowTo)
+        );
+        assert_eq!(
+            keyword_intent("react library for state management"),
+            Some(Intent::Package)
+        );
+        assert_eq!(
+            keyword_intent("attention is all you need arxiv paper"),
+            Some(Intent::Academic)
+        );
+        assert_eq!(
+            keyword_intent("latest news on rust 2026"),
+            Some(Intent::News)
+        );
         assert_eq!(keyword_intent("what is the capital of France"), None);
-        assert_eq!(keyword_intent("rust programming language official website"), Some(Intent::General));
+        assert_eq!(
+            keyword_intent("rust programming language official website"),
+            Some(Intent::General)
+        );
     }
 
     #[test]
     fn routing_tables_exist_for_every_intent() {
-        for intent in [Intent::General, Intent::News, Intent::HowTo, Intent::Academic, Intent::Package] {
+        for intent in [
+            Intent::General,
+            Intent::News,
+            Intent::HowTo,
+            Intent::Academic,
+            Intent::Package,
+        ] {
             assert!(!sources_for(intent).is_empty());
         }
         assert_eq!(sources_for(Intent::Academic)[0], "openalex");

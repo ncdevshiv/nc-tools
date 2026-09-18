@@ -79,7 +79,10 @@ fn percent_decode(s: &str) -> String {
 pub fn first_root_from_result(result: &serde_json::Value) -> Option<PathBuf> {
     let roots = result.get("roots")?.as_array()?;
     for r in roots {
-        let raw = r.get("uri").or_else(|| r.get("path")).and_then(|v| v.as_str());
+        let raw = r
+            .get("uri")
+            .or_else(|| r.get("path"))
+            .and_then(|v| v.as_str());
         let Some(raw) = raw else { continue };
         // Only file:// URIs or strings that start like a filesystem path.
         let looks_like_path = raw.starts_with("file://")
@@ -192,7 +195,9 @@ mod roots_tests {
 
     #[test]
     fn roots_capability_detection() {
-        assert!(client_supports_roots(&json!({ "roots": { "listChanged": true } })));
+        assert!(client_supports_roots(
+            &json!({ "roots": { "listChanged": true } })
+        ));
         assert!(client_supports_roots(&json!({ "roots": {} })));
         assert!(!client_supports_roots(&json!({ "tools": {} })));
         assert!(!client_supports_roots(&json!({})));

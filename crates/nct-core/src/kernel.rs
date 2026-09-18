@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use crate::config::Config;
 use crate::errors::ToolError;
 use crate::journal::Journal;
+use crate::schema::check_bounds;
 use crate::session::SessionEnv;
 
 /// One tool: descriptor (advertised over MCP) + executable handler.
@@ -37,9 +38,10 @@ pub fn parse_args<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, Too
     serde_json::from_value::<T>(args.clone()).map_err(|e| {
         let msg = e.to_string();
         let mut hint = serde_json::Map::new();
-        for (marker, key) in
-            [("missing field `", "missing"), ("unknown field `", "unknownField")]
-        {
+        for (marker, key) in [
+            ("missing field `", "missing"),
+            ("unknown field `", "unknownField"),
+        ] {
             if let Some(i) = msg.find(marker) {
                 let rest = &msg[i + marker.len()..];
                 if let Some(end) = rest.find('`') {
@@ -54,8 +56,15 @@ pub fn parse_args<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, Too
                 hint.insert("expected".to_string(), json!(expected));
             }
         }
-        let err = ToolError::new(crate::errors::codes::BAD_INPUT, format!("invalid arguments: {msg}"));
-        if hint.is_empty() { err } else { err.with_value_hint(hint) }
+        let err = ToolError::new(
+            crate::errors::codes::BAD_INPUT,
+            format!("invalid arguments: {msg}"),
+        );
+        if hint.is_empty() {
+            err
+        } else {
+            err.with_value_hint(hint)
+        }
     })
 }
 
@@ -63,6 +72,12 @@ pub fn parse_args<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T, Too
 /// journaled failure, None to proceed. Injected failures are journaled like
 /// real ones so recovery from them is measurable.
 pub type Hook = Arc<dyn Fn(&str, &Value) -> Option<ToolError> + Send + Sync>;
+
+/// Process-exit hook, run once when the server shuts down. Registered by
+/// subsystems that own resources the OS will not clean up on their behalf —
+/// `std::process::exit` skips every destructor, so a managed background child
+/// is orphaned unless something explicitly drains it.
+pub type ShutdownHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CallOutcome {
@@ -94,6 +109,7 @@ pub struct Kernel {
     pub agent_id: std::sync::Mutex<Option<String>>,
     tools: BTreeMap<String, ToolEntry>,
     hooks: Mutex<Vec<Hook>>,
+    shutdown_hooks: Mutex<Vec<ShutdownHook>>,
 }
 
 impl Kernel {
@@ -110,6 +126,7 @@ impl Kernel {
             agent_id: std::sync::Mutex::new(None),
             tools: BTreeMap::new(),
             hooks: Mutex::new(Vec::new()),
+            shutdown_hooks: Mutex::new(Vec::new()),
         })
     }
 
@@ -124,17 +141,50 @@ impl Kernel {
         self.agent_id.lock().unwrap().clone()
     }
 
-    pub fn register(&mut self, name: &str, description: &str, input_schema: Value, handler: Arc<dyn Handler>) {
-        self.tools.insert(name.to_string(), ToolEntry {
-            name: name.to_string(),
-            description: description.to_string(),
-            input_schema,
-            handler,
-        });
+    pub fn register(
+        &mut self,
+        name: &str,
+        description: &str,
+        input_schema: Value,
+        handler: Arc<dyn Handler>,
+    ) {
+        self.tools.insert(
+            name.to_string(),
+            ToolEntry {
+                name: name.to_string(),
+                description: description.to_string(),
+                input_schema,
+                handler,
+            },
+        );
     }
 
     pub fn add_hook(&mut self, hook: Hook) {
-        self.hooks.lock().unwrap_or_else(|p| p.into_inner()).push(hook);
+        self.hooks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(hook);
+    }
+
+    pub fn add_shutdown_hook(&mut self, hook: ShutdownHook) {
+        self.shutdown_hooks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(hook);
+    }
+
+    /// Run every registered exit hook, newest first. Each runs inside a panic
+    /// boundary so one misbehaving hook cannot skip the ones after it — the
+    /// whole point is that nothing is left orphaned at exit.
+    pub fn run_shutdown_hooks(&self) {
+        let hooks = self
+            .shutdown_hooks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        for hook in hooks.iter().rev() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook()));
+        }
     }
 
     pub fn list_tools(&self) -> Vec<String> {
@@ -248,12 +298,15 @@ impl Kernel {
     pub fn call(&self, tool: &str, args: &Value) -> CallOutcome {
         let started = Instant::now();
         let tool_name = self.resolve_tool(tool);
-        let call_seq = match self.journal.append("tool.call", json!({
-            "tool": tool_name,
-            "args": args,
-            "sid": self.sid,
-            "agentId": self.current_agent_id(),
-        })) {
+        let call_seq = match self.journal.append(
+            "tool.call",
+            json!({
+                "tool": tool_name,
+                "args": args,
+                "sid": self.sid,
+                "agentId": self.current_agent_id(),
+            }),
+        ) {
             Ok(ev) => ev.seq,
             Err(e) => {
                 return CallOutcome {
@@ -271,26 +324,39 @@ impl Kernel {
             Ok(v) => (true, Some(v), None),
             Err(e) => (false, None, Some(e)),
         };
-        let seq = match self.journal.append("tool.result", json!({
-            "tool": tool_name,
-            "ok": ok,
-            "result": result,
-            "error": error.as_ref().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)),
-            "durationMs": duration_ms,
-            "callSeq": call_seq,
-            "sid": self.sid,
-            "agentId": self.current_agent_id(),
-        })) {
+        let seq = match self.journal.append(
+            "tool.result",
+            json!({
+                "tool": tool_name,
+                "ok": ok,
+                "result": result,
+                "error": error.as_ref().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)),
+                "durationMs": duration_ms,
+                "callSeq": call_seq,
+                "sid": self.sid,
+                "agentId": self.current_agent_id(),
+            }),
+        ) {
             Ok(ev) => ev.seq,
             Err(_) => 0,
         };
-        CallOutcome { ok, result, error, duration_ms, seq }
+        CallOutcome {
+            ok,
+            result,
+            error,
+            duration_ms,
+            seq,
+        }
     }
 
     fn dispatch(&self, tool_name: &str, args: &Value) -> Result<Value, ToolError> {
         let Some(entry) = self.tools.get(tool_name) else {
             return Err(self.unknown_tool_error(tool_name));
         };
+        // Enforce the advertised size/range bounds before dispatch — serde
+        // already handled types and required keys, so this only adds the
+        // numeric and length constraints the schema promises.
+        check_bounds(&entry.input_schema, args)?;
         // The hooks guard MUST be dropped before the handler runs: handlers
         // legitimately re-enter dispatch (batch sub-calls, composite tools) —
         // holding the lock across the call deadlocks them.
@@ -305,7 +371,9 @@ impl Kernel {
         // Panic boundary: a handler bug must surface as a structured,
         // retryable error (ERR_PANIC) — never kill the server process, which
         // over stdio would strand the agent with a dead pipe and no code.
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry.handler.call(self, args))) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            entry.handler.call(self, args)
+        })) {
             Ok(result) => result,
             Err(payload) => Err(panic_error(tool_name, payload.as_ref())),
         }
@@ -317,7 +385,10 @@ impl Kernel {
     fn unknown_tool_error(&self, sent: &str) -> ToolError {
         let mut hint = json!({ "available": self.list_tools() });
         let mut message = format!("Unknown tool: {sent}");
-        let normalized = sent.to_lowercase().replace("__", ".").replace(['_', '-'], ".");
+        let normalized = sent
+            .to_lowercase()
+            .replace("__", ".")
+            .replace(['_', '-'], ".");
         let mut best: Option<(&str, usize)> = None;
         for name in self.tools.keys() {
             let d = levenshtein(&normalized, name);
@@ -328,7 +399,11 @@ impl Kernel {
         if let Some((name, d)) = best {
             let threshold = std::cmp::max(2, name.len() / 3);
             if d <= threshold {
-                let mcp = format!("mcp__{}__{}", crate::MCP_SERVER_NAME, name.replace('.', "_"));
+                let mcp = format!(
+                    "mcp__{}__{}",
+                    crate::MCP_SERVER_NAME,
+                    name.replace('.', "_")
+                );
                 message.push_str(&format!(
                     " — did you mean '{name}'? Accepted wire forms: '{name}', '{}', '{mcp}'",
                     name.replace('.', "_")
@@ -341,7 +416,8 @@ impl Kernel {
         // `mcp__nc-tools=` class): the fix is the format itself, not a guess.
         // Any non-alphanumeric is a separator here — stray `=`/`:` must not
         // fuse with the last token.
-        const SERVER_HEADS: [&str; 7] = ["mcp", "nc", "tools", "tool", "nctools", "kernel", "server"];
+        const SERVER_HEADS: [&str; 7] =
+            ["mcp", "nc", "tools", "tool", "nctools", "kernel", "server"];
         let clean: String = normalized
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '.' })
@@ -352,7 +428,9 @@ impl Kernel {
             message.push_str(&format!(
                 " — no tool name after the server prefix; use mcp__{}__<toolname> \
                  (dots become underscores), e.g. mcp__{}__fs_read or mcp__{}__net_fetch",
-                crate::MCP_SERVER_NAME, crate::MCP_SERVER_NAME, crate::MCP_SERVER_NAME
+                crate::MCP_SERVER_NAME,
+                crate::MCP_SERVER_NAME,
+                crate::MCP_SERVER_NAME
             ));
             hint["wireForm"] = json!(format!("mcp__{}__<toolname>", crate::MCP_SERVER_NAME));
             hint["examples"] = json!([
@@ -456,16 +534,16 @@ mod tests {
     fn resolve_tool_accepts_observed_wire_forms() {
         let k = kernel_with_tools();
         for (sent, expected) in [
-            ("fs.read", "fs.read"),               // canonical
-            ("fs_read", "fs.read"),               // single underscore
-            ("git__status", "git.status"),        // double underscore
-            ("nc-tools-fs.read", "fs.read"),      // Qwen real: <server>-<tool>
+            ("fs.read", "fs.read"),          // canonical
+            ("fs_read", "fs.read"),          // single underscore
+            ("git__status", "git.status"),   // double underscore
+            ("nc-tools-fs.read", "fs.read"), // Qwen real: <server>-<tool>
             ("nctools-fs.read", "fs.read"),
             ("tools-fs.read", "fs.read"),
             ("tool-fs.read", "fs.read"),
             ("nc_tools-fs.read", "fs.read"),
             ("Nc_tool-fs.read", "fs.read"),
-            ("nc-tools.fs.read", "fs.read"),      // <server>.<tool>
+            ("nc-tools.fs.read", "fs.read"), // <server>.<tool>
             ("mcp__nc-tools__fs__read", "fs.read"),
             ("mcp__other__git__status", "git.status"),
             ("nc-tools-net.http", "net.http"),
@@ -480,7 +558,10 @@ mod tests {
         let k = kernel_with_tools();
         for sent in ["fs.unknown", "read", "fs.readx", "nc-tool-read", "grep"] {
             let resolved = k.resolve_tool(sent);
-            assert_eq!(resolved, sent, "unknown name must not be mis-resolved: {sent}");
+            assert_eq!(
+                resolved, sent,
+                "unknown name must not be mis-resolved: {sent}"
+            );
         }
     }
 
@@ -511,9 +592,16 @@ mod tests {
         assert!(!out.ok);
         let e = out.error.expect("panic must produce an error");
         assert_eq!(e.code, "ERR_PANIC", "got: {e:?}");
-        assert!(e.message.contains("injected boom: root cause proof"), "panic message must be the root cause: {}", e.message);
+        assert!(
+            e.message.contains("injected boom: root cause proof"),
+            "panic message must be the root cause: {}",
+            e.message
+        );
         // the kernel must still be fully functional afterwards
-        assert!(k.call("fs.read", &json!({})).result.is_some() || k.call("fs.read", &json!({})).error.is_some());
+        assert!(
+            k.call("fs.read", &json!({})).result.is_some()
+                || k.call("fs.read", &json!({})).error.is_some()
+        );
         let names = k.list_tools();
         assert!(names.contains(&"boom.tool".to_string()));
     }
@@ -524,25 +612,54 @@ mod tests {
         let out = k.call("fs.rea", &json!({}));
         let e = out.error.expect("must error");
         assert_eq!(e.code, "ERR_UNKNOWN_TOOL");
-        assert!(e.message.contains("did you mean 'fs.read'"), "message: {}", e.message);
+        assert!(
+            e.message.contains("did you mean 'fs.read'"),
+            "message: {}",
+            e.message
+        );
         assert_eq!(e.hint.as_ref().unwrap()["didYouMean"], json!("fs.read"));
-        assert_eq!(e.hint.as_ref().unwrap()["retryWith"], json!("mcp__nc-tools__fs_read"));
+        assert_eq!(
+            e.hint.as_ref().unwrap()["retryWith"],
+            json!("mcp__nc-tools__fs_read")
+        );
         // garbage far from any name must NOT guess
         let junk = k.call("zzzzzz", &json!({}));
-        assert!(junk.error.unwrap().hint.as_ref().unwrap().get("didYouMean").is_none());
+        assert!(junk
+            .error
+            .unwrap()
+            .hint
+            .as_ref()
+            .unwrap()
+            .get("didYouMean")
+            .is_none());
     }
 
     #[test]
     fn server_prefixed_name_without_tool_teaches_wire_form() {
         let k = kernel_with_tools();
-        for sent in ["mcp__nc-tools=", "mcp__nc-tools", "nc-tools", "mcp__nc-tools:"] {
+        for sent in [
+            "mcp__nc-tools=",
+            "mcp__nc-tools",
+            "nc-tools",
+            "mcp__nc-tools:",
+        ] {
             let out = k.call(sent, &json!({}));
             let e = out.error.expect("must error");
             assert_eq!(e.code, "ERR_UNKNOWN_TOOL");
             let hint = e.hint.as_ref().unwrap();
-            assert_eq!(hint["wireForm"], json!("mcp__nc-tools__<toolname>"), "sent: {sent}");
-            assert!(hint["examples"].as_array().map_or(false, |a| !a.is_empty()), "sent: {sent}");
-            assert!(hint.get("didYouMean").is_none(), "must not guess a tool: {sent}");
+            assert_eq!(
+                hint["wireForm"],
+                json!("mcp__nc-tools__<toolname>"),
+                "sent: {sent}"
+            );
+            assert!(
+                hint["examples"].as_array().is_some_and(|a| !a.is_empty()),
+                "sent: {sent}"
+            );
+            assert!(
+                hint.get("didYouMean").is_none(),
+                "must not guess a tool: {sent}"
+            );
         }
         // a real tool behind the prefix is unaffected (resolves, no error)
         assert_eq!(k.resolve_tool("mcp__nc-tools__fs__read"), "fs.read");
@@ -554,7 +671,14 @@ mod provenance_tests {
     use super::*;
 
     fn kernel() -> Kernel {
-        let dir = std::env::temp_dir().join(format!("nct-provenance-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "nct-provenance-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         Kernel::new(dir).unwrap()
     }
@@ -580,7 +704,11 @@ mod provenance_tests {
         // even a failed call is journaled with provenance
         let events = k.journal.events();
         for ev in &events {
-            assert_eq!(ev["agentId"], json!("agent-7"), "every row should carry the bound agentId: {ev}");
+            assert_eq!(
+                ev["agentId"],
+                json!("agent-7"),
+                "every row should carry the bound agentId: {ev}"
+            );
             assert_eq!(ev["sid"].as_str(), Some(k.sid.as_str()), "sid present too");
         }
         let _ = out;
@@ -592,7 +720,11 @@ mod provenance_tests {
         let _ = k.call("fs.read", &json!({ "path": "x" }));
         let events = k.journal.events();
         for ev in &events {
-            assert_eq!(ev["agentId"], json!(null), "no agent bound -> agentId null: {ev}");
+            assert_eq!(
+                ev["agentId"],
+                json!(null),
+                "no agent bound -> agentId null: {ev}"
+            );
         }
     }
 
@@ -617,7 +749,10 @@ mod provenance_tests {
 
         // anchor: None now resolves to the anchor; root stays immutable
         assert!(k.set_default_base(&target), "existing dir must be accepted");
-        assert_eq!(k.base_dir(None).unwrap(), dunce::canonicalize(&target).unwrap());
+        assert_eq!(
+            k.base_dir(None).unwrap(),
+            dunce::canonicalize(&target).unwrap()
+        );
         assert_eq!(k.root, /* unchanged */ k.root);
         assert!(k.current_default_base().is_some());
 
@@ -630,8 +765,14 @@ mod provenance_tests {
 
         // a non-directory candidate is refused, previous anchor kept
         let bogus = target.join("does-not-exist");
-        assert!(!k.set_default_base(&bogus), "nonexistent dir must be refused");
-        assert_eq!(k.base_dir(None).unwrap(), dunce::canonicalize(&target).unwrap());
+        assert!(
+            !k.set_default_base(&bogus),
+            "nonexistent dir must be refused"
+        );
+        assert_eq!(
+            k.base_dir(None).unwrap(),
+            dunce::canonicalize(&target).unwrap()
+        );
 
         let _ = std::fs::remove_dir_all(&target);
     }

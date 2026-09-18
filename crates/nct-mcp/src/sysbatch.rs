@@ -15,9 +15,24 @@ pub const SNAPSHOT_LIST_NOTE: &str = "";
 pub const BATCH_DESC: &str = "Run up to 25 kernel tool calls in ONE round-trip: [{tool, args, dependsOn?}]. Each sub-call is individually executed and journaled; failures do not abort the batch. Calls with no dependsOn execute in parallel; calls with dependsOn=[indices] wait for those to finish first. Use for independent multi-step work.";
 
 pub fn register_sys_batch(k: &mut Kernel) {
-    k.register("sys.journal", JOURNAL_DESC, nct_core::schema::schema_for::<JournalArgs>(), Arc::new(JournalHandler));
-    k.register("sys.workspace", WORKSPACE_DESC, nct_core::schema::schema_for::<WorkspaceArgs>(), Arc::new(WorkspaceHandler));
-    k.register("batch.execute", BATCH_DESC, nct_core::schema::schema_for::<BatchArgs>(), Arc::new(BatchHandler));
+    k.register(
+        "sys.journal",
+        JOURNAL_DESC,
+        nct_core::schema::schema_for::<JournalArgs>(),
+        Arc::new(JournalHandler),
+    );
+    k.register(
+        "sys.workspace",
+        WORKSPACE_DESC,
+        nct_core::schema::schema_for::<WorkspaceArgs>(),
+        Arc::new(WorkspaceHandler),
+    );
+    k.register(
+        "batch.execute",
+        BATCH_DESC,
+        nct_core::schema::schema_for::<BatchArgs>(),
+        Arc::new(BatchHandler),
+    );
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -120,10 +135,16 @@ impl Handler for BatchHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: BatchArgs = parse_args(args)?;
         if a.calls.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "calls must be a non-empty array of {tool, args}"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "calls must be a non-empty array of {tool, args}",
+            ));
         }
         if a.calls.len() > k.cfg.limits.batch_max {
-            return Err(ToolError::new("ERR_BAD_INPUT", format!("max {} calls per batch.execute", k.cfg.limits.batch_max)));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                format!("max {} calls per batch.execute", k.cfg.limits.batch_max),
+            ));
         }
 
         let n = a.calls.len();
@@ -171,7 +192,10 @@ impl Handler for BatchHandler {
         // depends on itself, reject.
         for (i, d) in deps.iter().enumerate() {
             if d.contains(&i) {
-                return Err(ToolError::new("ERR_BAD_INPUT", format!("call {i} cannot depend on itself")));
+                return Err(ToolError::new(
+                    "ERR_BAD_INPUT",
+                    format!("call {i} cannot depend on itself"),
+                ));
             }
         }
 
@@ -181,13 +205,23 @@ impl Handler for BatchHandler {
 
         let retry_times = a.retry.as_ref().and_then(|r| r.times).unwrap_or(0) as u32;
         let retry_delay = a.retry.as_ref().and_then(|r| r.delayMs).unwrap_or(1000);
-        let retry = Retry { times: retry_times, delay_ms: retry_delay };
+        let retry = Retry {
+            times: retry_times,
+            delay_ms: retry_delay,
+        };
 
         let results: Vec<Value> = if has_deps {
             execute_dag(k, &a.calls, &deps, batch_str, &retry)
         } else {
             execute_parallel(k, &a.calls, batch_str, &retry)
         };
+
+        // The client cancelled the batch: the sub-calls that ran are journaled
+        // (that is their audit trail) but the batch itself must not report
+        // success — the caller sees ERR_CANCELLED, matching every other path.
+        if nct_core::is_cancelled() {
+            return Err(nct_core::cancelled_error("batch.execute"));
+        }
 
         let ok_count = results.iter().filter(|r| r["ok"] == json!(true)).count();
         Ok(json!({
@@ -215,11 +249,15 @@ fn run_with_retry(k: &Kernel, tool: &str, args: &Value, retry: &Retry) -> Value 
         if out.ok {
             return call_item(out);
         }
-        if attempt >= retry.times {
+        // A cancelled call must not burn retries (or backoff sleeps) after the
+        // client is gone; the failed outcome is returned immediately.
+        if nct_core::is_cancelled() || attempt >= retry.times {
             return call_item(out);
         }
         attempt += 1;
-        std::thread::sleep(std::time::Duration::from_millis(retry.delay_ms * attempt as u64));
+        std::thread::sleep(std::time::Duration::from_millis(
+            retry.delay_ms * attempt as u64,
+        ));
     }
 }
 
@@ -230,24 +268,41 @@ fn call_item(out: nct_core::CallOutcome) -> Value {
         item.insert("result".into(), r);
     }
     if let Some(e) = out.error {
-        item.insert("error".into(), serde_json::to_value(e).unwrap_or(Value::Null));
+        item.insert(
+            "error".into(),
+            serde_json::to_value(e).unwrap_or(Value::Null),
+        );
     }
     Value::Object(item)
 }
 
 /// Execute all calls in parallel via scoped threads. Results are returned in
 /// input order. Each call is journaled individually by the kernel.
-fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str, retry: &Retry) -> Vec<Value> {
+fn execute_parallel(
+    k: &Kernel,
+    calls: &[BatchCall],
+    batch_name: &str,
+    retry: &Retry,
+) -> Vec<Value> {
+    // The MCP worker installed this call's cancel flag + progress context on
+    // ITS thread; scoped sub-workers start with empty thread-locals, so carry
+    // the parent's context into every sub-call — cancellation and progress
+    // must cover batch.execute like any other call path.
+    let parent_flag = nct_core::current_cancel_flag();
+    let parent_ctx = nct_core::current_progress_ctx();
     std::thread::scope(|scope| {
         let handles: Vec<_> = calls
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
+            .map(|c| {
                 let tool = c.tool.clone();
                 let args = Value::Object(c.args.clone());
                 let batch = batch_name.to_string();
                 let retry = *retry;
+                let flag = parent_flag.clone();
+                let ctx = parent_ctx.clone();
                 scope.spawn(move || {
+                    nct_core::set_cancel_flag(flag);
+                    nct_core::set_progress_ctx(ctx);
                     if nct_core::Kernel::resolve_tool(k, &batch) == nct_core::Kernel::resolve_tool(k, &tool) {
                         return json!({ "ok": false, "error": { "code": "ERR_REFUSED", "message": "batch.execute cannot nest itself" } });
                     }
@@ -270,7 +325,13 @@ fn execute_parallel(k: &Kernel, calls: &[BatchCall], batch_name: &str, retry: &R
 /// Execute calls respecting the dependency graph. Uses Kahn's topological
 /// rounds: each round runs all ready calls in parallel, then unlocks
 /// dependents. Results are returned in input order.
-fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_name: &str, retry: &Retry) -> Vec<Value> {
+fn execute_dag(
+    k: &Kernel,
+    calls: &[BatchCall],
+    deps: &[HashSet<usize>],
+    batch_name: &str,
+    retry: &Retry,
+) -> Vec<Value> {
     let n = calls.len();
     let mut results: Vec<Value> = vec![
         json!({ "ok": false, "error": { "code": "ERR_INTERNAL", "message": "not executed" } });
@@ -278,8 +339,18 @@ fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_n
     ];
     let remaining: Vec<HashSet<usize>> = deps.to_vec();
     let mut done = vec![false; n];
+    // Parent call's context, propagated into every round's scoped workers
+    // (see execute_parallel for why thread-locals must be re-installed).
+    let parent_flag = nct_core::current_cancel_flag();
+    let parent_ctx = nct_core::current_progress_ctx();
 
     loop {
+        // A cancelled batch stops unlocking further rounds: what already ran
+        // stays journaled, dependents are left marked "not executed", and
+        // BatchHandler turns the flag into ERR_CANCELLED.
+        if nct_core::is_cancelled() {
+            break;
+        }
         // Find all calls whose dependencies are all satisfied
         let ready: Vec<usize> = (0..n)
             .filter(|i| !done[*i] && remaining[*i].iter().all(|d| done[*d]))
@@ -297,7 +368,11 @@ fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_n
                     let args = Value::Object(calls[i].args.clone());
                     let bn = batch_name.to_string();
                     let retry = *retry;
+                    let flag = parent_flag.clone();
+                    let ctx = parent_ctx.clone();
                     (i, scope.spawn(move || {
+                        nct_core::set_cancel_flag(flag);
+                        nct_core::set_progress_ctx(ctx);
                         if nct_core::Kernel::resolve_tool(k, &bn)
                             == nct_core::Kernel::resolve_tool(k, &tool)
                         {
@@ -311,10 +386,12 @@ fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_n
             handles
                 .into_iter()
                 .map(|(i, h)| {
-                    let v = h.join().unwrap_or_else(|_| json!({
-                        "ok": false,
-                        "error": { "code": "ERR_INTERNAL", "message": "worker panicked" }
-                    }));
+                    let v = h.join().unwrap_or_else(|_| {
+                        json!({
+                            "ok": false,
+                            "error": { "code": "ERR_INTERNAL", "message": "worker panicked" }
+                        })
+                    });
                     (i, v)
                 })
                 .collect::<Vec<_>>()
@@ -332,7 +409,6 @@ fn execute_dag(k: &Kernel, calls: &[BatchCall], deps: &[HashSet<usize>], batch_n
 #[cfg(test)]
 mod batch_tests {
     use super::*;
-    use nct_core::config::Config;
 
     fn make_kernel() -> Kernel {
         let dir = std::env::temp_dir().join(format!(
@@ -392,7 +468,7 @@ mod batch_tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0]["ok"], json!(true)); // write
         assert_eq!(results[1]["ok"], json!(true)); // read (after write)
-        // The read must contain the content from the write
+                                                   // The read must contain the content from the write
         let read_content = results[1]["result"]["content"].as_str().unwrap();
         assert!(read_content.contains("dependency data"));
     }
@@ -493,10 +569,17 @@ mod retry_tests {
         // create it now
         std::fs::write(k.root.join("will-exist.txt"), "now here\n").unwrap();
         let v2 = BatchHandler.call(&k, &args).unwrap();
-        assert_eq!(v2["ok"], json!(1), "after creation the same call must succeed");
+        assert_eq!(
+            v2["ok"],
+            json!(1),
+            "after creation the same call must succeed"
+        );
         // journal saw the retried calls (each attempt journaled)
         let evs = k.journal.events();
-        let calls: Vec<_> = evs.iter().filter(|e| e["kind"] == "tool.call" && e["tool"] == json!("fs.read")).collect();
+        let calls: Vec<_> = evs
+            .iter()
+            .filter(|e| e["kind"] == "tool.call" && e["tool"] == json!("fs.read"))
+            .collect();
         assert!(calls.len() >= 2);
     }
 
@@ -538,10 +621,17 @@ mod retry_tests {
         // base_dir(None) reports the anchor and anchored flips true
         k.set_default_base(&target);
         let anchored = WorkspaceHandler.call(&k, &json!({})).unwrap();
-        assert_eq!(anchored["root"], json!(dunce::canonicalize(&target).unwrap().display().to_string()));
+        assert_eq!(
+            anchored["root"],
+            json!(dunce::canonicalize(&target).unwrap().display().to_string())
+        );
         assert_eq!(anchored["anchored"], json!(true));
-        k.set_default_base(&std::path::Path::new("/nonexistent-anchor-xyz")); // refused
-        assert_eq!(WorkspaceHandler.call(&k, &json!({})).unwrap()["anchored"], json!(true), "refused anchor keeps the old one");
+        k.set_default_base(std::path::Path::new("/nonexistent-anchor-xyz")); // refused
+        assert_eq!(
+            WorkspaceHandler.call(&k, &json!({})).unwrap()["anchored"],
+            json!(true),
+            "refused anchor keeps the old one"
+        );
 
         // baseDir: the OTHER workspace and its real git state
         // (compare canonicalized — resolve_checked returns the long path)
@@ -550,8 +640,16 @@ mod retry_tests {
             .call(&k, &json!({ "baseDir": target.display().to_string() }))
             .unwrap();
         assert_eq!(over["root"], json!(canon.display().to_string()));
-        assert_eq!(over["git"], json!(true), "target has .git — must be reported");
-        assert_eq!(over["serverRoot"], json!(k.root.display().to_string()), "serverRoot stays the server's");
+        assert_eq!(
+            over["git"],
+            json!(true),
+            "target has .git — must be reported"
+        );
+        assert_eq!(
+            over["serverRoot"],
+            json!(k.root.display().to_string()),
+            "serverRoot stays the server's"
+        );
 
         // a bad baseDir is an error, never a silent fallback to the server root
         let bad = WorkspaceHandler.call(&k, &json!({ "baseDir": "/no/such/ws/xyz" }));

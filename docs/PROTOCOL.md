@@ -123,6 +123,7 @@ exactly one code (combined rows are not parseable by the gate).
 | `ERR_BAD_PATH` | empty / non-path value |
 | `ERR_BAD_REGEX` | invalid search pattern |
 | `ERR_BINARY_FILE` | path is a binary file (fs.read refuses >30% NUL bytes; hint: readRange) |
+| `ERR_CANCELLED` | client sent notifications/cancelled for the in-flight call; the tool stopped early |
 | `ERR_CMD_NOT_FOUND` | spawned command not found (hint: binary + PATH note) |
 | `ERR_EMBED_UNAVAILABLE` | local embedding model not loaded (semantic rerank/grounding) |
 | `ERR_ENGINE` | text-extraction/rerank engine failure |
@@ -178,11 +179,33 @@ Errors carry remediation, not just diagnosis:
 ### 6.1 MCP stdio (required for conformance)
 
 - JSON-RPC 2.0 over stdio, newline-delimited JSON (one message per line).
-- Supported methods: `initialize` (protocolVersion `2024-11-05`,
-  serverInfo `{name: "nc-tools", version: <semver>}`), `notifications/initialized`
-  (no response), `tools/list` (each tool has `name`, `description`,
-  `inputSchema` — a JSON Schema object), `tools/call`
-  (`{name, arguments}` → `{content: [{type:"text", text}], isError}`).
+- **Version negotiation**: `initialize` responds with the client's requested
+  `protocolVersion` when supported (`2025-11-25`, `2025-06-18`, `2025-03-26`,
+  `2024-11-05`, `2024-10-07`), otherwise with the latest supported revision —
+  byte-compatible with the reference SDK server. `serverInfo` is
+  `{name: "nc-tools", version: <semver>}`.
+- **Revisions >= `2025-06-18`** additionally carry
+  `structuredContent` on successful `tools/call` results (an object equal to
+  the structured result); older revisions stay text-only.
+- Supported methods: `notifications/initialized` (no response), `tools/list`
+  (each tool has `name`, `description`, `inputSchema` — a JSON Schema object),
+  `tools/call` (`{name, arguments}` →
+  `{content: [{type:"text", text}], isError}`), `ping`.
+- **Concurrency**: each `tools/call` executes on its own worker; responses are
+  correlated by JSON-RPC id and may interleave with other responses and
+  notifications. One long call never blocks another.
+- **Cancellation**: `notifications/cancelled` with the in-flight request id
+  stops the call cooperatively — wait loops (proc.spawn/runBounded, fs.watch,
+  search scans, test.run, git.*, pkg/child runs, and all `batch.execute`
+  sub-calls, which inherit the parent's flag) kill their children and answer
+  `ERR_CANCELLED`. Cooperative means the next poll: a call acks within its
+  loop interval (fs.watch: `intervalMs`), plus the one-time embedder load on
+  a cold server. Closing stdin (EOF) arms the same
+  shutdown path for everything in flight. The server still sends a structured
+  `ERR_CANCELLED` response for the cancelled request; per the spec a sender
+  SHOULD ignore responses arriving after cancellation, so clients may drop it.
+- **Progress**: when a call carries `_meta.progressToken`, long operations
+  emit `notifications/progress` for it.
 - **Tool-name aliases**: `tools/call` accepts the dotted surface name plus
   two wire forms: single-underscore (`fs_stat`) and double-underscore
   (`fs__stat` — what agent loops emit for providers that forbid dotted

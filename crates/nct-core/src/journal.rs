@@ -9,39 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::errors::ToolError;
-
-/// Exclusive-create lock file held for the duration of one append; bounded
-/// retry (5s) exactly like the JS `withLock`.
-struct JournalLock<'a> {
-    path: &'a Path,
-}
-
-impl<'a> JournalLock<'a> {
-    fn acquire(path: &'a Path) -> Result<JournalLock<'a>, ToolError> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5000);
-        loop {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(_) => return Ok(JournalLock { path }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if std::time::Instant::now() > deadline {
-                        return Err(ToolError::new(
-                            "ERR_INTERNAL",
-                            format!("journal lock timeout: {} held too long", path.display()),
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-                Err(_) => return Ok(JournalLock { path }), // lock is best-effort
-            }
-        }
-    }
-}
-
-impl Drop for JournalLock<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.path);
-    }
-}
+use crate::filock::{FileLock, DEFAULT_TIMEOUT_MS};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JournalEvent {
@@ -70,8 +38,15 @@ impl Journal {
             .and_then(|l| serde_json::from_str::<Value>(l).ok())
             .and_then(|v| v.get("seq").and_then(|s| s.as_u64()))
             .unwrap_or(0);
-        let lock_path = file_path.parent().unwrap_or(Path::new(".")).join(".journal.lock");
-        Ok(Journal { file_path, seq: std::sync::Arc::new(std::sync::Mutex::new(seq)), lock_path })
+        let lock_path = file_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(".journal.lock");
+        Ok(Journal {
+            file_path,
+            seq: std::sync::Arc::new(std::sync::Mutex::new(seq)),
+            lock_path,
+        })
     }
 
     /// Append one event; returns the event as written. Serialized across
@@ -82,7 +57,7 @@ impl Journal {
         // process resumes its counter at open time, so a counter alone
         // collides (the journal once recorded 92 duplicate seqs). The file is
         // the only shared truth — re-read it under the lock per append.
-        let _lock = JournalLock::acquire(&self.lock_path)?;
+        let _lock = FileLock::acquire(&self.lock_path, DEFAULT_TIMEOUT_MS)?;
         let seq = self.last_seq_locked()?.saturating_add(1);
         let event = JournalEvent {
             ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -91,7 +66,10 @@ impl Journal {
             fields,
         };
         let line = serde_json::to_string(&event)? + "\n";
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.file_path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file_path)?;
         f.write_all(line.as_bytes())?;
         *self.seq.lock().unwrap() = seq;
         Ok(event)
@@ -141,7 +119,10 @@ impl Journal {
         if f.read_to_string(&mut buf).is_err() {
             return Vec::new();
         }
-        buf.lines().filter(|l| !l.is_empty()).map(|l| l.to_string()).collect()
+        buf.lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect()
     }
 
     /// Parsed events, newest last. Corrupt lines are skipped (JSON journal reader).
@@ -219,10 +200,10 @@ mod tests {
     use super::*;
 
     fn temp_journal(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nct-journal-test-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nct-journal-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("journal.jsonl");
-        path
+        dir.join("journal.jsonl")
     }
 
     // Regression: two server processes share one journal; both construct
@@ -237,7 +218,11 @@ mod tests {
         let mut seqs = Vec::new();
         for i in 0..8 {
             let j = if i % 2 == 0 { &a } else { &b };
-            seqs.push(j.append("tool.call", serde_json::json!({ "tool": "t" })).unwrap().seq);
+            seqs.push(
+                j.append("tool.call", serde_json::json!({ "tool": "t" }))
+                    .unwrap()
+                    .seq,
+            );
         }
         for w in seqs.windows(2) {
             assert!(w[0] < w[1], "seqs must be strictly increasing: {seqs:?}");
@@ -252,10 +237,16 @@ mod tests {
         let path = temp_journal("restart");
         {
             let j = Journal::new(path.clone()).unwrap();
-            j.append("tool.call", serde_json::json!({ "tool": "t" })).unwrap();
+            j.append("tool.call", serde_json::json!({ "tool": "t" }))
+                .unwrap();
         }
         let j2 = Journal::new(path.clone()).unwrap();
-        assert_eq!(j2.append("tool.call", serde_json::json!({ "tool": "t" })).unwrap().seq, 2);
+        assert_eq!(
+            j2.append("tool.call", serde_json::json!({ "tool": "t" }))
+                .unwrap()
+                .seq,
+            2
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -264,13 +255,24 @@ mod tests {
         let path = temp_journal("torn");
         {
             let j = Journal::new(path.clone()).unwrap();
-            j.append("tool.call", serde_json::json!({ "tool": "t" })).unwrap();
+            j.append("tool.call", serde_json::json!({ "tool": "t" }))
+                .unwrap();
         }
         // simulate a crash mid-write: a partial line at the end
-        OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{\"ts\":\"x\",\"seq\":").unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"ts\":\"x\",\"seq\":")
+            .unwrap();
         assert_eq!(last_complete_seq(&std::fs::read(&path).unwrap()), Some(1));
         let j = Journal::new(path.clone()).unwrap();
-        assert_eq!(j.append("tool.call", serde_json::json!({ "tool": "t" })).unwrap().seq, 2);
+        assert_eq!(
+            j.append("tool.call", serde_json::json!({ "tool": "t" }))
+                .unwrap()
+                .seq,
+            2
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

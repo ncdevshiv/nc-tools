@@ -20,35 +20,116 @@ use nct_core::kernel::{parse_args, Handler, Kernel};
 use nct_core::paths::resolve_checked;
 use nct_core::{now_iso, CREATE_NO_WINDOW};
 
-pub const SPAWN_DESC: &str = "Run a program with typed argv (no shell). Captures stdout/stderr, exit code, hard timeout.";
+pub const SPAWN_DESC: &str =
+    "Run a program with typed argv (no shell). Captures stdout/stderr, exit code, hard timeout.";
 pub const START_DESC: &str = "Start a LONG-RUNNING background process (server, watcher). Returns a handleId. NOT for one-shot commands — use proc.spawn for those.";
-pub const STATUS_DESC: &str = "Status of a background process handle: running, exitCode, outputBytes, uptime.";
-pub const READ_OUTPUT_DESC: &str = "Read recent output (stdout+stderr merged) of a background process.";
+pub const STATUS_DESC: &str =
+    "Status of a background process handle: running, exitCode, outputBytes, uptime.";
+pub const READ_OUTPUT_DESC: &str =
+    "Read recent output (stdout+stderr merged) of a background process.";
 pub const STOP_DESC: &str = "Stop a background process by handle.";
-pub const LIST_DESC: &str = "List the OS process table (tasklist/ps). Optional substring filter by process name.";
+pub const LIST_DESC: &str =
+    "List the OS process table (tasklist/ps). Optional substring filter by process name.";
 pub const KILL_DESC: &str = "Kill a process by PID (system process, not just managed handles).";
 pub const ENV_GET_DESC: &str = "Read an environment variable (session override wins over host).";
-pub const ENV_SET_DESC: &str = "Set a session environment variable; all subsequent proc.* calls inherit it.";
+pub const ENV_SET_DESC: &str =
+    "Set a session environment variable; all subsequent proc.* calls inherit it.";
 pub const ENV_LIST_DESC: &str = "List session environment overrides.";
 pub const RUN_SCRIPT_DESC: &str = "Run an interpreted script (js/python/shell/powershell/batch) with a hard timeout. Provide a file path OR inline source. Captures stdout/stderr + exit code.";
 pub const WATCH_DESC: &str = "Watch a file/dir and re-run a long-lived command whenever the tree changes (auto-rebuild / dev server). Returns a handleId managed by proc.status/readOutput/stop.";
 
-
 pub fn register(k: &mut Kernel) {
     let handles = HandleTable::default();
-    k.register("proc.spawn", SPAWN_DESC, nct_core::schema::schema_for::<SpawnArgs>(), Arc::new(SpawnHandler));
-    k.register("proc.start", START_DESC, nct_core::schema::schema_for::<StartArgs>(), Arc::new(StartHandler { handles: handles.clone() }));
-    k.register("proc.status", STATUS_DESC, nct_core::schema::schema_for::<HandleArgs>(), Arc::new(StatusHandler { handles: handles.clone() }));
-    k.register("proc.readOutput", READ_OUTPUT_DESC, nct_core::schema::schema_for::<ReadOutputArgs>(), Arc::new(ReadOutputHandler { handles: handles.clone() }));
-    k.register("proc.stop", STOP_DESC, nct_core::schema::schema_for::<StopArgs>(), Arc::new(StopHandler { handles: handles.clone() }));
-    k.register("proc.list", LIST_DESC, nct_core::schema::schema_for::<ListArgs>(), Arc::new(ListHandler));
-    k.register("proc.kill", KILL_DESC, nct_core::schema::schema_for::<KillArgs>(), Arc::new(KillHandler));
-    k.register("env.get", ENV_GET_DESC, nct_core::schema::schema_for::<EnvNameArgs>(), Arc::new(EnvGetHandler));
-    k.register("env.set", ENV_SET_DESC, nct_core::schema::schema_for::<EnvSetArgs>(), Arc::new(EnvSetHandler));
-    k.register("env.list", ENV_LIST_DESC, nct_core::schema::schema_for::<EmptyPArgs>(), Arc::new(EnvListHandler));
+    k.register(
+        "proc.spawn",
+        SPAWN_DESC,
+        nct_core::schema::schema_for::<SpawnArgs>(),
+        Arc::new(SpawnHandler),
+    );
+    k.register(
+        "proc.start",
+        START_DESC,
+        nct_core::schema::schema_for::<StartArgs>(),
+        Arc::new(StartHandler {
+            handles: handles.clone(),
+        }),
+    );
+    k.register(
+        "proc.status",
+        STATUS_DESC,
+        nct_core::schema::schema_for::<HandleArgs>(),
+        Arc::new(StatusHandler {
+            handles: handles.clone(),
+        }),
+    );
+    k.register(
+        "proc.readOutput",
+        READ_OUTPUT_DESC,
+        nct_core::schema::schema_for::<ReadOutputArgs>(),
+        Arc::new(ReadOutputHandler {
+            handles: handles.clone(),
+        }),
+    );
+    k.register(
+        "proc.stop",
+        STOP_DESC,
+        nct_core::schema::schema_for::<StopArgs>(),
+        Arc::new(StopHandler {
+            handles: handles.clone(),
+        }),
+    );
+    k.register(
+        "proc.list",
+        LIST_DESC,
+        nct_core::schema::schema_for::<ListArgs>(),
+        Arc::new(ListHandler),
+    );
+    k.register(
+        "proc.kill",
+        KILL_DESC,
+        nct_core::schema::schema_for::<KillArgs>(),
+        Arc::new(KillHandler),
+    );
+    k.register(
+        "env.get",
+        ENV_GET_DESC,
+        nct_core::schema::schema_for::<EnvNameArgs>(),
+        Arc::new(EnvGetHandler),
+    );
+    k.register(
+        "env.set",
+        ENV_SET_DESC,
+        nct_core::schema::schema_for::<EnvSetArgs>(),
+        Arc::new(EnvSetHandler),
+    );
+    k.register(
+        "env.list",
+        ENV_LIST_DESC,
+        nct_core::schema::schema_for::<EmptyPArgs>(),
+        Arc::new(EnvListHandler),
+    );
     // phase 2 additions
-    k.register("proc.runScript", RUN_SCRIPT_DESC, nct_core::schema::schema_for::<RunScriptArgs>(), Arc::new(RunScriptHandler));
-    k.register("proc.watch", WATCH_DESC, nct_core::schema::schema_for::<WatchArgs>(), Arc::new(WatchHandler { handles: handles.clone() }));
+    k.register(
+        "proc.runScript",
+        RUN_SCRIPT_DESC,
+        nct_core::schema::schema_for::<RunScriptArgs>(),
+        Arc::new(RunScriptHandler),
+    );
+    k.register(
+        "proc.watch",
+        WATCH_DESC,
+        nct_core::schema::schema_for::<WatchArgs>(),
+        Arc::new(WatchHandler {
+            handles: handles.clone(),
+        }),
+    );
+    // `std::process::exit` skips every destructor, so the idle auto-exit in
+    // main.rs would leave each managed dev server and watcher running with no
+    // owner to stop it. Drain the table on the way out.
+    let drain_handles = handles.clone();
+    k.add_shutdown_hook(Arc::new(move || {
+        let _ = drain_handles.drain();
+    }));
     register_proc_diff(k);
 }
 
@@ -56,11 +137,11 @@ pub(crate) fn schema<T: schemars::JsonSchema>() -> Value {
     nct_core::schema::schema_for::<T>()
 }
 
+mod diff;
 mod pkg;
 mod test;
-mod diff;
-pub use pkg::register_pkg;
 pub use diff::register_proc_diff;
+pub use pkg::register_pkg;
 pub use test::register_test;
 
 // ---- typed args -------------------------------------------------------------
@@ -227,6 +308,26 @@ impl HandleTable {
         v.sort();
         v
     }
+
+    /// Terminate every managed background child. `std::process::exit` skips
+    /// destructors, so the idle auto-exit in main.rs would otherwise orphan
+    /// every dev server and watcher started through this table — they would
+    /// keep running with no owner to stop them. Returns the number of live
+    /// children killed.
+    pub fn drain(&self) -> usize {
+        let mut killed = 0;
+        for rec in self.map.lock().unwrap().values() {
+            // Tell the watch loop to stop relaunching before killing the child.
+            *rec.cancel.lock().unwrap() = true;
+            if let Some(mut child) = rec.take_child() {
+                nct_core::kill_child_tree(&mut child);
+                killed += 1;
+            } else {
+                *rec.running.lock().unwrap() = false;
+            }
+        }
+        killed
+    }
 }
 
 pub struct HandleRec {
@@ -249,6 +350,10 @@ pub struct HandleRec {
     pub healthy: Mutex<Option<bool>>,
     /// Restart bookkeeping: retries used, last restart at.
     pub restarts: Mutex<u32>,
+    /// Set by HandleTable::drain() on process exit: the proc.watch loop checks
+    /// it every iteration so it stops relaunching a child it was just told to
+    /// kill, instead of resurrecting it after its owner process is gone.
+    pub cancel: Mutex<bool>,
 }
 
 impl HandleRec {
@@ -262,7 +367,8 @@ impl HandleRec {
     /// None = child taken (stop() owns reaping); Some(Ok(None)) = still running.
     fn poll_once(&self) -> Option<Result<Option<ExitStatus>, String>> {
         let mut cell = self.child.lock().unwrap();
-        cell.as_mut().map(|c| c.try_wait().map_err(|e| e.to_string()))
+        cell.as_mut()
+            .map(|c| c.try_wait().map_err(|e| e.to_string()))
     }
     fn take_child(&self) -> Option<Child> {
         self.child.lock().unwrap().take()
@@ -273,7 +379,10 @@ impl HandleRec {
 
 fn validate_cmd(cmd: &str) -> Result<(), ToolError> {
     if cmd.is_empty() {
-        return Err(ToolError::new("ERR_BAD_INPUT", "cmd must be a non-empty string"));
+        return Err(ToolError::new(
+            "ERR_BAD_INPUT",
+            "cmd must be a non-empty string",
+        ));
     }
     Ok(())
 }
@@ -362,7 +471,13 @@ fn pump<R: Read + Send + 'static>(mut stream: R, buf: Arc<Mutex<String>>, cap: u
 }
 
 fn tail_chars(s: &str, n: usize) -> String {
-    s.chars().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+    s.chars()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 // ---- proc.spawn ----------------------------------------------------------------
@@ -377,11 +492,17 @@ impl Handler for SpawnHandler {
         if !(100..=k.cfg.limits.spawn_timeout_max_ms).contains(&timeout_ms) {
             return Err(ToolError::with_hint(
                 "ERR_BAD_INPUT",
-                format!("timeoutMs must be an integer between 100 and {}", k.cfg.limits.spawn_timeout_max_ms),
+                format!(
+                    "timeoutMs must be an integer between 100 and {}",
+                    k.cfg.limits.spawn_timeout_max_ms
+                ),
                 json!({ "got": a.timeoutMs }),
             ));
         }
-        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(
+            &k.base_dir(a.baseDir.as_deref())?,
+            a.cwd.as_deref().unwrap_or("."),
+        )?;
         let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
         let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
@@ -397,22 +518,46 @@ impl Handler for SpawnHandler {
         if let Some(s) = child.stderr.take() {
             pump(s, err_buf.clone(), max);
         }
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(timeout_ms);
         let mut timed_out = false;
+        let mut cancelled = false;
+        let mut last_progress = started;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(s)) => break Some(s),
                 Ok(None) => {
-                    if Instant::now() > deadline {
-                        timed_out = true;
-                        let _ = child.kill();
+                    // Client cancel wins over the timeout: kill and report
+                    // ERR_CANCELLED instead of a partial result.
+                    if nct_core::is_cancelled() {
+                        cancelled = true;
+                        nct_core::kill_child_tree(&mut child);
                         break child.wait().ok();
+                    }
+                    let now = Instant::now();
+                    if now > deadline {
+                        timed_out = true;
+                        nct_core::kill_child_tree(&mut child);
+                        break child.wait().ok();
+                    }
+                    // Progress keeps MCP clients with resetTimeoutOnProgress
+                    // (opencode sets it) from timing out long builds.
+                    if now.duration_since(last_progress) >= Duration::from_millis(1000) {
+                        last_progress = now;
+                        nct_core::report_progress(
+                            started.elapsed().as_millis() as f64,
+                            Some(timeout_ms as f64),
+                            Some("proc.spawn running"),
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(_) => break None,
             }
         };
+        if cancelled {
+            return Err(nct_core::cancelled_error("proc.spawn"));
+        }
         let (exit_code, signal) = match &status {
             Some(s) => exit_and_signal(s),
             None => (Value::Null, Value::Null),
@@ -444,11 +589,17 @@ impl Handler for StartHandler {
         if !(1000..=k.cfg.limits.proc_max_duration_ms).contains(&max_duration) {
             return Err(ToolError::with_hint(
                 "ERR_BAD_INPUT",
-                format!("maxDurationMs must be an integer between 1000 and {}", k.cfg.limits.proc_max_duration_ms),
+                format!(
+                    "maxDurationMs must be an integer between 1000 and {}",
+                    k.cfg.limits.proc_max_duration_ms
+                ),
                 json!({ "got": a.maxDurationMs }),
             ));
         }
-        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(
+            &k.base_dir(a.baseDir.as_deref())?,
+            a.cwd.as_deref().unwrap_or("."),
+        )?;
         let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
         let spawn_result = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let handle_id = self.handles.next_id();
@@ -479,13 +630,26 @@ impl Handler for StartHandler {
             child: Mutex::new(child),
             healthy: Mutex::new(None),
             restarts: Mutex::new(0),
+            cancel: Mutex::new(false),
         });
         // output pumps: stdout+stderr merged into rec.output, capped (proc.mjs)
         let max = k.cfg.limits.proc_handle_output_bytes;
-        if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stdout.take()) {
+        if let Some(s) = rec
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|c| c.stdout.take())
+        {
             pump(s, rec.output.clone(), max);
         }
-        if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stderr.take()) {
+        if let Some(s) = rec
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|c| c.stderr.take())
+        {
             pump(s, rec.output.clone(), max);
         }
         // watcher thread: reaps exit, enforces maxDuration (proc.mjs timers)
@@ -505,10 +669,21 @@ impl Handler for StartHandler {
             let mut health_bad = 0u32;
             let mut restarts_used = 0u32;
             let max_retries = restart_cfg.as_ref().and_then(|r| r.maxRetries).unwrap_or(0) as u32;
-            let restart_delay = restart_cfg.as_ref().and_then(|r| r.restartDelayMs).unwrap_or(5000);
-            let health_every = health_cfg.as_ref().and_then(|h| h.healthEveryMs).unwrap_or(30_000);
+            let restart_delay = restart_cfg
+                .as_ref()
+                .and_then(|r| r.restartDelayMs)
+                .unwrap_or(5000);
+            let health_every = health_cfg
+                .as_ref()
+                .and_then(|h| h.healthEveryMs)
+                .unwrap_or(30_000);
             let mut next_health = started + Duration::from_millis(health_every);
             loop {
+                // drain() was called at shutdown: stop here rather than
+                // respawning a child whose owner process is about to exit.
+                if *rec_w.cancel.lock().unwrap() {
+                    return;
+                }
                 match rec_w.poll_once() {
                     None => return, // child taken by stop()
                     Some(Ok(Some(status))) => {
@@ -516,12 +691,23 @@ impl Handler for StartHandler {
                         if restarts_used < max_retries {
                             // respawn the SAME command after the delay
                             std::thread::sleep(Duration::from_millis(restart_delay));
+                            // drain() may have fired while we were sleeping.
+                            if *rec_w.cancel.lock().unwrap() {
+                                return;
+                            }
                             if started.elapsed() > Duration::from_millis(max_duration) {
                                 rec_w.take_child();
                                 return;
                             }
-                            let mut cmd2 = build_command_env(&rec_w.cmd, &rec_w.args, &restart_cwd, &session_snapshot);
-                            if let Ok(mut ch) = cmd2.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+                            let mut cmd2 = build_command_env(
+                                &rec_w.cmd,
+                                &rec_w.args,
+                                &restart_cwd,
+                                &session_snapshot,
+                            );
+                            if let Ok(mut ch) =
+                                cmd2.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+                            {
                                 let out_clone = rec_w.output.clone();
                                 let max2 = max;
                                 if let Some(s) = ch.stdout.take() {
@@ -554,11 +740,14 @@ impl Handler for StartHandler {
                     }
                 }
                 // health probe on schedule (only while child is alive)
-                if health_cfg.is_some() && std::time::Instant::now() >= next_health {
+                if let Some(h) = health_cfg
+                    .as_ref()
+                    .filter(|_| std::time::Instant::now() >= next_health)
+                {
                     next_health = std::time::Instant::now() + Duration::from_millis(health_every);
-                    let h = health_cfg.as_ref().unwrap();
                     let health_args = h.args.clone().unwrap_or_default();
-                    let mut hc = build_command_env(&h.cmd, &health_args, &restart_cwd, &session_snapshot);
+                    let mut hc =
+                        build_command_env(&h.cmd, &health_args, &restart_cwd, &session_snapshot);
                     let probe_ok = match hc.stdout(Stdio::null()).stderr(Stdio::null()).status() {
                         Ok(s) => s.success(),
                         Err(_) => false,
@@ -576,7 +765,7 @@ impl Handler for StartHandler {
                 if started.elapsed() > Duration::from_millis(max_duration) {
                     if let Some(mut c) = rec_w.take_child() {
                         *rec_w.timed_out.lock().unwrap() = true;
-                        let _ = c.kill();
+                        nct_core::kill_child_tree(&mut c);
                         if let Ok(status) = c.wait() {
                             rec_w.record_exit(&status);
                         }
@@ -597,7 +786,12 @@ impl Handler for StartHandler {
 
 /// Build a child command for the watcher thread (restart + health probes):
 /// same session-env inheritance as build_command.
-fn build_command_env(cmd: &str, args: &[String], cwd: &std::path::Path, session_env: &std::collections::BTreeMap<String, String>) -> Command {
+fn build_command_env(
+    cmd: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+    session_env: &std::collections::BTreeMap<String, String>,
+) -> Command {
     use nct_core::childenv::child_env;
     let mut c = Command::new(cmd);
     c.args(args)
@@ -627,7 +821,11 @@ impl Handler for StatusHandler {
             )
         })?;
         let running = *rec.running.lock().unwrap();
-        let uptime_ms = if running { Some(rec.started_at.elapsed().as_millis() as u64) } else { None };
+        let uptime_ms = if running {
+            Some(rec.started_at.elapsed().as_millis() as u64)
+        } else {
+            None
+        };
         Ok(json!({
             "handleId": a.handleId,
             "pid": rec.pid,
@@ -715,7 +913,11 @@ impl Handler for StopHandler {
                     }
                     std::thread::sleep(Duration::from_millis(50));
                     // poll once more (exit may have been recorded)
-                    if rec.poll_once().map(|r| r.ok().flatten().is_some()).unwrap_or(false) {
+                    if rec
+                        .poll_once()
+                        .map(|r| r.ok().flatten().is_some())
+                        .unwrap_or(false)
+                    {
                         if let Some(s) = rec.poll_once().and_then(|r| r.ok()).flatten() {
                             let _ = s;
                         }
@@ -726,12 +928,14 @@ impl Handler for StopHandler {
         // On Windows kill() is async-ish; report current knowledge, caller
         // re-statuses (same contract as proc.mjs stop).
         if let Some(mut child) = rec.take_child() {
-            let _ = child.kill(); // std has no graceful signal; force = the stop
+            nct_core::kill_child_tree(&mut child); // force = kill the tree
             if let Ok(status) = child.wait() {
                 rec.record_exit(&status);
             }
         }
-        Ok(json!({ "handleId": a.handleId, "requested": true, "wasRunning": was_running, "graceful": graceful_ms > 0 }))
+        Ok(
+            json!({ "handleId": a.handleId, "requested": true, "wasRunning": was_running, "graceful": graceful_ms > 0 }),
+        )
     }
 }
 
@@ -774,7 +978,10 @@ fn lang_for_ext(ext: &str) -> Option<&'static str> {
 }
 
 fn script_ext(p: &str) -> &str {
-    std::path::Path::new(p).extension().and_then(|e| e.to_str()).unwrap_or("")
+    std::path::Path::new(p)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
 }
 
 fn ext_for_lang(lang: &str) -> &'static str {
@@ -799,7 +1006,10 @@ fn command_parts(prefix: &[&str], script: &str, extra: &[String]) -> Vec<String>
 fn script_command(lang: &str, script: &str, extra: &[String]) -> (String, Vec<String>) {
     match lang {
         "python" => ("python".to_string(), command_parts(&[], script, extra)),
-        "powershell" => ("powershell".to_string(), command_parts(&["-NoProfile", "-File"], script, extra)),
+        "powershell" => (
+            "powershell".to_string(),
+            command_parts(&["-NoProfile", "-File"], script, extra),
+        ),
         "batch" => ("cmd".to_string(), command_parts(&["/c"], script, extra)),
         "shell" => {
             #[cfg(windows)]
@@ -838,22 +1048,42 @@ fn run_bounded(
     if let Some(s) = child.stderr.take() {
         pump(s, err_buf.clone(), max);
     }
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(timeout_ms);
     let mut timed_out = false;
+    let mut cancelled = false;
+    let mut last_progress = started;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {
-                if Instant::now() > deadline {
-                    timed_out = true;
-                    let _ = child.kill();
+                if nct_core::is_cancelled() {
+                    cancelled = true;
+                    nct_core::kill_child_tree(&mut child);
                     break child.wait().ok();
+                }
+                let now = Instant::now();
+                if now > deadline {
+                    timed_out = true;
+                    nct_core::kill_child_tree(&mut child);
+                    break child.wait().ok();
+                }
+                if now.duration_since(last_progress) >= Duration::from_millis(1000) {
+                    last_progress = now;
+                    nct_core::report_progress(
+                        started.elapsed().as_millis() as f64,
+                        Some(timeout_ms as f64),
+                        Some("script running"),
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(_) => break None,
         }
     };
+    if cancelled {
+        return Err(nct_core::cancelled_error(cmd));
+    }
     let (exit_code, signal) = match &status {
         Some(s) => exit_and_signal(s),
         None => (Value::Null, Value::Null),
@@ -877,11 +1107,17 @@ impl Handler for RunScriptHandler {
         let lang = match (&a.language, a.source.as_ref()) {
             (Some(l), _) => l.trim().to_lowercase(),
             (None, Some(_)) => {
-                return Err(ToolError::new("ERR_BAD_INPUT", "inline source requires an explicit language"));
+                return Err(ToolError::new(
+                    "ERR_BAD_INPUT",
+                    "inline source requires an explicit language",
+                ));
             }
             (None, None) => {
                 let p = a.path.as_deref().ok_or_else(|| {
-                    ToolError::new("ERR_BAD_INPUT", "runScript requires a path or an explicit language")
+                    ToolError::new(
+                        "ERR_BAD_INPUT",
+                        "runScript requires a path or an explicit language",
+                    )
                 })?;
                 lang_for_ext(script_ext(p))
                     .ok_or_else(|| {
@@ -909,7 +1145,11 @@ impl Handler for RunScriptHandler {
             (None, Some(p)) => {
                 let abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, p)?;
                 if !abs.exists() {
-                    return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such script: {p}"), json!({ "path": p })));
+                    return Err(ToolError::with_hint(
+                        "ERR_NOT_FOUND",
+                        format!("no such script: {p}"),
+                        json!({ "path": p }),
+                    ));
                 }
                 (abs, false)
             }
@@ -918,7 +1158,10 @@ impl Handler for RunScriptHandler {
         let script_str = script_path.display().to_string();
         let extra = a.args.clone().unwrap_or_default();
         let (cmd, child_args) = script_command(&lang, &script_str, &extra);
-        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(
+            &k.base_dir(a.baseDir.as_deref())?,
+            a.cwd.as_deref().unwrap_or("."),
+        )?;
         let timeout = a.timeoutMs.unwrap_or(k.cfg.limits.spawn_timeout_ms);
         if !(100..=k.cfg.limits.spawn_timeout_max_ms).contains(&timeout) {
             if is_temp {
@@ -926,7 +1169,10 @@ impl Handler for RunScriptHandler {
             }
             return Err(ToolError::with_hint(
                 "ERR_BAD_INPUT",
-                format!("timeoutMs must be 100..={}", k.cfg.limits.spawn_timeout_max_ms),
+                format!(
+                    "timeoutMs must be 100..={}",
+                    k.cfg.limits.spawn_timeout_max_ms
+                ),
                 json!({ "got": a.timeoutMs }),
             ));
         }
@@ -977,11 +1223,18 @@ impl Handler for WatchHandler {
         let base_root = k.base_dir(a.baseDir.as_deref())?;
         let watch_abs = resolve_checked(&base_root, &a.path)?;
         if !watch_abs.exists() {
-            return Err(ToolError::with_hint("ERR_NOT_FOUND", format!("no such path: {}", a.path), json!({ "path": a.path })));
+            return Err(ToolError::with_hint(
+                "ERR_NOT_FOUND",
+                format!("no such path: {}", a.path),
+                json!({ "path": a.path }),
+            ));
         }
         let interval = a.intervalMs.unwrap_or(500);
         let max_duration = a.maxDurationMs.unwrap_or(600_000);
-        let cwd_abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, a.cwd.as_deref().unwrap_or("."))?;
+        let cwd_abs = resolve_checked(
+            &k.base_dir(a.baseDir.as_deref())?,
+            a.cwd.as_deref().unwrap_or("."),
+        )?;
         let mut cmd = build_command(k, &a.cmd, &args_v, &cwd_abs);
         let spawn_result = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let handle_id = self.handles.next_id();
@@ -1012,16 +1265,30 @@ impl Handler for WatchHandler {
             child: Mutex::new(child),
             healthy: Mutex::new(None),
             restarts: Mutex::new(0),
+            cancel: Mutex::new(false),
         });
         let max_out = k.cfg.limits.proc_handle_output_bytes;
-        if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stdout.take()) {
+        if let Some(s) = rec
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|c| c.stdout.take())
+        {
             pump(s, rec.output.clone(), max_out);
         }
-        if let Some(s) = rec.child.lock().unwrap().as_mut().and_then(|c| c.stderr.take()) {
+        if let Some(s) = rec
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|c| c.stderr.take())
+        {
             pump(s, rec.output.clone(), max_out);
         }
         let fingerprint = watch_fingerprint(&watch_abs);
-        let env: HashMap<String, String> = child_env(&k.session_env.snapshot()).into_iter().collect();
+        let env: HashMap<String, String> =
+            child_env(&k.session_env.snapshot()).into_iter().collect();
         let _ = &a.timeoutMs;
         let rec_w = rec.clone();
         let watch_path = watch_abs.clone();
@@ -1032,6 +1299,17 @@ impl Handler for WatchHandler {
         std::thread::spawn(move || {
             let started = Instant::now();
             loop {
+                // drain() at shutdown: reap what we were holding and stop
+                // relaunching on the next fingerprint change.
+                if *rec_w.cancel.lock().unwrap() {
+                    if let Some(mut c) = rec_w.take_child() {
+                        nct_core::kill_child_tree(&mut c);
+                        if let Ok(st) = c.wait() {
+                            rec_w.record_exit(&st);
+                        }
+                    }
+                    return;
+                }
                 match rec_w.poll_once() {
                     Some(Ok(Some(status))) => {
                         rec_w.record_exit(&status);
@@ -1048,7 +1326,7 @@ impl Handler for WatchHandler {
                 }
                 if started.elapsed() > Duration::from_millis(max_duration) {
                     if let Some(mut c) = rec_w.take_child() {
-                        let _ = c.kill();
+                        nct_core::kill_child_tree(&mut c);
                         if let Ok(st) = c.wait() {
                             rec_w.record_exit(&st);
                         }
@@ -1059,15 +1337,16 @@ impl Handler for WatchHandler {
                 if now != last {
                     last = now;
                     if let Some(mut old) = rec_w.take_child() {
-                        let _ = old.kill();
-                        let _ = old.wait();
+                        nct_core::kill_child_tree(&mut old);
                     }
                     match spawn_child(&cmd_s, &args_s, &cwd_s, &env) {
                         Ok(newc) => {
                             {
                                 let mut o = rec_w.output.lock().unwrap();
                                 if o.len() < max_out {
-                                    o.push_str(&format!("\n[watch] change detected, relaunching {cmd_s}\n"));
+                                    o.push_str(&format!(
+                                        "\n[watch] change detected, relaunching {cmd_s}\n"
+                                    ));
                                 }
                             }
                             let mut cell = rec_w.child.lock().unwrap();
@@ -1107,7 +1386,12 @@ impl Handler for WatchHandler {
 // watch helpers
 const WATCH_SKIP: [&str; 3] = [".git", "node_modules", "target"];
 
-fn spawn_child(cmd: &str, args: &[String], cwd: &str, env: &HashMap<String, String>) -> std::io::Result<Child> {
+fn spawn_child(
+    cmd: &str,
+    args: &[String],
+    cwd: &str,
+    env: &HashMap<String, String>,
+) -> std::io::Result<Child> {
     let mut c = Command::new(cmd);
     c.args(args)
         .current_dir(cwd)
@@ -1143,7 +1427,11 @@ fn collect_fp(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
         if WATCH_SKIP.contains(&name.as_str()) {
             continue;
         }
-        let rel = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         if let Ok(md) = e.metadata() {
             if md.is_dir() {
                 collect_fp(&e.path(), &rel, out);
@@ -1164,14 +1452,23 @@ impl Handler for ListHandler {
         if !(1..=k.cfg.limits.proc_list_max).contains(&max_results) {
             return Err(ToolError::with_hint(
                 "ERR_BAD_INPUT",
-                format!("maxResults must be an integer between 1 and {}", k.cfg.limits.proc_list_max),
+                format!(
+                    "maxResults must be an integer between 1 and {}",
+                    k.cfg.limits.proc_list_max
+                ),
                 json!({ "got": a.maxResults }),
             ));
         }
         let mut procs = system_processes(&k.session_env.snapshot(), &k.root)?;
         if let Some(f) = &a.filter {
             let needle = f.to_lowercase();
-            procs.retain(|p: &Value| p["name"].as_str().unwrap_or("").to_lowercase().contains(&needle));
+            procs.retain(|p: &Value| {
+                p["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(&needle)
+            });
         }
         let total = procs.len();
         procs.truncate(max_results);
@@ -1181,10 +1478,19 @@ impl Handler for ListHandler {
 
 /// Parse the OS process table into [{pid, name, memKb?}] (proc.mjs
 /// systemProcesses: tasklist CSV on Windows, ps on Unix).
-pub(crate) fn system_processes(env: &std::collections::BTreeMap<String, String>, root: &std::path::Path) -> Result<Vec<Value>, ToolError> {
+pub(crate) fn system_processes(
+    env: &std::collections::BTreeMap<String, String>,
+    root: &std::path::Path,
+) -> Result<Vec<Value>, ToolError> {
     #[cfg(windows)]
     {
-        let out = run_sync("tasklist", &["/FO", "CSV", "/NH"], Duration::from_secs(20), env, root)?;
+        let out = run_sync(
+            "tasklist",
+            &["/FO", "CSV", "/NH"],
+            Duration::from_secs(20),
+            env,
+            root,
+        )?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let mut procs = Vec::new();
         for line in stdout.lines().filter(|l| l.contains("\",\"")) {
@@ -1193,12 +1499,10 @@ pub(crate) fn system_processes(env: &std::collections::BTreeMap<String, String>,
             if cols.len() >= 2 {
                 let pid: Option<u64> = cols[1].parse().ok();
                 if let Some(pid) = pid.filter(|p| *p > 0) {
-                    let mem: Option<u64> = cols
-                        .get(4)
-                        .and_then(|m| {
-                            let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
-                            digits.parse().ok()
-                        });
+                    let mem: Option<u64> = cols.get(4).and_then(|m| {
+                        let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
+                        digits.parse().ok()
+                    });
                     procs.push(json!({ "pid": pid, "name": cols[0], "memKb": mem }));
                 }
             }
@@ -1207,7 +1511,13 @@ pub(crate) fn system_processes(env: &std::collections::BTreeMap<String, String>,
     }
     #[cfg(unix)]
     {
-        let out = run_sync("ps", &["-A", "-o", "pid=,comm="], Duration::from_secs(20), env, root)?;
+        let out = run_sync(
+            "ps",
+            &["-A", "-o", "pid=,comm="],
+            Duration::from_secs(20),
+            env,
+            root,
+        )?;
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         let mut procs = Vec::new();
         for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
@@ -1224,7 +1534,29 @@ pub(crate) fn system_processes(env: &std::collections::BTreeMap<String, String>,
 
 /// Bounded sync child run used for tasklist/ps — the same windowsHide +
 /// timeout contract as proc.mjs spawnSync.
-pub(crate) fn run_sync(program: &str, args: &[&str], timeout: Duration, env_session: &std::collections::BTreeMap<String, String>, cwd: &std::path::Path) -> Result<std::process::Output, ToolError> {
+/// Drain a child stream into a shared buffer on its own thread, returning the
+/// handle so callers can join after the child exits. `run_sync` needs this to
+/// keep its wait loop reachable while the child runs: a blocking read before
+/// the loop freezes cancellation and timeout handling until the child closes
+/// its pipes (i.e. until it exits).
+fn pump_all<R: std::io::Read + Send + 'static>(
+    mut stream: R,
+    buf: Arc<Mutex<String>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut tmp = String::new();
+        let _ = stream.read_to_string(&mut tmp);
+        *buf.lock().unwrap() = tmp;
+    })
+}
+
+pub(crate) fn run_sync(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    env_session: &std::collections::BTreeMap<String, String>,
+    cwd: &std::path::Path,
+) -> Result<std::process::Output, ToolError> {
     let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
@@ -1236,37 +1568,59 @@ pub(crate) fn run_sync(program: &str, args: &[&str], timeout: Duration, env_sess
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ToolError::new("ERR_CMD_NOT_FOUND", format!("{program} is not available"))
-        } else {
-            ToolError::new("ERR_SPAWN", format!("{program} failed: {e}"))
-        }
-    })?;
-    let mut out = String::new();
-    let mut err = String::new();
-    if let Some(mut s) = child.stdout.take() {
-        let _ = s.read_to_string(&mut out);
-    }
-    if let Some(mut s) = child.stderr.take() {
-        let _ = s.read_to_string(&mut err);
-    }
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ToolError::new("ERR_CMD_NOT_FOUND", format!("{program} is not available"))
+            } else {
+                ToolError::new("ERR_SPAWN", format!("{program} failed: {e}"))
+            }
+        })?;
+    let out_buf = Arc::new(Mutex::new(String::new()));
+    let err_buf = Arc::new(Mutex::new(String::new()));
+    let t_out = child.stdout.take().map(|s| pump_all(s, out_buf.clone()));
+    let t_err = child.stderr.take().map(|s| pump_all(s, err_buf.clone()));
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) => {
+                if nct_core::is_cancelled() {
+                    nct_core::kill_child_tree(&mut child);
+                    return Err(nct_core::cancelled_error(program));
+                }
                 if Instant::now() > deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    nct_core::kill_child_tree(&mut child);
                     return Err(ToolError::new("ERR_SPAWN", format!("{program} timed out")));
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(e) => return Err(ToolError::new("ERR_SPAWN", format!("{program} failed: {e}"))),
+            Err(e) => {
+                return Err(ToolError::new(
+                    "ERR_SPAWN",
+                    format!("{program} failed: {e}"),
+                ))
+            }
         }
     };
-    Ok(std::process::Output { status, stdout: out.into_bytes(), stderr: err.into_bytes() })
+    // The child is gone, so both pipes close at EOF; join the pumps before
+    // reading the buffers so the returned output is complete.
+    if let Some(h) = t_out {
+        let _ = h.join();
+    }
+    if let Some(h) = t_err {
+        let _ = h.join();
+    }
+    let out = out_buf.lock().unwrap().clone();
+    let err = err_buf.lock().unwrap().clone();
+    Ok(std::process::Output {
+        status,
+        stdout: out.into_bytes(),
+        stderr: err.into_bytes(),
+    })
 }
 
 pub struct KillHandler;
@@ -1274,7 +1628,11 @@ impl Handler for KillHandler {
     fn call(&self, _k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: KillArgs = parse_args(args)?;
         if a.pid == 0 {
-            return Err(ToolError::with_hint("ERR_BAD_INPUT", "pid must be a positive integer", json!({ "got": a.pid })));
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                "pid must be a positive integer",
+                json!({ "got": a.pid }),
+            ));
         }
         kill_pid(a.pid as i32)
     }
@@ -1288,9 +1646,21 @@ fn kill_pid(pid: i32) -> Result<Value, ToolError> {
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             return Err(match err.raw_os_error() {
-                Some(libc::ESRCH) => ToolError::with_hint("ERR_PROC_NOT_FOUND", format!("no process with pid {pid}"), json!({ "pid": pid })),
-                Some(libc::EPERM) => ToolError::with_hint("ERR_REFUSED", format!("permission denied killing pid {pid}"), json!({ "pid": pid })),
-                _ => ToolError::with_hint("ERR_SPAWN", format!("kill failed: {err}"), json!({ "pid": pid })),
+                Some(libc::ESRCH) => ToolError::with_hint(
+                    "ERR_PROC_NOT_FOUND",
+                    format!("no process with pid {pid}"),
+                    json!({ "pid": pid }),
+                ),
+                Some(libc::EPERM) => ToolError::with_hint(
+                    "ERR_REFUSED",
+                    format!("permission denied killing pid {pid}"),
+                    json!({ "pid": pid }),
+                ),
+                _ => ToolError::with_hint(
+                    "ERR_SPAWN",
+                    format!("kill failed: {err}"),
+                    json!({ "pid": pid }),
+                ),
             });
         }
         return Ok(json!({ "pid": pid, "signal": "SIGKILL", "requested": true }));
@@ -1309,12 +1679,24 @@ fn kill_pid(pid: i32) -> Result<Value, ToolError> {
             use std::os::windows::process::CommandExt;
             tk.creation_flags(CREATE_NO_WINDOW);
         }
-        match tk.status()
-        {
-            Ok(s) if s.success() => Ok(json!({ "pid": pid, "signal": "SIGKILL", "requested": true })),
-            Ok(_) => Err(ToolError::with_hint("ERR_PROC_NOT_FOUND", format!("no process with pid {pid}"), json!({ "pid": pid }))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ToolError::new("ERR_CMD_NOT_FOUND", "taskkill is not available")),
-            Err(e) => Err(ToolError::with_hint("ERR_SPAWN", format!("kill failed: {e}"), json!({ "pid": pid }))),
+        match tk.status() {
+            Ok(s) if s.success() => {
+                Ok(json!({ "pid": pid, "signal": "SIGKILL", "requested": true }))
+            }
+            Ok(_) => Err(ToolError::with_hint(
+                "ERR_PROC_NOT_FOUND",
+                format!("no process with pid {pid}"),
+                json!({ "pid": pid }),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ToolError::new(
+                "ERR_CMD_NOT_FOUND",
+                "taskkill is not available",
+            )),
+            Err(e) => Err(ToolError::with_hint(
+                "ERR_SPAWN",
+                format!("kill failed: {e}"),
+                json!({ "pid": pid }),
+            )),
         }
     }
 }
@@ -1334,7 +1716,18 @@ fn valid_env_name(name: &str) -> bool {
 /// password, private key, auth). These are redacted by default on env.get so
 /// they never leak into the journal transcript.
 fn is_secret_env(name: &str) -> bool {
-    const MARKERS: &[&str] = &["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "PRIVATE_KEY", "APIKEY", "ACCESS_KEY"];
+    const MARKERS: &[&str] = &[
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "AUTH",
+        "PRIVATE_KEY",
+        "APIKEY",
+        "ACCESS_KEY",
+    ];
     let upper = name.to_uppercase();
     if upper.contains("PRIVATE") && upper.contains("KEY") {
         return true;
@@ -1359,15 +1752,25 @@ impl Handler for EnvGetHandler {
         let is_secret = is_secret_env(&a.name);
         let reveal = a.reveal.unwrap_or(false);
         let mask = |v: String| -> String {
-            if is_secret && !reveal { "***".to_string() } else { v }
+            if is_secret && !reveal {
+                "***".to_string()
+            } else {
+                v
+            }
         };
         if k.session_env.contains(&a.name) {
             let v = k.session_env.get(&a.name).unwrap_or_default();
-            return Ok(json!({ "name": a.name, "value": mask(v), "source": "session", "masked": is_secret && !reveal }));
+            return Ok(
+                json!({ "name": a.name, "value": mask(v), "source": "session", "masked": is_secret && !reveal }),
+            );
         }
         match std::env::var(&a.name) {
-            Ok(v) => Ok(json!({ "name": a.name, "value": mask(v), "source": "host", "masked": is_secret && !reveal })),
-            Err(_) => Ok(json!({ "name": a.name, "value": Value::Null, "source": "unset", "masked": false })),
+            Ok(v) => Ok(
+                json!({ "name": a.name, "value": mask(v), "source": "host", "masked": is_secret && !reveal }),
+            ),
+            Err(_) => Ok(
+                json!({ "name": a.name, "value": Value::Null, "source": "unset", "masked": false }),
+            ),
         }
     }
 }
@@ -1383,7 +1786,10 @@ impl Handler for EnvSetHandler {
                 json!({ "got": a.name }),
             ));
         }
-        let previous = k.session_env.get(&a.name).or_else(|| std::env::var(&a.name).ok());
+        let previous = k
+            .session_env
+            .get(&a.name)
+            .or_else(|| std::env::var(&a.name).ok());
         k.session_env.set(&a.name, &a.value);
         Ok(json!({ "name": a.name, "value": a.value, "previous": previous, "source": "session" }))
     }
@@ -1432,16 +1838,38 @@ mod base_dir_tests {
         let k = proc_kernel(&server_root);
 
         // default: cwd is the server root
-        let def = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000 }));
-        assert!(def.ok, "pwd default should succeed: {:?}", def.error);
-        let def_cwd = def.result.unwrap()["stdout"].as_str().unwrap().trim().to_string();
-        assert!(def_cwd.to_lowercase().contains("server"), "default cwd should be the server root: {def_cwd}");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c".to_string(), "cd".to_string()]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("pwd", vec![]);
+
+        let def = k.call(
+            "proc.spawn",
+            &json!({ "cmd": cmd, "args": args, "timeoutMs": 20000 }),
+        );
+        assert!(def.ok, "default should succeed: {:?}", def.error);
+        let def_cwd = def.result.unwrap()["stdout"]
+            .as_str()
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(
+            def_cwd.to_lowercase().contains("server"),
+            "default cwd should be the server root: {def_cwd}"
+        );
 
         // baseDir=target: cwd is the target workspace, regardless of server root
-        let over = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000, "baseDir": target.display().to_string() }));
-        assert!(over.ok, "pwd baseDir should succeed: {:?}", over.error);
-        let over_cwd = over.result.unwrap()["stdout"].as_str().unwrap().trim().to_string();
-        assert!(over_cwd.to_lowercase().contains("target"), "baseDir should route cwd to the target: {over_cwd}");
+        let over = k.call("proc.spawn", &json!({ "cmd": cmd, "args": args, "timeoutMs": 20000, "baseDir": target.display().to_string() }));
+        assert!(over.ok, "baseDir should succeed: {:?}", over.error);
+        let over_cwd = over.result.unwrap()["stdout"]
+            .as_str()
+            .unwrap()
+            .trim()
+            .to_string();
+        assert!(
+            over_cwd.to_lowercase().contains("target"),
+            "baseDir should route cwd to the target: {over_cwd}"
+        );
 
         let _ = fs::remove_dir_all(&server_root);
         let _ = fs::remove_dir_all(&target);
@@ -1455,15 +1883,25 @@ mod base_dir_tests {
         fs::write(target.join("hello.py"), "print('from-target')\n").unwrap();
         let k = proc_kernel(&server_root);
 
-        let out = k.call("proc.runScript", &json!({
-            "path": "hello.py",
-            "baseDir": target.display().to_string(),
-            "timeoutMs": 20000,
-        }));
-        assert!(out.ok, "runScript via baseDir should find the script: {:?}", out.error);
+        let out = k.call(
+            "proc.runScript",
+            &json!({
+                "path": "hello.py",
+                "baseDir": target.display().to_string(),
+                "timeoutMs": 20000,
+            }),
+        );
+        assert!(
+            out.ok,
+            "runScript via baseDir should find the script: {:?}",
+            out.error
+        );
         let out_val = out.result.unwrap();
         let stdout = out_val["stdout"].as_str().unwrap_or("");
-        assert!(stdout.contains("from-target"), "should run the target script, stdout: {stdout}");
+        assert!(
+            stdout.contains("from-target"),
+            "should run the target script, stdout: {stdout}"
+        );
 
         let _ = fs::remove_dir_all(&server_root);
         let _ = fs::remove_dir_all(&target);
@@ -1477,10 +1915,17 @@ mod base_dir_tests {
     fn proc_spawn_bad_baseDir_errors() {
         let server_root = workspace("srv2");
         let k = proc_kernel(&server_root);
-        let out = k.call("proc.spawn", &json!({ "cmd": "pwd", "timeoutMs": 20000, "baseDir": "/no/such/dir/xyz" }));
+        let out = k.call(
+            "proc.spawn",
+            &json!({ "cmd": "pwd", "timeoutMs": 20000, "baseDir": "/no/such/dir/xyz" }),
+        );
         assert!(!out.ok, "bad baseDir must fail the call: {:?}", out.result);
         let err = out.error.unwrap();
-        assert_eq!(err.code, "ERR_BAD_PATH", "kernel rejects the override before spawn: {:?}", err.hint);
+        assert_eq!(
+            err.code, "ERR_BAD_PATH",
+            "kernel rejects the override before spawn: {:?}",
+            err.hint
+        );
         let _ = fs::remove_dir_all(&server_root);
     }
 }
@@ -1491,7 +1936,14 @@ mod env_mask_tests {
 
     #[test]
     fn secret_names_are_detected() {
-        for s in ["API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY", "PRIVATE_KEY", "AUTH_TOKEN"] {
+        for s in [
+            "API_KEY",
+            "GITHUB_TOKEN",
+            "DB_PASSWORD",
+            "AWS_SECRET_ACCESS_KEY",
+            "PRIVATE_KEY",
+            "AUTH_TOKEN",
+        ] {
             assert!(is_secret_env(s), "should mask: {s}");
         }
         for s in ["PATH", "HOME", "LANG", "NCTOOLS_WORKSPACE", "OPENAI_MODEL"] {
@@ -1522,7 +1974,10 @@ mod env_mask_tests {
         let _ = std::fs::remove_dir_all(&dir);
         let mut k = Kernel::new(dir.clone()).unwrap();
         register(&mut k);
-        let out = k.call("env.get", &json!({ "name": "NCTOOLS_TEST_REVEAL_TOKEN", "reveal": true }));
+        let out = k.call(
+            "env.get",
+            &json!({ "name": "NCTOOLS_TEST_REVEAL_TOKEN", "reveal": true }),
+        );
         assert!(out.ok);
         let v = out.result.unwrap();
         assert_eq!(v["value"], json!("visible"));
@@ -1545,5 +2000,103 @@ mod env_mask_tests {
         assert_eq!(v["masked"], json!(false));
         std::env::remove_var("NCTOOLS_TEST_PLAIN");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    fn fresh_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nct-drain-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A child command that outlives the tool call for the duration of the test.
+    fn long_running() -> (String, Vec<String>) {
+        #[cfg(windows)]
+        {
+            (
+                "ping".to_string(),
+                vec!["-n".into(), "3600".into(), "127.0.0.1".into()],
+            )
+        }
+        #[cfg(unix)]
+        {
+            ("sleep".to_string(), vec!["300".into()])
+        }
+    }
+
+    fn live_pids(k: &Kernel) -> Vec<u64> {
+        let listed = k.call("proc.list", &json!({ "maxResults": 2000 }));
+        let Some(procs) = listed
+            .result
+            .as_ref()
+            .and_then(|r| r["processes"].as_array())
+        else {
+            return Vec::new();
+        };
+        procs.iter().filter_map(|p| p["pid"].as_u64()).collect()
+    }
+
+    /// proc.start spawns a child that outlives the tool call. Without a drain
+    /// hook, `std::process::exit` (the idle auto-exit) would orphan it.
+    #[test]
+    fn shutdown_hooks_drain_managed_children() {
+        let mut k = Kernel::new(fresh_dir("child")).unwrap();
+        register(&mut k);
+        let (cmd, args) = long_running();
+        let out = k.call(
+            "proc.start",
+            &json!({ "cmd": cmd, "args": args, "maxDurationMs": 600_000 }),
+        );
+        assert!(out.ok, "proc.start must succeed: {:?}", out.error);
+        let pid = out.result.unwrap()["pid"].as_u64().unwrap_or(0);
+        assert!(pid > 0, "a live child must report a pid");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            live_pids(&k).contains(&pid),
+            "child must be running before drain"
+        );
+
+        k.run_shutdown_hooks();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !live_pids(&k).contains(&pid),
+            "drain must have terminated child {pid}"
+        );
+    }
+
+    /// A panicking hook must not skip the hooks around it — the whole point of
+    /// the list is that every resource gets drained, in order, at exit.
+    #[test]
+    fn a_panicking_hook_does_not_skip_the_others() {
+        let mut k = Kernel::new(fresh_dir("hooks")).unwrap();
+        register(&mut k);
+        let hits = Arc::new(AtomicU64::new(0));
+        let h = hits.clone();
+        k.add_shutdown_hook(Arc::new(move || {
+            h.fetch_add(1, Ordering::SeqCst);
+        }));
+        k.add_shutdown_hook(Arc::new(|| panic!("deliberate hook panic")));
+        let h2 = hits.clone();
+        k.add_shutdown_hook(Arc::new(move || {
+            h2.fetch_add(1, Ordering::SeqCst);
+        }));
+        k.run_shutdown_hooks();
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "both healthy hooks must have run"
+        );
     }
 }

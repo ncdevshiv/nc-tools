@@ -44,6 +44,11 @@ pub struct RollbackArgs {
     /// snapshot was taken from). Default: the session workspace.
     #[serde(default)]
     pub baseDir: Option<String>,
+    /// Preview only: report what a full rollback would restore and delete
+    /// without touching the tree. A full rollback DELETES every file created
+    /// after the snapshot — including unrelated work — so preview first.
+    #[serde(default)]
+    pub dryRun: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -76,12 +81,21 @@ fn walk_files(dir: &Path, rel: &str, out: &mut Vec<String>) {
     let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     entries.sort();
     for abs in entries {
-        let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = abs
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         if EXCLUDED.contains(&name.as_str()) {
             continue;
         }
-        let rel_path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-        let Ok(lm) = fs::symlink_metadata(&abs) else { continue };
+        let rel_path = if rel.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        let Ok(lm) = fs::symlink_metadata(&abs) else {
+            continue;
+        };
         if lm.is_symlink() {
             continue;
         }
@@ -104,7 +118,13 @@ impl Handler for SnapshotHandler {
         let label = a.label.unwrap_or_else(|| "auto".to_string());
         let safe: String = label
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         let id = format!("{}-{}", now_ms(), safe);
         let dir = snapshots_root(&base).join(&id);
@@ -137,8 +157,13 @@ impl Handler for ListSnapshotsHandler {
 
 fn list_impl(root: &Path) -> Vec<Value> {
     let sroot = snapshots_root(root);
-    let Ok(rd) = fs::read_dir(&sroot) else { return Vec::new() };
-    let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let Ok(rd) = fs::read_dir(&sroot) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
     names.sort();
     names.reverse(); // JS readdirSync().sort().reverse()
     let mut out = Vec::new();
@@ -148,8 +173,12 @@ fn list_impl(root: &Path) -> Vec<Value> {
             Ok(m) if m.is_dir() => {}
             _ => continue,
         }
-        let Ok(raw) = fs::read_to_string(dir.join("manifest.json")) else { continue };
-        let Ok(manifest) = serde_json::from_str::<Value>(&raw) else { continue };
+        let Ok(raw) = fs::read_to_string(dir.join("manifest.json")) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
         out.push(json!({
             "id": name,
             "files": manifest["files"].as_array().map(|a| a.len()).unwrap_or(0),
@@ -184,7 +213,11 @@ impl Handler for RollbackHandler {
         let manifest: Value = serde_json::from_str(&raw)?;
         let manifest_files: Vec<String> = manifest["files"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Partial rollback: restore ONLY the requested paths (and their
@@ -193,8 +226,12 @@ impl Handler for RollbackHandler {
         if let Some(select) = &a.paths {
             let selected: Vec<String> = manifest_files
                 .iter()
-                .filter(|rel| select.iter().any(|p| rel.as_str() == p.as_str() || rel.starts_with(&format!("{p}/"))))
-                .map(|s| s.clone())
+                .filter(|rel| {
+                    select
+                        .iter()
+                        .any(|p| rel.as_str() == p.as_str() || rel.starts_with(&format!("{p}/")))
+                })
+                .cloned()
                 .collect();
             let mut restored = Vec::new();
             for rel in &selected {
@@ -221,6 +258,28 @@ impl Handler for RollbackHandler {
             }));
         }
 
+        // Files absent from the manifest are what a full rollback DELETES —
+        // every file created or touched after the snapshot, including
+        // unrelated work. Compute the list before writing anything so dryRun
+        // can show it without touching the tree.
+        let manifest_set: std::collections::HashSet<&String> = manifest_files.iter().collect();
+        let mut current: Vec<String> = Vec::new();
+        walk_files(&base, "", &mut current);
+        let would_remove: Vec<String> = current
+            .iter()
+            .filter(|rel| !manifest_set.contains(rel))
+            .cloned()
+            .collect();
+        if a.dryRun.unwrap_or(false) {
+            return Ok(json!({
+                "id": a.id,
+                "dryRun": true,
+                "wouldRestore": manifest_files.len(),
+                "wouldRemove": would_remove.len(),
+                "wouldRemoveFiles": &would_remove[..would_remove.len().min(50)],
+                "note": "dry run — nothing was written. Re-run with dryRun=false to apply. The delete phase removes every file created after the snapshot, including unrelated work; pass paths to restore a subset instead.",
+            }));
+        }
         // 1. restore every file in the manifest
         for rel in &manifest_files {
             let src = dir.join(rel);
@@ -231,14 +290,8 @@ impl Handler for RollbackHandler {
             fs::copy(&src, &dst)?;
         }
         // 2. remove files created after the snapshot (not in manifest, not excluded)
-        let manifest_set: std::collections::HashSet<&String> = manifest_files.iter().collect();
-        let mut current: Vec<String> = Vec::new();
-        walk_files(&base, "", &mut current);
         let mut removed: Vec<String> = Vec::new();
-        for rel in &current {
-            if manifest_set.contains(rel) {
-                continue;
-            }
+        for rel in &would_remove {
             let abs = base.join(rel);
             let res = if fs::metadata(&abs).map(|m| m.is_dir()).unwrap_or(false) {
                 fs::remove_dir_all(&abs)
@@ -254,6 +307,7 @@ impl Handler for RollbackHandler {
             "restored": manifest_files.len(),
             "removed": removed.len(),
             "removedFiles": &removed[..removed.len().min(20)],
+            "removedTruncated": removed.len() > 20,
         }))
     }
 }
@@ -302,23 +356,37 @@ impl Handler for SnapshotDiffHandler {
                 let pa = dir_a.join(f);
                 let pb = dir_b.join(f);
                 if file_changed(&pa, &pb) {
-                    modified.push(json!({ "file": f, "aBytes": file_len(&pa), "bBytes": file_len(&pb) }));
+                    modified.push(
+                        json!({ "file": f, "aBytes": file_len(&pa), "bBytes": file_len(&pb) }),
+                    );
                 }
             }
         }
         added.sort();
         removed.sort();
-        modified.sort_by(|x, y| x["file"].as_str().unwrap_or("").cmp(y["file"].as_str().unwrap_or("")));
+        modified.sort_by(|x, y| {
+            x["file"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(y["file"].as_str().unwrap_or(""))
+        });
 
         // "changed" = everything that differs between the two snapshots:
         // added + removed + modified. This is the number an agent reads to
         // decide whether a rollback is warranted.
-        let changed_files: Vec<String> = modified.iter().map(|m| m["file"].as_str().unwrap_or("").to_string()).collect();
+        let changed_files: Vec<String> = modified
+            .iter()
+            .map(|m| m["file"].as_str().unwrap_or("").to_string())
+            .collect();
         let changed_count = added.len() + removed.len() + modified.len();
         let mut total_bytes_a: u64 = 0;
         let mut total_bytes_b: u64 = 0;
-        for f in &files_a { total_bytes_a += file_len(&dir_a.join(f)); }
-        for f in &files_b { total_bytes_b += file_len(&dir_b.join(f)); }
+        for f in &files_a {
+            total_bytes_a += file_len(&dir_a.join(f));
+        }
+        for f in &files_b {
+            total_bytes_b += file_len(&dir_b.join(f));
+        }
 
         Ok(json!({
             "from": a.a,
@@ -336,11 +404,19 @@ impl Handler for SnapshotDiffHandler {
 }
 
 fn snapshot_files(dir: &Path) -> Vec<String> {
-    let Ok(raw) = fs::read_to_string(dir.join("manifest.json")) else { return Vec::new() };
-    let Ok(manifest) = serde_json::from_str::<Value>(&raw) else { return Vec::new() };
+    let Ok(raw) = fs::read_to_string(dir.join("manifest.json")) else {
+        return Vec::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
     manifest["files"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -392,7 +468,9 @@ mod snapshot_diff_tests {
         fs::create_dir_all(k.root.join("sub")).unwrap();
         fs::write(k.root.join("a.txt"), "alpha\n").unwrap();
         fs::write(k.root.join("sub/b.txt"), "beta\n").unwrap();
-        let s1 = SnapshotHandler.call(&k, &json!({ "label": "before" })).unwrap();
+        let s1 = SnapshotHandler
+            .call(&k, &json!({ "label": "before" }))
+            .unwrap();
         let id = s1["id"].as_str().unwrap().to_string();
         assert!(s1["files"].as_u64().unwrap() >= 2);
         // mutate
@@ -408,18 +486,63 @@ mod snapshot_diff_tests {
         let k = make_kernel();
         fs::write(k.root.join("a.txt"), "alpha\n").unwrap();
         fs::write(k.root.join("b.txt"), "beta\n").unwrap();
-        let s1 = SnapshotHandler.call(&k, &json!({ "label": "before" })).unwrap();
+        let s1 = SnapshotHandler
+            .call(&k, &json!({ "label": "before" }))
+            .unwrap();
         let id = s1["id"].as_str().unwrap().to_string();
         // mutate both
         fs::write(k.root.join("a.txt"), "CHANGED-A\n").unwrap();
         fs::write(k.root.join("b.txt"), "CHANGED-B\n").unwrap();
         // rollback only a.txt
-        let rb = RollbackHandler.call(&k, &json!({ "id": id, "paths": ["a.txt"] })).unwrap();
+        let rb = RollbackHandler
+            .call(&k, &json!({ "id": id, "paths": ["a.txt"] }))
+            .unwrap();
         assert_eq!(rb["partial"], json!(true));
         assert_eq!(rb["restored"], json!(1));
         assert_eq!(fs::read_to_string(k.root.join("a.txt")).unwrap(), "alpha\n");
         // b.txt is untouched — the unrelated change survives
-        assert_eq!(fs::read_to_string(k.root.join("b.txt")).unwrap(), "CHANGED-B\n");
+        assert_eq!(
+            fs::read_to_string(k.root.join("b.txt")).unwrap(),
+            "CHANGED-B\n"
+        );
+    }
+
+    #[test]
+    fn rollback_dry_run_lists_deletes_without_writing() {
+        let k = make_kernel();
+        fs::write(k.root.join("a.txt"), "alpha\n").unwrap();
+        let s1 = SnapshotHandler
+            .call(&k, &json!({ "label": "before" }))
+            .unwrap();
+        let id = s1["id"].as_str().unwrap().to_string();
+        // Created AFTER the snapshot — this is what a full rollback would delete.
+        fs::write(k.root.join("new.txt"), "created after the snapshot\n").unwrap();
+
+        let dry = RollbackHandler
+            .call(&k, &json!({ "id": id, "dryRun": true }))
+            .unwrap();
+        assert_eq!(dry["dryRun"], json!(true));
+        assert!(
+            dry["wouldRemove"].as_u64().unwrap() >= 1,
+            "new.txt not listed: {dry}"
+        );
+        let listed = dry["wouldRemoveFiles"].as_array().unwrap();
+        assert!(
+            listed.iter().any(|v| v.as_str() == Some("new.txt")),
+            "missing new.txt: {dry}"
+        );
+        // Nothing was touched.
+        assert!(k.root.join("new.txt").exists(), "dry run must not delete");
+        assert_eq!(fs::read_to_string(k.root.join("a.txt")).unwrap(), "alpha\n");
+
+        // ...and a real rollback still does the work.
+        let real = RollbackHandler.call(&k, &json!({ "id": id })).unwrap();
+        assert!(real["dryRun"].is_null());
+        assert!(real["removed"].as_u64().unwrap() >= 1);
+        assert!(
+            !k.root.join("new.txt").exists(),
+            "real rollback should delete new.txt"
+        );
     }
 
     #[test]
@@ -436,10 +559,24 @@ mod snapshot_diff_tests {
         let s2 = SnapshotHandler.call(&k, &json!({ "label": "v2" })).unwrap();
         let id2 = s2["id"].as_str().unwrap().to_string();
 
-        let diff = SnapshotDiffHandler.call(&k, &json!({ "a": id1, "b": id2 })).unwrap();
-        assert!(diff["added"].as_array().unwrap().iter().any(|f| f == "new.txt"));
-        assert!(diff["removed"].as_array().unwrap().iter().any(|f| f == "remove.txt"));
-        assert!(diff["modified"].as_array().unwrap().iter().any(|m| m["file"] == "keep.txt"));
+        let diff = SnapshotDiffHandler
+            .call(&k, &json!({ "a": id1, "b": id2 }))
+            .unwrap();
+        assert!(diff["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "new.txt"));
+        assert!(diff["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "remove.txt"));
+        assert!(diff["modified"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["file"] == "keep.txt"));
         assert!(diff["changed"].as_u64().unwrap() >= 3);
         assert!(diff["bytesFrom"].as_u64().unwrap() > 0);
     }
@@ -447,7 +584,8 @@ mod snapshot_diff_tests {
     #[test]
     fn snapshot_diff_unknown_id_errors() {
         let k = make_kernel();
-        let err = SnapshotDiffHandler.call(&k, &json!({ "a": "does-not-exist", "b": "also-missing" }));
+        let err =
+            SnapshotDiffHandler.call(&k, &json!({ "a": "does-not-exist", "b": "also-missing" }));
         let e = err.unwrap_err();
         assert_eq!(e.code, "ERR_UNKNOWN_SNAPSHOT");
     }
@@ -455,7 +593,9 @@ mod snapshot_diff_tests {
     #[test]
     fn rollback_unknown_id_gives_available() {
         let k = make_kernel();
-        let err = RollbackHandler.call(&k, &json!({ "id": "nope" })).unwrap_err();
+        let err = RollbackHandler
+            .call(&k, &json!({ "id": "nope" }))
+            .unwrap_err();
         assert_eq!(err.code, "ERR_UNKNOWN_SNAPSHOT");
         let hint = err.hint.expect("has available list");
         assert!(hint.get("available").is_some());
@@ -481,40 +621,81 @@ mod snapshot_diff_tests {
 
         // snapshot the TARGET workspace via baseDir
         let snap = SnapshotHandler
-            .call(&k, &json!({ "label": "cross", "baseDir": target.display().to_string() }))
+            .call(
+                &k,
+                &json!({ "label": "cross", "baseDir": target.display().to_string() }),
+            )
             .unwrap();
         let id = snap["id"].as_str().unwrap().to_string();
         assert!(snap["files"].as_u64().unwrap() >= 1);
         // the store is under the TARGET, not the server root
-        assert!(target.join(".nc-tools").join("snapshots").join(&id).join("manifest.json").exists());
-        assert!(!k.root.join(".nc-tools").join("snapshots").join(&id).exists());
+        assert!(target
+            .join(".nc-tools")
+            .join("snapshots")
+            .join(&id)
+            .join("manifest.json")
+            .exists());
+        assert!(!k
+            .root
+            .join(".nc-tools")
+            .join("snapshots")
+            .join(&id)
+            .exists());
 
         // listSnapshots on the target sees it; the server root does not
         let listed = ListSnapshotsHandler
             .call(&k, &json!({ "baseDir": target.display().to_string() }))
             .unwrap();
-        assert!(listed["snapshots"].as_array().unwrap().iter().any(|s| s["id"] == json!(id)));
+        assert!(listed["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == json!(id)));
         let listed_root = ListSnapshotsHandler.call(&k, &json!({})).unwrap();
-        assert!(!listed_root["snapshots"].as_array().unwrap().iter().any(|s| s["id"] == json!(id)));
+        assert!(!listed_root["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == json!(id)));
 
         // mutate the target, then diff + rollback through baseDir
         fs::write(target.join("work.txt"), "CHANGED\n").unwrap();
         fs::write(target.join("extra.txt"), "created after\n").unwrap();
         let snap2 = SnapshotHandler
-            .call(&k, &json!({ "label": "after", "baseDir": target.display().to_string() }))
+            .call(
+                &k,
+                &json!({ "label": "after", "baseDir": target.display().to_string() }),
+            )
             .unwrap();
         let id2 = snap2["id"].as_str().unwrap().to_string();
         let diff = SnapshotDiffHandler
-            .call(&k, &json!({ "a": id, "b": id2, "baseDir": target.display().to_string() }))
+            .call(
+                &k,
+                &json!({ "a": id, "b": id2, "baseDir": target.display().to_string() }),
+            )
             .unwrap();
-        assert!(diff["added"].as_array().unwrap().iter().any(|f| f == "extra.txt"));
+        assert!(diff["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f == "extra.txt"));
 
         let rb = RollbackHandler
-            .call(&k, &json!({ "id": id, "baseDir": target.display().to_string() }))
+            .call(
+                &k,
+                &json!({ "id": id, "baseDir": target.display().to_string() }),
+            )
             .unwrap();
         assert_eq!(rb["id"], json!(id));
-        assert_eq!(fs::read_to_string(target.join("work.txt")).unwrap(), "target content\n", "target file restored");
-        assert!(!target.join("extra.txt").exists(), "post-snapshot file removed from the target");
+        assert_eq!(
+            fs::read_to_string(target.join("work.txt")).unwrap(),
+            "target content\n",
+            "target file restored"
+        );
+        assert!(
+            !target.join("extra.txt").exists(),
+            "post-snapshot file removed from the target"
+        );
         // the server root was never touched by any of this
         assert!(!k.root.join("work.txt").exists());
 

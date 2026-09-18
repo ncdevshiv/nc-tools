@@ -5,15 +5,80 @@
 // nouns/proper-nouns/specifics) restores Bing's exact-match behavior, while
 // HN/Wikipedia/StackExchange APIs handle long queries fine and are left alone.
 const STOPWORDS: &[&str] = &[
-    "the", "a", "an", "is", "are", "was", "were", "best", "cheap", "cheapest",
-    "top", "good", "great", "find", "get", "how", "to", "for", "of", "in",
-    "and", "or", "vs", "versus", "compare", "comparison", "price", "pricing",
-    "plans", "plan", "monthly", "per", "month", "mo", "year", "annual",
-    "hosting", "server", "cloud", "vps", "providers", "provider", "sites",
-    "site", "list", "recommended", "recommend", "my", "your", "our", "i",
-    "want", "need", "looking", "searching", "find", "me", "please", "info",
-    "information", "details", "about", "what", "which", "who", "when", "where",
-    "why", "tell", "show", "give", "offer", "offers", "available",
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "best",
+    "cheap",
+    "cheapest",
+    "top",
+    "good",
+    "great",
+    "find",
+    "get",
+    "how",
+    "to",
+    "for",
+    "of",
+    "in",
+    "and",
+    "or",
+    "vs",
+    "versus",
+    "compare",
+    "comparison",
+    "price",
+    "pricing",
+    "plans",
+    "plan",
+    "monthly",
+    "per",
+    "month",
+    "mo",
+    "year",
+    "annual",
+    "hosting",
+    "server",
+    "cloud",
+    "vps",
+    "providers",
+    "provider",
+    "sites",
+    "site",
+    "list",
+    "recommended",
+    "recommend",
+    "my",
+    "your",
+    "our",
+    "i",
+    "want",
+    "need",
+    "looking",
+    "searching",
+    "find",
+    "me",
+    "please",
+    "info",
+    "information",
+    "details",
+    "about",
+    "what",
+    "which",
+    "who",
+    "when",
+    "where",
+    "why",
+    "tell",
+    "show",
+    "give",
+    "offer",
+    "offers",
+    "available",
 ];
 
 /// Shrink a natural-language query to its distinctive content terms, for
@@ -27,7 +92,9 @@ pub fn shorten_query(query: &str) -> String {
     let kept: Vec<&str> = words
         .iter()
         .filter(|w| {
-            let lower = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+            let lower = w
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
             if lower.is_empty() || lower.len() < 2 {
                 return false;
             }
@@ -65,7 +132,8 @@ pub fn query_for_engine(kind: crate::engines::EngineKind, query: &str) -> String
 /// A source-class fan-out: run bing-rss against MULTIPLE phrasings of the
 /// query (original + shortened) and merge results. This is the subconscious
 /// fix for Bing's word-fragment behavior — if Bing's query tokenizer misfires
-/// on one phrasing, the next may land. Returns deduped RawResults.
+/// on one phrasing, the next may land. Returns at most `limit` phrasings
+/// (deduped, original first).
 pub fn bing_multi_query(query: &str, limit: usize) -> Vec<String> {
     let mut queries = vec![query.to_string()];
     let short = shorten_query(query);
@@ -84,7 +152,7 @@ pub fn bing_multi_query(query: &str, limit: usize) -> Vec<String> {
             queries.push(front);
         }
     }
-    queries.truncate(3);
+    queries.truncate(limit);
     queries
 }
 
@@ -98,7 +166,10 @@ mod tests {
         let s = shorten_query(q);
         assert!(!s.contains("best"), "stopword 'best' must drop: {s}");
         assert!(!s.contains("cheap"));
-        assert!(s.contains("india") || s.contains("inr"), "distinctive terms survive: {s}");
+        assert!(
+            s.contains("india") || s.contains("inr"),
+            "distinctive terms survive: {s}"
+        );
         assert!(s.split_whitespace().count() < q.split_whitespace().count());
     }
 
@@ -112,32 +183,71 @@ mod tests {
     #[test]
     fn keeps_proper_nouns_and_versions() {
         let s = shorten_query("how to fix rust borrow checker error e0509");
-        assert!(s.contains("e0509") || s.contains("rust"), "proper nouns/codes survive: {s}");
+        assert!(
+            s.contains("e0509") || s.contains("rust"),
+            "proper nouns/codes survive: {s}"
+        );
     }
 
     #[test]
     fn escape_hatch_when_all_stopwords() {
         let s = shorten_query("the best cheap good great");
         assert!(!s.is_empty(), "all-stopword query must not return empty");
-        assert!(s.split_whitespace().count() <= 3, "escape hatch caps at 3 words: {s}");
+        assert!(
+            s.split_whitespace().count() <= 3,
+            "escape hatch caps at 3 words: {s}"
+        );
     }
 
     #[test]
     fn bing_gets_shortened_others_keep_original() {
         // With 6 words the shortened form strips stopwords (best/cheap) and
         // keeps distinctive terms (rust/vps/programming). HN keeps original.
-        let bing = query_for_engine(crate::engines::EngineKind::BingRss, "best cheap vps india rust programming");
-        let hn = query_for_engine(crate::engines::EngineKind::Hn, "best cheap vps india rust programming");
+        let bing = query_for_engine(
+            crate::engines::EngineKind::BingRss,
+            "best cheap vps india rust programming",
+        );
+        let hn = query_for_engine(
+            crate::engines::EngineKind::Hn,
+            "best cheap vps india rust programming",
+        );
         assert_eq!(hn, "best cheap vps india rust programming");
         assert_ne!(bing, hn, "bing must be shortened");
         assert!(!bing.contains("best"), "stopword must drop: {bing}");
-        assert!(bing.contains("rust") || bing.contains("vps"), "distinctive terms must survive: {bing}");
+        assert!(
+            bing.contains("rust") || bing.contains("vps"),
+            "distinctive terms must survive: {bing}"
+        );
     }
 
     #[test]
     fn multi_query_produces_distinct_phrasings() {
         let qs = bing_multi_query("best cheap vps india price", 10);
         assert!(qs.len() >= 2, "should produce 2+ phrasings: {qs:?}");
-        assert!(qs.iter().any(|q| q.contains("india")), "at least one phrasing carries 'india'");
+        assert!(
+            qs.iter().any(|q| q.contains("india")),
+            "at least one phrasing carries 'india'"
+        );
+    }
+
+    #[test]
+    fn multi_query_honors_limit() {
+        // The query yields two phrasings (original + shortened); limit must cap
+        // the fan-out instead of being ignored.
+        let q = "best cheap vps india price";
+        assert_eq!(
+            bing_multi_query(q, 1).len(),
+            1,
+            "limit=1 keeps only the original"
+        );
+        assert_eq!(
+            bing_multi_query(q, 2).len(),
+            2,
+            "limit=2 allows both phrasings"
+        );
+        assert!(
+            bing_multi_query(q, 0).is_empty(),
+            "limit=0 must return no phrasings"
+        );
     }
 }

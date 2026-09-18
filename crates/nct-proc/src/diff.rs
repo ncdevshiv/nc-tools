@@ -65,9 +65,19 @@ impl Handler for DiffHandler {
             let env = k.session_env.snapshot();
             let procs = system_processes(&env, &k.root)?;
             let snapshot = json!({ "ts": nct_core::now_iso(), "processes": procs });
-            let id = nct_core::sha256_hex(serde_json::to_string(&snapshot).unwrap_or_default().as_bytes())[..8].to_string();
-            let _ = k.journal.append("proc.diff", json!({ "mode": "capture", "id": id, "count": procs.len(), "sid": k.sid }));
-            return Ok(json!({ "capture": true, "id": id, "count": procs.len(), "snapshot": snapshot }));
+            let id = nct_core::sha256_hex(
+                serde_json::to_string(&snapshot)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )[..8]
+                .to_string();
+            let _ = k.journal.append(
+                "proc.diff",
+                json!({ "mode": "capture", "id": id, "count": procs.len(), "sid": k.sid }),
+            );
+            return Ok(
+                json!({ "capture": true, "id": id, "count": procs.len(), "snapshot": snapshot }),
+            );
         }
 
         // Determine before/after tables.
@@ -87,9 +97,8 @@ impl Handler for DiffHandler {
 
         let after_json: Vec<Value> = if let Some(a) = &a.after {
             parse_snapshot(a)?
-        } else if a.cmd.is_some() {
+        } else if let Some(cmd) = a.cmd.as_ref() {
             // run the command, then capture
-            let cmd = a.cmd.as_ref().unwrap();
             let args_v = a.args.clone().unwrap_or_default();
             let root = k.base_dir(a.baseDir.as_deref())?;
             let cwd_abs = nct_core::paths::resolve_checked(&root, a.cwd.as_deref().unwrap_or("."))?;
@@ -104,18 +113,23 @@ impl Handler for DiffHandler {
         let before = before_json;
         let after = after_json;
         if before.is_empty() && after.is_empty() {
-            return Ok(json!({ "started": [], "stopped": [], "changed": [], "error": "empty both sides — snapshots not usable" }));
+            return Ok(
+                json!({ "started": [], "stopped": [], "changed": [], "error": "empty both sides — snapshots not usable" }),
+            );
         }
 
         let diff = diff_tables(&before, &after);
 
-        let _ = k.journal.append("proc.diff", json!({
-            "mode": if a.cmd.is_some() { "run-command" } else { "snapshots" },
-            "started": diff.started.len(),
-            "stopped": diff.stopped.len(),
-            "changed": diff.changed.len(),
-            "sid": k.sid,
-        }));
+        let _ = k.journal.append(
+            "proc.diff",
+            json!({
+                "mode": if a.cmd.is_some() { "run-command" } else { "snapshots" },
+                "started": diff.started.len(),
+                "stopped": diff.stopped.len(),
+                "changed": diff.changed.len(),
+                "sid": k.sid,
+            }),
+        );
 
         Ok(json!({
             "beforeCount": before.len(),
@@ -168,11 +182,18 @@ fn diff_tables(before: &[Value], after: &[Value]) -> DiffOut {
     started.sort_by_key(|v| v["pid"].as_u64().unwrap_or(0));
     stopped.sort_by_key(|v| v["pid"].as_u64().unwrap_or(0));
     changed.sort_by_key(|v| v["pid"].as_u64().unwrap_or(0));
-    DiffOut { started, stopped, changed }
+    DiffOut {
+        started,
+        stopped,
+        changed,
+    }
 }
 
 fn index_by_pid(table: &[Value]) -> HashMap<u64, &Value> {
-    table.iter().filter_map(|v| v["pid"].as_u64().map(|p| (p, v))).collect()
+    table
+        .iter()
+        .filter_map(|v| v["pid"].as_u64().map(|p| (p, v)))
+        .collect()
 }
 
 fn parse_snapshot(s: &str) -> Result<Vec<Value>, ToolError> {
@@ -182,7 +203,11 @@ fn parse_snapshot(s: &str) -> Result<Vec<Value>, ToolError> {
     } else if let Some(arr) = v.as_array() {
         Ok(arr.clone())
     } else {
-        Err(ToolError::with_hint("ERR_BAD_INPUT", "snapshot is not a valid proc.diff capture", json!({})))
+        Err(ToolError::with_hint(
+            "ERR_BAD_INPUT",
+            "snapshot is not a valid proc.diff capture",
+            json!({}),
+        ))
     }
 }
 
@@ -191,7 +216,12 @@ fn parse_snapshot(s: &str) -> Result<Vec<Value>, ToolError> {
 use crate::system_processes;
 
 pub fn register_proc_diff(k: &mut Kernel) {
-    k.register("proc.diff", DIFF_DESC, nct_core::schema::schema_for::<DiffArgs>(), std::sync::Arc::new(DiffHandler));
+    k.register(
+        "proc.diff",
+        DIFF_DESC,
+        nct_core::schema::schema_for::<DiffArgs>(),
+        std::sync::Arc::new(DiffHandler),
+    );
 }
 
 #[cfg(test)]
@@ -208,7 +238,7 @@ mod diff_tests {
         let after = vec![
             json!({ "pid": 1, "name": "bash.exe", "memKb": 520 }), // changed mem
             json!({ "pid": 3, "name": "sleep.exe", "memKb": 100 }), // unchanged
-            json!({ "pid": 4, "name": "git.exe", "memKb": 9000 }),  // started
+            json!({ "pid": 4, "name": "git.exe", "memKb": 9000 }), // started
         ];
         let diff = diff_tables(&before, &after);
         assert_eq!(diff.started.len(), 1);

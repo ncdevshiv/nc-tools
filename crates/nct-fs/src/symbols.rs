@@ -56,21 +56,38 @@ impl Handler for SymbolsHandler {
         if search_root.is_file() {
             files.push(search_root.clone());
         } else {
-            walk_files_ext(&search_root, 0, &mut files)
-                .map_err(ToolError::from)?;
+            walk_files_ext(&search_root, 0, &mut files).map_err(ToolError::from)?;
         }
         let rust_pats = compile(&[
-            ("fn", r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"#),
-            ("struct", r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)"),
-            ("enum", r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)"),
-            ("trait", r"^\s*(?:pub(?:\([^)]*\))?\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)"),
-            ("mod", r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)"),
+            (
+                "fn",
+                r#"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            ),
+            (
+                "struct",
+                r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            ),
+            (
+                "enum",
+                r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            ),
+            (
+                "trait",
+                r"^\s*(?:pub(?:\([^)]*\))?\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)",
+            ),
+            (
+                "mod",
+                r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)",
+            ),
             ("impl", r"^\s*impl(?:<[^>]*>)?\s+(.+?)\s*\{"),
         ]);
         let js_pats = compile(&[
             ("fn", r"(?:^|[^\w$])function\s*\*?\s*([A-Za-z_$][\w$]*)"),
             ("class", r"(?:^|[^\w$])class\s+([A-Za-z_$][\w$]*)"),
-            ("fn", r"(?:^|[^\w$])(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\("),
+            (
+                "fn",
+                r"(?:^|[^\w$])(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(",
+            ),
             ("interface", r"(?:^|[^\w$])interface\s+([A-Za-z_$][\w$]*)"),
             ("type", r"(?:^|[^\w$])type\s+([A-Za-z_$][\w$]*)\s*=\s*[^=]"),
         ]);
@@ -114,7 +131,12 @@ impl Handler for SymbolsHandler {
                         Ok(Some(c)) => c,
                         _ => continue,
                     };
-                    let mut name = caps.get(1).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+                    let mut name = caps
+                        .get(1)
+                        .map(|m| m.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if lang == "rust" && *kind == "impl" {
                         name = name
                             .split(" where ")
@@ -252,7 +274,13 @@ fn doc_comment(lines: &[&str], start: usize, lang: &str) -> String {
         if !is_doc {
             break;
         }
-        out.push(prev.trim_start_matches('/').trim_start_matches('#').trim_start_matches('*').trim().to_string());
+        out.push(
+            prev.trim_start_matches('/')
+                .trim_start_matches('#')
+                .trim_start_matches('*')
+                .trim()
+                .to_string(),
+        );
         if out.len() >= 20 {
             break;
         }
@@ -314,8 +342,11 @@ mod symbols_span_tests {
         assert_eq!(syms[0]["name"], json!("add"));
         assert_eq!(syms[0]["line"], json!(3)); // decl line
         assert_eq!(syms[0]["endLine"], json!(5)); // closing brace
-        // doc comment captured
-        assert!(syms[0]["doc"].as_str().unwrap().contains("Adds two numbers"));
+                                                  // doc comment captured
+        assert!(syms[0]["doc"]
+            .as_str()
+            .unwrap()
+            .contains("Adds two numbers"));
         assert!(syms[0]["doc"].as_str().unwrap().contains("Returns the sum"));
         // body present
         assert!(syms[0]["body"].as_str().unwrap().contains("a + b"));
@@ -363,11 +394,7 @@ mod symbols_span_tests {
     #[test]
     fn one_liner_symbol_has_single_line_span() {
         let k = make_kernel();
-        fs::write(
-            k.root.join("one.rs"),
-            "pub const X: u32 = 42;\n",
-        )
-        .unwrap();
+        fs::write(k.root.join("one.rs"), "pub const X: u32 = 42;\n").unwrap();
         let args = json!({ "path": "one.rs", "kinds": ["mod"] });
         // There are no fns here, so the symbol count is 0 (const isn't matched);
         // verify graceful behavior — no panic, zero symbols.

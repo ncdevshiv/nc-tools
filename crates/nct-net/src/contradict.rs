@@ -51,16 +51,17 @@ impl Handler for ContradictHandler {
         let a: ContradictArgs = parse_args(args)?;
         let claim = a.claim.trim().to_string();
         if claim.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "claim must be a non-empty string"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "claim must be a non-empty string",
+            ));
         }
         let max_sources = a.maxSources.unwrap_or(5) as usize;
         let negation = negate(&claim);
 
         // 1+2. search both sides
-        let (supporting_raw, contradicting_raw) = (
-            search_side(k, &claim, &a),
-            search_side(k, &negation, &a),
-        );
+        let (supporting_raw, contradicting_raw) =
+            (search_side(k, &claim, &a), search_side(k, &negation, &a));
 
         let embedder = nct_semantic::Embedder::get(crate::fetch::model_cache_dir(k)).ok();
 
@@ -77,30 +78,43 @@ impl Handler for ContradictHandler {
         // STRONGLY closer to the other side (margin >= 0.10) — which keeps the
         // negation-query pool on the contradicing side by construction instead
         // of silently dropping near-antonym hits to neutral.
-        let classify = |v: &Value, default_side: &'static str, default_score: f64| -> (&'static str, f64) {
-            let text = format!("{} {}", v["title"].as_str().unwrap_or(""), v["snippet"].as_str().unwrap_or(""));
-            if text.trim().is_empty() {
-                return (default_side, default_score);
-            }
-            match (&claim_v, &neg_v) {
-                (Some(cv), Some(nv)) => {
-                    let vec = embedder.as_ref().and_then(|e| e.embed(&text).ok());
-                    match vec {
-                        Some(vec) => {
-                            let c = dot(cv, &vec);
-                            let n = dot(nv, &vec);
-                            if default_side == "supporting" {
-                                if n - c >= 0.10 { ("contradicting", n) } else { ("supporting", c) }
-                            } else {
-                                if c - n >= 0.10 { ("supporting", c) } else { ("contradicting", n) }
-                            }
-                        }
-                        None => (default_side, default_score),
-                    }
+        let classify =
+            |v: &Value, default_side: &'static str, default_score: f64| -> (&'static str, f64) {
+                let text = format!(
+                    "{} {}",
+                    v["title"].as_str().unwrap_or(""),
+                    v["snippet"].as_str().unwrap_or("")
+                );
+                if text.trim().is_empty() {
+                    return (default_side, default_score);
                 }
-                _ => (default_side, default_score),
-            }
-        };
+                match (&claim_v, &neg_v) {
+                    (Some(cv), Some(nv)) => {
+                        let vec = embedder.as_ref().and_then(|e| e.embed(&text).ok());
+                        match vec {
+                            Some(vec) => {
+                                let c = dot(cv, &vec);
+                                let n = dot(nv, &vec);
+                                if default_side == "supporting" {
+                                    if n - c >= 0.10 {
+                                        ("contradicting", n)
+                                    } else {
+                                        ("supporting", c)
+                                    }
+                                } else {
+                                    if c - n >= 0.10 {
+                                        ("supporting", c)
+                                    } else {
+                                        ("contradicting", n)
+                                    }
+                                }
+                            }
+                            None => (default_side, default_score),
+                        }
+                    }
+                    _ => (default_side, default_score),
+                }
+            };
 
         for v in supporting_raw.iter().take(max_sources) {
             let (cls, score) = classify(v, "supporting", 0.0);
@@ -121,7 +135,14 @@ impl Handler for ContradictHandler {
 
         // 4. verify the top of each side to confirm the direction (only when a
         // model is present; else rely on the classification).
-        let _ = verify_direction(k, &claim, &negation, &mut supporting, &mut contradicting, a.allowPrivate.unwrap_or(false));
+        verify_direction(
+            k,
+            &claim,
+            &negation,
+            &mut supporting,
+            &mut contradicting,
+            a.allowPrivate.unwrap_or(false),
+        );
 
         // 5. verdict
         let s = supporting.len();
@@ -141,11 +162,14 @@ impl Handler for ContradictHandler {
             "contested"
         };
 
-        let _ = k.journal.append("net.contradict", json!({
-            "claim": claim, "negation": negation,
-            "supporting": supporting.len(), "contradicting": contradicting.len(),
-            "verdict": verdict, "sid": k.sid,
-        }));
+        let _ = k.journal.append(
+            "net.contradict",
+            json!({
+                "claim": claim, "negation": negation,
+                "supporting": supporting.len(), "contradicting": contradicting.len(),
+                "verdict": verdict, "sid": k.sid,
+            }),
+        );
 
         Ok(json!({
             "claim": claim,
@@ -168,7 +192,10 @@ fn search_side(k: &Kernel, query: &str, a: &ContradictArgs) -> Vec<Value> {
         "intent": a.intent,
     });
     match k.call("net.search", &args) {
-        r if r.ok => r.result.unwrap_or(Value::Null)["results"].as_array().cloned().unwrap_or_default(),
+        r if r.ok => r.result.unwrap_or(Value::Null)["results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -204,7 +231,10 @@ fn verify_direction(
             }
             let verify_args = json!({ "claim": if is_supporting { claim } else { negation }, "url": url, "allowPrivate": allow_private });
             let verdict = match k.call("net.verify", &verify_args) {
-                v if v.ok => v.result.unwrap_or(Value::Null)["verdict"].as_str().unwrap_or("").to_string(),
+                v if v.ok => v.result.unwrap_or(Value::Null)["verdict"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
                 _ => "".to_string(),
             };
             item["verify"] = json!(verdict);
@@ -247,7 +277,12 @@ fn negate(claim: &str) -> String {
 fn phrase_negation(c: &str) -> String {
     let lower = c.to_lowercase();
     // "X is/are/was/were Y" -> "X is/are/was/were not Y"
-    for (verb, neg) in [(" is ", " is not "), (" are ", " are not "), (" was ", " was not "), (" were ", " were not ")] {
+    for (verb, neg) in [
+        (" is ", " is not "),
+        (" are ", " are not "),
+        (" was ", " was not "),
+        (" were ", " were not "),
+    ] {
         if let Some(i) = lower.find(verb) {
             let a = &c[..i + verb.len()];
             let b = &c[i + verb.len()..];
@@ -255,7 +290,11 @@ fn phrase_negation(c: &str) -> String {
         }
     }
     // "X does/do/did V" -> "X does/do/did not V"
-    for (aux, neg) in [(" does ", " does not "), (" do ", " do not "), (" did ", " did not ")] {
+    for (aux, neg) in [
+        (" does ", " does not "),
+        (" do ", " do not "),
+        (" did ", " did not "),
+    ] {
         if lower.contains(aux) {
             let idx = lower.find(aux).unwrap();
             let a = &c[..idx + aux.len()];
@@ -267,11 +306,23 @@ fn phrase_negation(c: &str) -> String {
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
 }
 
 fn round4(v: f64) -> f64 {
     (v * 10000.0).round() / 10000.0
+}
+
+pub fn register_contradict(k: &mut Kernel) {
+    k.register(
+        "net.contradict",
+        CONTRADICT_DESC,
+        nct_core::schema::schema_for::<ContradictArgs>(),
+        std::sync::Arc::new(ContradictHandler),
+    );
 }
 
 #[cfg(test)]
@@ -282,14 +333,33 @@ mod tests {
     fn negate_handles_common_forms() {
         // Each returns SOME negation phrase — the goal is a search term that
         // surfaces disagreeing content, not a specific string.
-        assert!(negate("Rust is faster than Go").contains("not faster") || negate("Rust is faster than Go").contains("slower than"), "got: {}", negate("Rust is faster than Go"));
-        assert!(negate("Alice invented the widget").contains("did not invent") || negate("Alice invented the widget").contains("invented by"), "got: {}", negate("Alice invented the widget"));
-        assert!(negate("C was invented by Ritchie").contains("was not invented by"), "got: {}", negate("C was invented by Ritchie"));
-        assert!(negate("The server is running").contains("is not running"), "got: {}", negate("The server is running"));
-        assert!(negate("The test passes").to_lowercase().contains("not the case") || negate("The test passes").to_lowercase().contains("passes"));
+        assert!(
+            negate("Rust is faster than Go").contains("not faster")
+                || negate("Rust is faster than Go").contains("slower than"),
+            "got: {}",
+            negate("Rust is faster than Go")
+        );
+        assert!(
+            negate("Alice invented the widget").contains("did not invent")
+                || negate("Alice invented the widget").contains("invented by"),
+            "got: {}",
+            negate("Alice invented the widget")
+        );
+        assert!(
+            negate("C was invented by Ritchie").contains("was not invented by"),
+            "got: {}",
+            negate("C was invented by Ritchie")
+        );
+        assert!(
+            negate("The server is running").contains("is not running"),
+            "got: {}",
+            negate("The server is running")
+        );
+        assert!(
+            negate("The test passes")
+                .to_lowercase()
+                .contains("not the case")
+                || negate("The test passes").to_lowercase().contains("passes")
+        );
     }
-}
-
-pub fn register_contradict(k: &mut Kernel) {
-    k.register("net.contradict", CONTRADICT_DESC, nct_core::schema::schema_for::<ContradictArgs>(), std::sync::Arc::new(ContradictHandler));
 }

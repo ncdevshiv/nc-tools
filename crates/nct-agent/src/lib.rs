@@ -43,7 +43,10 @@ Reply format: think briefly, call tools as needed, then finish with a short plai
 /// Some providers require ^[a-zA-Z0-9_-]+$ for function names; kernel tools
 /// use "fs.read" style. Map dotted names to underscored for the wire, and back.
 pub fn to_wire(name: &str) -> String {
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         name.to_string()
     } else {
         name.replace('.', "__")
@@ -130,14 +133,17 @@ impl Chat {
             url: format!("{}/chat/completions", base_url.trim_end_matches('/')),
             api_key,
             model: model.to_string(),
-            agent: ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(300)).build(),
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(300))
+                .build(),
         }
     }
 
     pub fn chat(&self, body: &Value) -> Result<Value, String> {
         let mut payload = body.clone();
         if let Value::Object(m) = &mut payload {
-            m.entry("model".to_string()).or_insert_with(|| json!(self.model));
+            m.entry("model".to_string())
+                .or_insert_with(|| json!(self.model));
         }
         let mut req = self
             .agent
@@ -149,7 +155,9 @@ impl Chat {
         let resp = req
             .send_string(&payload.to_string())
             .map_err(|e| format!("LLM request failed: {e}"))?;
-        let text = resp.into_string().map_err(|e| format!("LLM response read failed: {e}"))?;
+        let text = resp
+            .into_string()
+            .map_err(|e| format!("LLM response read failed: {e}"))?;
         serde_json::from_str(&text).map_err(|e| format!("LLM response unparseable: {e}"))
     }
 }
@@ -178,7 +186,14 @@ pub fn run_agent(
         json!({ "role": "system", "content": if is_bash { bash_system_prompt(&kernel.root.display().to_string()) } else { system_prompt(&kernel.root.display().to_string()) } }),
         json!({ "role": "user", "content": task }),
     ];
-    let tools = if is_bash { vec![bash_tool_descriptor()] } else { open_ai_tools(kernel).as_array().cloned().unwrap_or_default() };
+    let tools = if is_bash {
+        vec![bash_tool_descriptor()]
+    } else {
+        open_ai_tools(kernel)
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
     let mut tool_calls = 0u32;
     let mut errors = 0u32;
     let mut usage = json!({ "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 });
@@ -211,37 +226,83 @@ pub fn run_agent(
             final_text = Some("Malformed API response".to_string());
             break;
         }
-        let mut assistant = json!({ "role": "assistant", "content": msg["content"].as_str().unwrap_or("") });
-        let tool_calls_in_msg = msg.get("tool_calls").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        let mut assistant =
+            json!({ "role": "assistant", "content": msg["content"].as_str().unwrap_or("") });
+        let tool_calls_in_msg = msg
+            .get("tool_calls")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
         if !tool_calls_in_msg.is_empty() {
             assistant["tool_calls"] = json!(tool_calls_in_msg);
         }
         messages.push(assistant);
 
         if tool_calls_in_msg.is_empty() {
-            let finish = resp.pointer("/choices/0/finish_reason").and_then(|f| f.as_str()).unwrap_or("length");
-            stopped = if finish == "stop" { "done" } else { "max_steps" };
+            let finish = resp
+                .pointer("/choices/0/finish_reason")
+                .and_then(|f| f.as_str())
+                .unwrap_or("length");
+            stopped = if finish == "stop" {
+                "done"
+            } else {
+                "max_steps"
+            };
             final_text = Some(msg["content"].as_str().unwrap_or("").to_string());
             break;
         }
 
         for tc in &tool_calls_in_msg {
-            let fname = tc.pointer("/function/name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
-            let fargs_raw = tc.pointer("/function/arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+            let fname = tc
+                .pointer("/function/name")
+                .and_then(|n| n.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let fargs_raw = tc
+                .pointer("/function/arguments")
+                .and_then(|a| a.as_str())
+                .unwrap_or("{}");
             let args: Value = serde_json::from_str(fargs_raw).unwrap_or(json!({}));
             let tool_name = from_wire(&fname);
-            log(&format!("  step {}: {} {}", step + 1, tool_name, serde_json::to_string(&args).unwrap_or_default().chars().take(120).collect::<String>()));
+            log(&format!(
+                "  step {}: {} {}",
+                step + 1,
+                tool_name,
+                serde_json::to_string(&args)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect::<String>()
+            ));
             let out = if is_bash {
                 let script = args["script"].as_str().unwrap_or("");
                 let timeout = args["timeoutMs"].as_u64().unwrap_or(120_000);
-                kernel.call("proc.spawn", &json!({ "cmd": "bash", "args": ["-c", script], "timeoutMs": timeout }))
+                kernel.call(
+                    "proc.spawn",
+                    &json!({ "cmd": "bash", "args": ["-c", script], "timeoutMs": timeout }),
+                )
             } else {
                 kernel.call(&tool_name, &args)
             };
             match &out {
                 r if !r.ok => errors += 1,
-                r if is_bash && r.result.as_ref().and_then(|x| x["exitCode"].as_i64()).unwrap_or(0) != 0 => errors += 1,
-                r if is_bash && r.result.as_ref().map(|x| x.get("error").is_some()).unwrap_or(false) => errors += 1,
+                r if is_bash
+                    && r.result
+                        .as_ref()
+                        .and_then(|x| x["exitCode"].as_i64())
+                        .unwrap_or(0)
+                        != 0 =>
+                {
+                    errors += 1
+                }
+                r if is_bash
+                    && r.result
+                        .as_ref()
+                        .map(|x| x.get("error").is_some())
+                        .unwrap_or(false) =>
+                {
+                    errors += 1
+                }
                 _ => {}
             }
             tool_calls += 1;
@@ -262,7 +323,8 @@ pub fn run_agent(
     }
 
     Ok(AgentReport {
-        final_text: final_text.unwrap_or_else(|| "Stopped at max steps without a final answer.".to_string()),
+        final_text: final_text
+            .unwrap_or_else(|| "Stopped at max steps without a final answer.".to_string()),
         steps: messages.len(),
         tool_calls,
         errors,

@@ -65,7 +65,12 @@ impl Handler for ApplyHandler {
         let a: ApplyArgs = parse_args(args)?;
         let base = k.base_dir(a.baseDir.as_deref())?;
         let abs = resolve_checked(&base, &a.path)?;
-        let _ = crate::fs_tools::maybe_warn_foreign_lock(k, &base, &abs, a.guardLocks.unwrap_or(false))?;
+        let _ = crate::fs_tools::maybe_warn_foreign_lock(
+            k,
+            &base,
+            &abs,
+            a.guardLocks.unwrap_or(false),
+        )?;
         let applied = apply_impl(&base, &abs, &a.path, &a.edits)?;
         Ok(applied)
     }
@@ -76,18 +81,26 @@ impl Handler for ApplyManyHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ApplyManyArgs = parse_args(args)?;
         if a.edits.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "edits must be a non-empty array of {path, edits}"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "edits must be a non-empty array of {path, edits}",
+            ));
         }
         if a.edits.len() > k.cfg.limits.patch_many {
             return Err(ToolError::new(
                 "ERR_BAD_INPUT",
-                format!("max {} files per patch.applyMany call", k.cfg.limits.patch_many),
+                format!(
+                    "max {} files per patch.applyMany call",
+                    k.cfg.limits.patch_many
+                ),
             ));
         }
         let base = k.base_dir(a.baseDir.as_deref())?;
         let mut results = Vec::new();
         for fe in &a.edits {
-            match resolve_checked(&base, &fe.path).and_then(|abs| apply_impl(&base, &abs, &fe.path, &fe.edits)) {
+            match resolve_checked(&base, &fe.path)
+                .and_then(|abs| apply_impl(&base, &abs, &fe.path, &fe.edits))
+            {
                 Ok(v) => results.push(json!({
                     "path": fe.path,
                     "ok": true,
@@ -104,7 +117,12 @@ impl Handler for ApplyManyHandler {
 
 /// Core edit loop — every oldText must occur exactly `expectedCount ?? 1`
 /// times, else nothing is written and a structured error carries hints.
-fn apply_impl(root: &std::path::Path, abs: &std::path::Path, path: &str, edits: &[EditArgs]) -> Result<Value, ToolError> {
+fn apply_impl(
+    root: &std::path::Path,
+    abs: &std::path::Path,
+    path: &str,
+    edits: &[EditArgs],
+) -> Result<Value, ToolError> {
     use std::fs;
     let meta = fs::metadata(abs).ok();
     let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(true);
@@ -118,7 +136,10 @@ fn apply_impl(root: &std::path::Path, abs: &std::path::Path, path: &str, edits: 
     let mut out = src.clone();
     for (i, edit) in edits.iter().enumerate() {
         if edit.oldText.is_empty() {
-            return Err(ToolError::new("ERR_BAD_EDIT", format!("edits[{i}].oldText must be a non-empty string")));
+            return Err(ToolError::new(
+                "ERR_BAD_EDIT",
+                format!("edits[{i}].oldText must be a non-empty string"),
+            ));
         }
         let count = out.matches(&edit.oldText).count() as u64;
         let want = edit.expectedCount.unwrap_or(1);
@@ -206,7 +227,7 @@ fn fuzzy_candidate(text: &str, needle: &str) -> Option<(String, usize)> {
                 continue;
             }
             let cand: String = chars[start..end].iter().collect();
-            let d = levenshtein(&needle, &cand);
+            let d = levenshtein(needle, &cand);
             // Prefer a candidate that is a full-line (or line-prefix) — a window
             // that ends mid-line is a much weaker match than the whole line.
             let is_partial = chars.get(end).map(|&c| c != '\n').unwrap_or(false);
@@ -222,9 +243,7 @@ fn fuzzy_candidate(text: &str, needle: &str) -> Option<(String, usize)> {
         start += 1;
     }
     // Fall back to any window (including partial) if nothing full passed.
-    if best.is_none() {
-        return None;
-    }
+    best.as_ref()?;
     best
 }
 
@@ -253,7 +272,9 @@ fn char_diff(a: &str, b: &str) -> Vec<String> {
     let max = aw.len().max(bw.len());
     for i in 0..max {
         match (aw.get(i), bw.get(i)) {
-            (Some(x), Some(y)) if x != y => out.push(format!("'{y}' → '{x}' (expected '{x}', found '{y}')")),
+            (Some(x), Some(y)) if x != y => {
+                out.push(format!("'{y}' → '{x}' (expected '{x}', found '{y}')"))
+            }
             (Some(x), None) => out.push(format!("missing '{x}'")),
             (None, Some(y)) => out.push(format!("unexpected '{y}'")),
             _ => {}
@@ -345,7 +366,11 @@ mod patch_fuzzy_tests {
         let abs = dir.join("app.rs");
         // Genuine drift: extra space before the semicolon means the exact
         // "return a + b;" is NOT a substring — so fuzzy must kick in.
-        fs::write(&abs, "fn add(a: i32, b: i32) -> i32 {\n  return a + b ;\n}\n").unwrap();
+        fs::write(
+            &abs,
+            "fn add(a: i32, b: i32) -> i32 {\n  return a + b ;\n}\n",
+        )
+        .unwrap();
         let edits = vec![EditArgs {
             oldText: "return a + b;".to_string(),
             newText: "return a + b + 0;".to_string(),
@@ -355,17 +380,28 @@ mod patch_fuzzy_tests {
         let result = apply_impl(&dir, &abs, "app.rs", &edits);
         let v = result.unwrap();
         let applied = v["applied"].as_array().unwrap();
-        assert_eq!(applied[0]["fuzzy"], json!(true), "expected fuzzy match, got: {applied:?}");
+        assert_eq!(
+            applied[0]["fuzzy"],
+            json!(true),
+            "expected fuzzy match, got: {applied:?}"
+        );
         assert!(applied[0]["editDistance"].as_u64().unwrap() <= 3);
         let content = fs::read_to_string(&abs).unwrap();
-        assert!(content.contains("return a + b + 0;"), "content: {content:?}");
+        assert!(
+            content.contains("return a + b + 0;"),
+            "content: {content:?}"
+        );
     }
 
     #[test]
     fn patch_no_match_gives_nearest_diff() {
         let dir = workdir();
         let abs = dir.join("app.rs");
-        fs::write(&abs, "fn add(a: i32, b: i32) -> i32 {\n  return a + b;\n}\n").unwrap();
+        fs::write(
+            &abs,
+            "fn add(a: i32, b: i32) -> i32 {\n  return a + b;\n}\n",
+        )
+        .unwrap();
         // Deliberately different: "return a * b;" does not exist
         let edits = vec![EditArgs {
             oldText: "return a * b;".to_string(),
@@ -378,7 +414,10 @@ mod patch_fuzzy_tests {
         // hint is Option<Value>
         let hint = err.hint.expect("patch errors carry a hint");
         assert!(hint.get("nearestCandidateLines").is_some());
-        assert!(hint.get("nearestDiff").is_some(), "expected a char-level diff, got: {hint:?}");
+        assert!(
+            hint.get("nearestDiff").is_some(),
+            "expected a char-level diff, got: {hint:?}"
+        );
         let nd = &hint["nearestDiff"];
         assert!(nd["line"].as_u64().unwrap() >= 1);
         assert!(nd["editDistance"].as_u64().unwrap() >= 1);

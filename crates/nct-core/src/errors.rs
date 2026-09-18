@@ -15,11 +15,19 @@ pub struct ToolError {
 
 impl ToolError {
     pub fn new(code: &str, message: impl Into<String>) -> Self {
-        ToolError { code: code.to_string(), message: message.into(), hint: None }
+        ToolError {
+            code: code.to_string(),
+            message: message.into(),
+            hint: None,
+        }
     }
 
     pub fn with_hint(code: &str, message: impl Into<String>, hint: Value) -> Self {
-        ToolError { code: code.to_string(), message: message.into(), hint: Some(hint) }
+        ToolError {
+            code: code.to_string(),
+            message: message.into(),
+            hint: Some(hint),
+        }
     }
 
     /// Attach an already-built hint object (e.g. from parse_args field
@@ -49,6 +57,7 @@ pub mod codes {
     pub const BAD_PATH: &str = "ERR_BAD_PATH";
     pub const BAD_REGEX: &str = "ERR_BAD_REGEX";
     pub const BINARY_FILE: &str = "ERR_BINARY_FILE";
+    pub const CANCELLED: &str = "ERR_CANCELLED";
     pub const CMD_NOT_FOUND: &str = "ERR_CMD_NOT_FOUND";
     pub const EMBED_UNAVAILABLE: &str = "ERR_EMBED_UNAVAILABLE";
     pub const ENGINE: &str = "ERR_ENGINE";
@@ -87,6 +96,7 @@ pub mod codes {
         BAD_PATH,
         BAD_REGEX,
         BINARY_FILE,
+        CANCELLED,
         CMD_NOT_FOUND,
         EMBED_UNAVAILABLE,
         ENGINE,
@@ -195,12 +205,18 @@ mod tests {
 
     #[test]
     fn io_errors_map_to_specific_codes() {
-        assert_eq!(from_io_error(std::io::Error::from(std::io::ErrorKind::NotFound)).code, "ERR_NOT_FOUND");
+        assert_eq!(
+            from_io_error(std::io::Error::from(std::io::ErrorKind::NotFound)).code,
+            "ERR_NOT_FOUND"
+        );
         assert_eq!(
             from_io_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)).code,
             "ERR_PERMISSION"
         );
-        assert_eq!(from_io_error(std::io::Error::from(std::io::ErrorKind::TimedOut)).code, "ERR_TIMEOUT");
+        assert_eq!(
+            from_io_error(std::io::Error::from(std::io::ErrorKind::TimedOut)).code,
+            "ERR_TIMEOUT"
+        );
         assert_eq!(
             from_io_error(std::io::Error::from(std::io::ErrorKind::ConnectionRefused)).code,
             "ERR_REFUSED"

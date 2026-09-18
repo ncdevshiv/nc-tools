@@ -54,7 +54,10 @@ impl Handler for ResearchHandler {
         let a: ResearchArgs = parse_args(args)?;
         let query = a.query.trim().to_string();
         if query.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "query must be a non-empty string"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "query must be a non-empty string",
+            ));
         }
         let max_sources = a.maxSources.unwrap_or(5) as usize;
         let search_args = json!({
@@ -66,10 +69,15 @@ impl Handler for ResearchHandler {
         // 1. search
         let search = k.call("net.search", &search_args);
         if !search.ok {
-            return Err(search.error.unwrap_or_else(|| ToolError::new("ERR_ENGINE", "net.search failed")));
+            return Err(search
+                .error
+                .unwrap_or_else(|| ToolError::new("ERR_ENGINE", "net.search failed")));
         }
         let search_result = search.result.unwrap();
-        let results = search_result["results"].as_array().cloned().unwrap_or_default();
+        let results = search_result["results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         if results.is_empty() {
             return Ok(json!({
                 "query": query,
@@ -89,7 +97,7 @@ impl Handler for ResearchHandler {
         let mut best_score = 0.0f64;
         let mut best_span = String::new();
 
-        for (i, r) in results.iter().take(max_sources).enumerate() {
+        for r in results.iter().take(max_sources) {
             let url = r["url"].as_str().unwrap_or("").to_string();
             let title = r["title"].as_str().unwrap_or("").to_string();
             if url.is_empty() {
@@ -112,14 +120,17 @@ impl Handler for ResearchHandler {
 
             // 3. pick the single most query-relevant span (a sentence-ish window)
             // from this source via the local embedder.
-            let (span, span_score) = pick_span(&markdown, &query, embedder.as_deref());
+            let (span, span_score) = pick_span(&markdown, &query, embedder);
 
             // 4. verify: is the query's answer grounded in THIS source?
             // We verify the span as a standalone claim against its own source
             // (id path reuses the ledger if already cited; url path otherwise).
             let verify_args = json!({ "claim": span, "url": url, "allowPrivate": a.allowPrivate.unwrap_or(false) });
             let verdict = match k.call("net.verify", &verify_args) {
-                v if v.ok => v.result.unwrap_or(Value::Null)["verdict"].as_str().unwrap_or("not-grounded").to_string(),
+                v if v.ok => v.result.unwrap_or(Value::Null)["verdict"]
+                    .as_str()
+                    .unwrap_or("not-grounded")
+                    .to_string(),
                 _ => "unknown".to_string(),
             };
             let verify_score = span_score;
@@ -128,11 +139,20 @@ impl Handler for ResearchHandler {
             let mut citation = Value::Null;
             let mut cited_id = Value::Null;
             if verdict == "grounded" || verdict == "partial" {
-                let cite_args = json!({ "url": url, "allowPrivate": a.allowPrivate.unwrap_or(false) });
+                let cite_args =
+                    json!({ "url": url, "allowPrivate": a.allowPrivate.unwrap_or(false) });
                 let c = k.call("net.cite", &cite_args);
                 if c.ok {
-                    citation = c.result.as_ref().map(|r| r["citation"].clone()).unwrap_or(Value::Null);
-                    cited_id = c.result.as_ref().map(|r| r["id"].clone()).unwrap_or(Value::Null);
+                    citation = c
+                        .result
+                        .as_ref()
+                        .map(|r| r["citation"].clone())
+                        .unwrap_or(Value::Null);
+                    cited_id = c
+                        .result
+                        .as_ref()
+                        .map(|r| r["id"].clone())
+                        .unwrap_or(Value::Null);
                 }
             }
 
@@ -168,23 +188,34 @@ impl Handler for ResearchHandler {
                 .map(|s| s.to_string())
                 .unwrap_or_default()
         };
-        let answer = if answer.is_empty() { Value::Null } else { json!(answer) };
+        let answer = if answer.is_empty() {
+            Value::Null
+        } else {
+            json!(answer)
+        };
 
         let total_sources = sources.len();
-        let confidence = if total_sources == 0 { 0.0 } else { grounded as f64 / total_sources as f64 };
+        let confidence = if total_sources == 0 {
+            0.0
+        } else {
+            grounded as f64 / total_sources as f64
+        };
         let gaps = if grounded == 0 {
             json!("no source fully grounded the claim — verify each result manually")
         } else {
             json!(null)
         };
 
-        let _ = k.journal.append("net.research", json!({
-            "query": query,
-            "sources": total_sources,
-            "grounded": grounded,
-            "confidence": round4(confidence),
-            "sid": k.sid,
-        }));
+        let _ = k.journal.append(
+            "net.research",
+            json!({
+                "query": query,
+                "sources": total_sources,
+                "grounded": grounded,
+                "confidence": round4(confidence),
+                "sid": k.sid,
+            }),
+        );
 
         Ok(json!({
             "query": query,
@@ -202,7 +233,11 @@ impl Handler for ResearchHandler {
 /// Pick the single most query-relevant span (~200-char sentence window) from a
 /// markdown body. Uses the local embedder when available; falls back to the
 /// first non-empty sentence. Returns (span, cosine_score).
-fn pick_span(markdown: &str, query: &str, embedder: Option<&nct_semantic::Embedder>) -> (String, f64) {
+fn pick_span(
+    markdown: &str,
+    query: &str,
+    embedder: Option<&nct_semantic::Embedder>,
+) -> (String, f64) {
     // Sentence-ish windows: split on sentence terminators, keep windows ~200 ch.
     let windows = sentence_windows(markdown, 220);
     if windows.is_empty() {
@@ -255,7 +290,10 @@ fn sentence_windows(text: &str, max_chars: usize) -> Vec<String> {
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
 }
 
 fn round4(v: f64) -> f64 {
@@ -263,5 +301,10 @@ fn round4(v: f64) -> f64 {
 }
 
 pub fn register_research(k: &mut Kernel) {
-    k.register("net.research", RESEARCH_DESC, nct_core::schema::schema_for::<ResearchArgs>(), std::sync::Arc::new(ResearchHandler));
+    k.register(
+        "net.research",
+        RESEARCH_DESC,
+        nct_core::schema::schema_for::<ResearchArgs>(),
+        std::sync::Arc::new(ResearchHandler),
+    );
 }

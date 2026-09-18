@@ -59,10 +59,17 @@ impl Handler for WatchSemanticHandler {
         let base = k.base_dir(a.baseDir.as_deref())?;
         let abs: PathBuf = resolve_checked(&base, &a.path)?;
         let meta = std::fs::metadata(&abs).map_err(|_| {
-            ToolError::with_hint("ERR_NOT_FOUND", format!("no such file: {}", a.path), json!({ "path": a.path }))
+            ToolError::with_hint(
+                "ERR_NOT_FOUND",
+                format!("no such file: {}", a.path),
+                json!({ "path": a.path }),
+            )
         })?;
         if meta.is_dir() {
-            return Err(ToolError::new("ERR_IS_DIRECTORY", format!("{} is a directory", a.path)));
+            return Err(ToolError::new(
+                "ERR_IS_DIRECTORY",
+                format!("{} is a directory", a.path),
+            ));
         }
         let interval = a.intervalMs.unwrap_or(2000);
         let timeout = a.timeoutMs.unwrap_or(60_000);
@@ -76,11 +83,19 @@ impl Handler for WatchSemanticHandler {
         let mut checks = 0u64;
         let deadline = started + std::time::Duration::from_millis(timeout);
         loop {
+            if nct_core::is_cancelled() {
+                return Err(nct_core::cancelled_error("fs.watch"));
+            }
             if std::time::Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(interval));
             checks += 1;
+            nct_core::report_progress(
+                checks as f64,
+                Some((timeout / interval.max(1)) as f64),
+                Some("fs.watch polling"),
+            );
             let v1 = match file_embed(k, &abs) {
                 Ok(v) => v,
                 Err(_) => continue, // transient — file may be mid-write
@@ -90,25 +105,23 @@ impl Handler for WatchSemanticHandler {
             if v0 == v1 {
                 continue;
             }
-            // Same content (identical vectors) -> byte-identical, no report.
-            // Different -> score cosine through the embedder.
-            match embeds_k(k, &abs) {
-                Ok((prev, cur)) => {
-                    let cos = dot(&prev, &cur);
-                    byte_changed = true;
-                    if cos < threshold {
-                        return Ok(json!({
-                            "path": a.path,
-                            "event": "semantic-change",
-                            "cosine": round4(cos),
-                            "threshold": threshold,
-                            "checks": checks,
-                            "elapsedMs": started.elapsed().as_millis() as u64,
-                            "note": "meaning changed — logic edits merit a re-run",
-                        }));
-                    }
-                }
-                Err(_) => continue,
+            // Score the new vector against the INITIAL v0 — the baseline this
+            // watch exists to detect drift from. Scoring a fresh embed against
+            // itself (the old embeds_k path) always returns cosine 1.0 for
+            // L2-normalized vectors, so `semantic-change` was unreachable and
+            // the tool could never fire.
+            let cos = dot(&v0, &v1);
+            byte_changed = true;
+            if cos < threshold {
+                return Ok(json!({
+                    "path": a.path,
+                    "event": "semantic-change",
+                    "cosine": round4(cos),
+                    "threshold": threshold,
+                    "checks": checks,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "note": "meaning changed — logic edits merit a re-run",
+                }));
             }
         }
         Ok(json!({
@@ -131,35 +144,29 @@ fn file_embed(k: &Kernel, abs: &PathBuf) -> Result<Vec<f32>, ToolError> {
     let content = std::fs::read_to_string(abs).map_err(ToolError::from)?;
     let text: String = content.chars().take(4000).collect();
     let model_cache = if let Ok(d) = std::env::var("NCTOOLS_MODEL_CACHE") {
-        if !d.is_empty() { std::path::PathBuf::from(d) } else { k.root.join(".nc-tools").join("model-cache") }
-    } else { k.root.join(".nc-tools").join("model-cache") };
-    let embedder = nct_semantic::Embedder::get(model_cache)
-        .map_err(|e| ToolError::with_hint("ERR_EMBED_UNAVAILABLE", format!("embedding model unavailable: {e}"), json!({})))?;
+        if !d.is_empty() {
+            std::path::PathBuf::from(d)
+        } else {
+            k.root.join(".nc-tools").join("model-cache")
+        }
+    } else {
+        k.root.join(".nc-tools").join("model-cache")
+    };
+    let embedder = nct_semantic::Embedder::get(model_cache).map_err(|e| {
+        ToolError::with_hint(
+            "ERR_EMBED_UNAVAILABLE",
+            format!("embedding model unavailable: {e}"),
+            json!({}),
+        )
+    })?;
     embedder.embed(&text)
 }
 
-/// Pair of embeds: current + a fresh read (for cosine). We cache the FIRST
-/// embed (v0) by digest so we don't re-embed the same content twice.
-fn embeds_k(k: &Kernel, abs: &PathBuf) -> Result<(Vec<f32>, Vec<f32>), ToolError> {
-    let content = std::fs::read_to_string(abs).map_err(ToolError::from)?;
-    let text: String = content.chars().take(4000).collect();
-    let model_cache = if let Ok(d) = std::env::var("NCTOOLS_MODEL_CACHE") {
-        if !d.is_empty() { std::path::PathBuf::from(d) } else { k.root.join(".nc-tools").join("model-cache") }
-    } else { k.root.join(".nc-tools").join("model-cache") };
-    let embedder = nct_semantic::Embedder::get(model_cache)
-        .map_err(|e| ToolError::with_hint("ERR_EMBED_UNAVAILABLE", format!("model unavailable: {e}"), json!({})))?;
-    let prev = embedder.embed(&text)?;
-    // Re-embed the same text (cheap) — the caller compares prev against the
-    // INITIAL v0 it holds. For a self-contained score we need two vectors;
-    // this returns the current twice so cosine(prev,cur)==1.0 unless the file
-    // changed between the two reads. Actually: return the same twice; the loop
-    // keeps v0 separately and scores v0-vs-v1 through a fresh embed.
-    let cur = embedder.embed(&text)?;
-    Ok((prev, cur))
-}
-
 fn dot(a: &[f32], b: &[f32]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (*x as f64) * (*y as f64)).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum()
 }
 
 fn round4(v: f64) -> f64 {
@@ -167,7 +174,12 @@ fn round4(v: f64) -> f64 {
 }
 
 pub fn register_watch(k: &mut Kernel) {
-    k.register("fs.watch", WATCH_DESC, nct_core::schema::schema_for::<WatchArgs>(), std::sync::Arc::new(WatchSemanticHandler));
+    k.register(
+        "fs.watch",
+        WATCH_DESC,
+        nct_core::schema::schema_for::<WatchArgs>(),
+        std::sync::Arc::new(WatchSemanticHandler),
+    );
 }
 
 #[cfg(test)]
@@ -198,6 +210,6 @@ mod watch_tests {
     #[test]
     fn threshold_defaults_sane() {
         let v = round4(0.9951);
-        assert!(v >= 0.995 && v <= 0.996);
+        assert!((0.995..=0.996).contains(&v));
     }
 }
