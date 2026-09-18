@@ -14,7 +14,10 @@ use crate::errors::ToolError;
 /// path-taking handler uses.
 pub fn resolve_checked(base: &Path, p: &str) -> Result<PathBuf, ToolError> {
     if p.is_empty() {
-        return Err(ToolError::new("ERR_BAD_PATH", "path must be a non-empty string"));
+        return Err(ToolError::new(
+            "ERR_BAD_PATH",
+            "path must be a non-empty string",
+        ));
     }
     resolve_path(base, p).map_err(|e| ToolError::new("ERR_BAD_PATH", e.to_string()))
 }
@@ -25,7 +28,10 @@ pub fn resolve_checked(base: &Path, p: &str) -> Result<PathBuf, ToolError> {
 /// matching ERR_BAD_PATH for empty strings.
 pub fn resolve_path(base: &Path, p: &str) -> std::io::Result<PathBuf> {
     if p.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "path must be a non-empty string"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path must be a non-empty string",
+        ));
     }
     let candidate = Path::new(p);
     if candidate.is_absolute() {

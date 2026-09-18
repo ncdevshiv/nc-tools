@@ -6,8 +6,7 @@
 use serde_json::Value;
 
 fn golden_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../conformance/golden/tools.json")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/golden/tools.json")
 }
 
 /// `required` is a SET (JSON array of names); schemars emits it sorted while
@@ -17,7 +16,11 @@ fn sort_required(mut v: Value) -> Value {
     match &mut v {
         Value::Object(map) => {
             if let Some(Value::Array(req)) = map.get_mut("required") {
-                req.sort_by(|a, b| a.as_str().unwrap_or_default().cmp(b.as_str().unwrap_or_default()));
+                req.sort_by(|a, b| {
+                    a.as_str()
+                        .unwrap_or_default()
+                        .cmp(b.as_str().unwrap_or_default())
+                });
             }
             for child in map.values_mut() {
                 *child = sort_required(child.clone());
@@ -38,9 +41,13 @@ fn rust_surface_matches_frozen_golden() {
     let raw = std::fs::read_to_string(golden_path())
         .expect("golden spec missing — run node tools/golden.mjs in the repo root");
     let golden: Value = sort_required(serde_json::from_str(&raw).unwrap());
-    let expected_tools: Vec<Value> = golden["tools"].as_array().expect("golden tools array").clone();
+    let expected_tools: Vec<Value> = golden["tools"]
+        .as_array()
+        .expect("golden tools array")
+        .clone();
 
-    let kernel = nct_mcp::build_kernel(std::env::temp_dir().join("nc-parity-test")).expect("kernel");
+    let kernel =
+        nct_mcp::build_kernel(std::env::temp_dir().join("nc-parity-test")).expect("kernel");
     let actual: Vec<Value> = kernel
         .descriptors()
         .into_iter()
@@ -55,7 +62,10 @@ fn rust_surface_matches_frozen_golden() {
         expected_tools.len(),
         actual.len()
     );
-    let expected_names: Vec<&str> = expected_tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let expected_names: Vec<&str> = expected_tools
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
     let actual_names: Vec<&str> = actual.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for name in &expected_names {
         assert!(actual_names.contains(name), "missing tool: {name}");

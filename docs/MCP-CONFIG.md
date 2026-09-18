@@ -54,6 +54,39 @@ Replace `/path/to/nc-tools-mcp` with your built (or installed) binary path and
   between uses and wakes on demand. Set `"0"` to disable the idle timer
   entirely (the server then stays up until the client disconnects).
 
+## Workspace anchoring: which workspace do answers come from?
+
+The server root (args[0]) is only the DEFAULT. Resolution priority for every
+path-resolving tool:
+
+1. **Per-call `baseDir`** — explicit override, wins over everything; a
+   nonexistent baseDir is a hard `ERR_BAD_PATH` (never a silent fallback).
+2. **Session anchor (MCP `roots`)** — if the client declares the `roots`
+   capability, the server asks the CLIENT for its workspace after
+   `initialize` (`roots/list`) and binds the first filesystem directory as
+   the session default base. Bare tool calls (no baseDir) then answer the
+   CLIENT's workspace, not the server's. `notifications/roots/list_changed`
+   re-anchors mid-session. The handshake result reports what happened in
+   `anchoring: {requested, anchored, base, reason?}`.
+3. **Server root** — used when neither of the above applies (unchanged
+   legacy behavior).
+
+`sys.workspace` makes the current state observable: `root` (effective base),
+`serverRoot` (spawn root), `anchored` (whether a session anchor is set).
+
+### Side-channel policy (where state lives)
+
+- Per-workspace (follows the effective base): `semantic-index.jsonl`,
+  `net-cache/` (unless `NCTOOLS_NET_CACHE` overrides it to a shared dir),
+  `snapshots/` (sys.snapshot baseDir).
+- Session-scoped (server root by design): `journal.jsonl`,
+  `agents.jsonl`/`locks.jsonl` coordination stores. A second server rooted
+  on the same directory shares them (cross-process coordination).
+- Global by design: the cite ledger (`sources.jsonl`) and the authority
+  map — they are cross-workspace learning stores; splitting them
+  per-workspace would regress recall.
+- Machine-global (env override): `NCTOOLS_MODEL_CACHE` (semantic model).
+
 ### Claude Desktop (`claude_desktop_config.json`)
 
 ```json

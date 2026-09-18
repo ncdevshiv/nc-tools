@@ -58,8 +58,10 @@ fn pattern_matches(pattern: &str, path: &str) -> bool {
 
 impl Robots {
     pub fn parse(raw: &str) -> Robots {
-        let mut robots = Robots::default();
-        robots.exists = true;
+        let mut robots = Robots {
+            exists: true,
+            ..Robots::default()
+        };
         // Classic group structure: a run of User-agent lines opens/extends a
         // group; the rules that follow attach to it; a UA line after a rule
         // starts the next group.
@@ -96,7 +98,11 @@ impl Robots {
                     if key == "disallow" && value.is_empty() {
                         continue;
                     }
-                    pending.rules.push(if key == "disallow" { Rule::Disallow(value) } else { Rule::Allow(value) });
+                    pending.rules.push(if key == "disallow" {
+                        Rule::Disallow(value)
+                    } else {
+                        Rule::Allow(value)
+                    });
                 }
                 "crawl-delay" => {
                     last_was_agent = false;
@@ -104,10 +110,8 @@ impl Robots {
                         pending.crawl_delay = Some(d);
                     }
                 }
-                "sitemap" => {
-                    if !robots.sitemaps.contains(&value) {
-                        robots.sitemaps.push(value);
-                    }
+                "sitemap" if !robots.sitemaps.contains(&value) => {
+                    robots.sitemaps.push(value);
                 }
                 _ => {}
             }
@@ -123,13 +127,19 @@ impl Robots {
         // exact agent match first, then *
         self.groups
             .iter()
-            .find(|g| g.agents.iter().any(|a| *a == agent))
-            .or_else(|| self.groups.iter().find(|g| g.agents.iter().any(|a| a == "*")))
+            .find(|g| g.agents.contains(&agent))
+            .or_else(|| {
+                self.groups
+                    .iter()
+                    .find(|g| g.agents.iter().any(|a| a == "*"))
+            })
     }
 
     /// RFC 9309 isAllowed: longest matching rule wins; ties go to Allow.
     pub fn is_allowed(&self, agent: &str, url: &Url) -> bool {
-        let Some(group) = self.group_for(agent) else { return true };
+        let Some(group) = self.group_for(agent) else {
+            return true;
+        };
         if group.rules.is_empty() {
             return true;
         }
@@ -166,11 +176,14 @@ impl Robots {
     }
 }
 
-/// Structured metadata from JSON-LD / OG meta is in extract.rs; this report
-/// shapes the net.robots result.
-
 /// Description JSON for net.robots: allowed flag + discovered extras.
-pub fn report(robot: &Robots, agent: &str, url: &Url, llms_txt: Option<Value>, content_signals: Option<String>) -> Value {
+pub fn report(
+    robot: &Robots,
+    agent: &str,
+    url: &Url,
+    llms_txt: Option<Value>,
+    content_signals: Option<String>,
+) -> Value {
     json!({
         "url": url.to_string(),
         "agent": agent,
@@ -194,9 +207,18 @@ mod tests {
         let r = Robots::parse(SAMPLE);
         assert!(r.exists);
         assert_eq!(r.sitemaps, vec!["https://x.dev/sitemap.xml".to_string()]);
-        assert!(r.is_allowed("Mozilla/5.0", &Url::parse("https://x.dev/public/page").unwrap()));
-        assert!(!r.is_allowed("anyagent", &Url::parse("https://x.dev/private/secret").unwrap()));
-        assert!(r.is_allowed("anyagent", &Url::parse("https://x.dev/private/ok/file").unwrap()));
+        assert!(r.is_allowed(
+            "Mozilla/5.0",
+            &Url::parse("https://x.dev/public/page").unwrap()
+        ));
+        assert!(!r.is_allowed(
+            "anyagent",
+            &Url::parse("https://x.dev/private/secret").unwrap()
+        ));
+        assert!(r.is_allowed(
+            "anyagent",
+            &Url::parse("https://x.dev/private/ok/file").unwrap()
+        ));
         assert_eq!(r.crawl_delay("anyagent"), Some(2.5));
         assert!(!r.is_allowed("badbot", &Url::parse("https://x.dev/anything").unwrap()));
     }

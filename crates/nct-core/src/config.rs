@@ -45,6 +45,10 @@ pub struct Limits {
     pub net_engine_timeout_ms: u64,
     /// net.search politeness: minimum interval between hits to one engine
     pub net_search_politeness_ms: u64,
+    /// net.search parallel fan-out across sources (default true; false = serial)
+    pub net_parallel_fanout: bool,
+    /// authority influence on search score (0.0-0.5); 0.05 default
+    pub net_authority_influence: f64,
     /// git/pkg child process timeout
     pub child_timeout_ms: u64,
     /// pkg.runScript stdout tail
@@ -88,6 +92,8 @@ impl Default for Limits {
             net_fetch_ttl_ms: 3_600_000,
             net_engine_timeout_ms: 10_000,
             net_search_politeness_ms: 750,
+            net_parallel_fanout: true,
+            net_authority_influence: 0.05,
             child_timeout_ms: 300_000,
             script_stdout_tail: 100_000,
             list_depth: 8,
@@ -111,10 +117,11 @@ pub struct McpConfig {
 
 impl Default for McpConfig {
     fn default() -> Self {
-        McpConfig { idle_ms: 30 * 60 * 1000 }
+        McpConfig {
+            idle_ms: 30 * 60 * 1000,
+        }
     }
 }
-
 
 impl Config {
     /// defaults < <root>/nc-tools.toml < env overrides

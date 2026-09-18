@@ -10,11 +10,16 @@ pub struct SessionEnv {
 
 impl SessionEnv {
     pub fn new() -> SessionEnv {
-        SessionEnv { inner: Mutex::new(BTreeMap::new()) }
+        SessionEnv {
+            inner: Mutex::new(BTreeMap::new()),
+        }
     }
 
     pub fn set(&self, name: &str, value: &str) {
-        self.inner.lock().unwrap().insert(name.to_string(), value.to_string());
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), value.to_string());
     }
 
     pub fn get(&self, name: &str) -> Option<String> {

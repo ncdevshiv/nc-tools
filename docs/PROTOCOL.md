@@ -26,7 +26,7 @@ internal architecture, or data structures beyond the observable contract.
   event and one `tool.result` event. The result's `callSeq` references the
   call's `seq`. (See schema below.)
 
-## 3. Tool surface (must be 60 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
+## 3. Tool surface (must be 84 tools; schema in the Rust kernel `crates/`, frozen export at `conformance/golden/tools.json`)
 
 - `fs.read`, `fs.readMany`, `fs.readRange`, `fs.write`, `fs.writeMany`,
   `fs.append`, `fs.copy`, `fs.list`, `fs.tree`, `fs.stat`, `fs.mkdir`,
@@ -41,12 +41,13 @@ internal architecture, or data structures beyond the observable contract.
   `proc.list`, `proc.kill`, `proc.runScript`, `proc.watch`
 - `test.run` (frameworks: `node`, `pytest`)
 - `pkg.add`, `pkg.list`, `pkg.scripts`, `pkg.runScript`
-- `net.http`, `net.probePort`, `net.fetch`, `net.robots`, `net.search`
+- `net.http`, `net.probePort`, `net.fetch`, `net.robots`, `net.search`, `net.cite`, `net.verify`, `net.research`, `net.contradict`
   (wave W-Net-1: agent-grade fetch+extract, robots/llms.txt, keyless federated
-  search with local neural rerank — see docs/INTERNET-TOOLS.md)
+  search with local neural rerank — see docs/INTERNET-TOOLS.md; net.research is
+  the multi-hop conductor, net.contradict the anti-confirmation-bias check)
 - `env.get`, `env.set`, `env.list`
-- `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.journal`,
-  `sys.workspace`, `sys.doctor`
+- `sys.snapshot`, `sys.rollback`, `sys.listSnapshots`, `sys.snapshotDiff`,
+  `sys.journal`, `sys.workspace`, `sys.doctor`
 - `batch.execute`
 
 Behavioral invariants every implementation MUST honor:
@@ -110,41 +111,101 @@ On error, `ok` is `false`, `error` is `{code, message, hint?}` and
 
 ## 5. Error taxonomy
 
+The registry in `crates/nct-core/src/errors.rs` (`codes::ALL`) is the single
+source of truth; a byte-match test enforces that this table and the registry
+list exactly the same set, in both directions. Every row below starts with
+exactly one code (combined rows are not parseable by the gate).
+
 | Code | Meaning |
 |---|---|
-| `ERR_NOT_FOUND` | path or file missing (hint: `nearestExisting` files) |
+| `ERR_BAD_INPUT` | argument validation failure (hint: `missing` / `expected` field where extractable) |
+| `ERR_BAD_EDIT` | edit arguments invalid before matching (e.g. empty oldText) |
 | `ERR_BAD_PATH` | empty / non-path value |
-| `ERR_BAD_INPUT` | argument validation failure |
-| `ERR_IS_DIRECTORY` | used a directory where a file is required |
-| `ERR_REFUSED` | explicitly refused operation (e.g. root delete, batch nesting) |
-| `ERR_UNKNOWN_TOOL` | tool not in surface (hint: `available` list) |
-| `PATCH_NO_MATCH` | edit oldText not found (hint: nearest candidate lines) |
-| `PATCH_AMBIGUOUS` | edit matches more than expected |
-| `ERR_GIT` | git command failed (hint: stderr) |
-| `ERR_NOT_A_REPO` | workspace has no .git |
-| `ERR_SPAWN` / `ERR_CMD_NOT_FOUND` | process spawn issues |
-| `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
-| `ERR_PROC_NOT_FOUND` | no process with that pid (proc.kill) |
-| `ERR_TEST_PARSE` | runner produced no structured report |
-| `ERR_NO_TESTS` | runner discovered zero tests (hint: check the path/patterns) |
-| `ERR_NET` / `ERR_TIMEOUT` | network request failures |
-| `ERR_UNKNOWN_SNAPSHOT` | snapshot id unknown (hint: available) |
 | `ERR_BAD_REGEX` | invalid search pattern |
-| `ERR_NETWORK` / `ERR_PKG` | package manager failures |
+| `ERR_BINARY_FILE` | path is a binary file (fs.read refuses >30% NUL bytes; hint: readRange) |
+| `ERR_CANCELLED` | client sent notifications/cancelled for the in-flight call; the tool stopped early |
+| `ERR_CMD_NOT_FOUND` | spawned command not found (hint: binary + PATH note) |
+| `ERR_EMBED_UNAVAILABLE` | local embedding model not loaded (semantic rerank/grounding) |
+| `ERR_ENGINE` | text-extraction/rerank engine failure |
+| `ERR_GIT` | git command failed (hint: stderr) |
+| `ERR_GIT_SPAWN` | git binary could not be spawned |
+| `ERR_INTERNAL` | unclassified internal defect (io/serde kinds with no specific code) |
+| `ERR_IS_DIRECTORY` | used a directory where a file is required |
+| `ERR_NET` | network request failure |
+| `ERR_NETWORK` | package-manager network failure |
+| `ERR_NOT_A_REPO` | workspace has no .git |
+| `ERR_NOT_FOUND` | path or file missing (hint: `nearestExisting` files) |
+| `ERR_NO_KEY` | required API key absent from env (names the `NCTOOLS_*_KEY` var) |
+| `ERR_NO_TESTS` | runner discovered zero tests (hint: check the path/patterns) |
+| `ERR_PANIC` | tool handler panicked; kernel caught it — server survives, error is retryable |
+| `ERR_PARSE` | runner produced no structured report / response body unparseable |
+| `ERR_PERMISSION` | OS denied access (file/dir permission; io PermissionDenied) |
+| `ERR_PKG` | package manager operation failed (hint: captured stderr) |
+| `ERR_PROC_NOT_FOUND` | no process with that pid (proc.kill) |
+| `ERR_REFUSED` | explicitly refused operation (e.g. root delete, batch nesting) |
+| `ERR_RENDER` | headless render attempt failed |
+| `ERR_RENDER_UNAVAILABLE` | no system browser available for render escalation |
+| `ERR_SPAWN` | process spawn failed for a reason other than missing command |
+| `ERR_SSRF_BLOCKED` | request to private/loopback/metadata target refused (fail-closed) |
+| `ERR_TEST_PARSE` | test runner output could not be parsed |
+| `ERR_TIMEOUT` | operation exceeded its budget (request, spawn, or wait) |
+| `ERR_UNKNOWN_HANDLE` | process handle id unknown (hint: known list) |
+| `ERR_UNKNOWN_SNAPSHOT` | snapshot id unknown (hint: available) |
+| `ERR_UNKNOWN_TOOL` | tool not in surface (hint: `available` list, `didYouMean` nearest name, `retryWith` canonical MCP wire name) |
+| `PATCH_AMBIGUOUS` | edit matches more than expected |
+| `PATCH_NO_MATCH` | edit oldText not found (hint: nearest candidate lines) |
 
 Every error must have exactly these fields: `code`, `message`, optional
 `hint` (JSON object). Codes must match byte-for-byte.
+
+### 5.1 Self-healing reminders
+
+Errors carry remediation, not just diagnosis:
+
+- `ERR_UNKNOWN_TOOL` teaches the fix in one turn: when the sent name is close
+  to a registered tool (Levenshtein over the normalized wire form), the hint
+  names it (`didYouMean`) and a retryable MCP wire name (`retryWith`, e.g.
+  `mcp__nc-tools__fs_read`); the message states the accepted wire forms.
+  Case-only slips (`FS_READ`) resolve without error.
+- `ERR_PANIC` proves crash safety: a panicking handler never kills the server;
+  the panic message is the root cause in `error.message`, and subsequent
+  calls on the same connection succeed.
+- io errors surface their specific kind (`NotFound` → `ERR_NOT_FOUND`,
+  `PermissionDenied` → `ERR_PERMISSION`, `TimedOut` → `ERR_TIMEOUT`,
+  `ConnectionRefused` → `ERR_REFUSED`) rather than a blanket internal code.
 
 ## 6. Transport bindings
 
 ### 6.1 MCP stdio (required for conformance)
 
 - JSON-RPC 2.0 over stdio, newline-delimited JSON (one message per line).
-- Supported methods: `initialize` (protocolVersion `2024-11-05`,
-  serverInfo `{name: "nc-tools", version: <semver>}`), `notifications/initialized`
-  (no response), `tools/list` (each tool has `name`, `description`,
-  `inputSchema` — a JSON Schema object), `tools/call`
-  (`{name, arguments}` → `{content: [{type:"text", text}], isError}`).
+- **Version negotiation**: `initialize` responds with the client's requested
+  `protocolVersion` when supported (`2025-11-25`, `2025-06-18`, `2025-03-26`,
+  `2024-11-05`, `2024-10-07`), otherwise with the latest supported revision —
+  byte-compatible with the reference SDK server. `serverInfo` is
+  `{name: "nc-tools", version: <semver>}`.
+- **Revisions >= `2025-06-18`** additionally carry
+  `structuredContent` on successful `tools/call` results (an object equal to
+  the structured result); older revisions stay text-only.
+- Supported methods: `notifications/initialized` (no response), `tools/list`
+  (each tool has `name`, `description`, `inputSchema` — a JSON Schema object),
+  `tools/call` (`{name, arguments}` →
+  `{content: [{type:"text", text}], isError}`), `ping`.
+- **Concurrency**: each `tools/call` executes on its own worker; responses are
+  correlated by JSON-RPC id and may interleave with other responses and
+  notifications. One long call never blocks another.
+- **Cancellation**: `notifications/cancelled` with the in-flight request id
+  stops the call cooperatively — wait loops (proc.spawn/runBounded, fs.watch,
+  search scans, test.run, git.*, pkg/child runs, and all `batch.execute`
+  sub-calls, which inherit the parent's flag) kill their children and answer
+  `ERR_CANCELLED`. Cooperative means the next poll: a call acks within its
+  loop interval (fs.watch: `intervalMs`), plus the one-time embedder load on
+  a cold server. Closing stdin (EOF) arms the same
+  shutdown path for everything in flight. The server still sends a structured
+  `ERR_CANCELLED` response for the cancelled request; per the spec a sender
+  SHOULD ignore responses arriving after cancellation, so clients may drop it.
+- **Progress**: when a call carries `_meta.progressToken`, long operations
+  emit `notifications/progress` for it.
 - **Tool-name aliases**: `tools/call` accepts the dotted surface name plus
   two wire forms: single-underscore (`fs_stat`) and double-underscore
   (`fs__stat` — what agent loops emit for providers that forbid dotted
@@ -180,3 +241,81 @@ means operationally: the suite never inspects the implementation.
 
 Hooks (chaos) and batch nesting depth>1 are implementation-level features;
 the protocol requires only that they do not break the specified invariants.
+
+### 3.1 Tool-surface evolution (Dr. Invi wave)
+
+As of this wave, the surface is **81 tools** (62 → 63 → 72 → 74 → 75 → 77 → 78 → 79 → 80 → 81 with the six inventions). One additive tool:
+
+- `sys.snapshotDiff` — diff two snapshots: what files were added, removed, or
+  modified between them, plus byte totals. The review gate before a rollback.
+
+Existing tools gained NEW arguments (all additive — strict-untyped callers
+that omit them behave identically to before):
+
+| Tool | New argument | Behavior |
+|---|---|---|
+| `fs.read` | — (reader rewritten to stream) | no longer loads whole file; binary detection, single-pass digest |
+| `fs.write`/`writeMany` | `previousHash` in result | crash-safe atomic write via tmp+fsync+rename |
+| `fs.readMany` | — (now parallel) | reads files concurrently, order preserved |
+| `search.grep` | `contextBefore`, `contextAfter`, `fileType`, `fixedString` | context lines, extension filter, literal search |
+| `search.semantic` | — (chunk-level) | returns `symbol`/`lineStart`/`lineEnd` per hit |
+| `patch.apply` | `fuzzy` | survives whitespace drift; adds `nearestDiff` hint |
+| `code.symbols` | `withBody` | returns `endLine`/`doc`/`body` spans |
+| `text.diff` | `wordLevel` | word-level `wordSegments` |
+| `sys.rollback` | `paths` | partial rollback (restore only selected paths) |
+| `batch.execute` | `dependsOn` | parallel DAG execution |
+
+### 3.2 Agent coordination layer
+
+The **77-tool** surface now includes a full multi-agent coordination layer
+(`agent.*`) — the capability that was missing when several agents worked the
+same workspace anonymously and blind to each other. State is on-disk and
+cross-process, so parallel servers sharing a workspace all see it:
+
+- `.nc-tools/agents.jsonl` — roster: every agent identity + state
+- `.nc-tools/agent-messages.jsonl` — inter-agent noticeboard
+- `.nc-tools/locks.jsonl` — advisory file locks
+
+| Tool | What it does |
+|---|---|
+| `agent.register` | Mint or resume an identity. `{agentId}` restores a known id (crash/compaction continuation); absent = resume this session's agent or mint `agent-<n>` (chronological). |
+| `agent.list` | Chronological roster: id, name, sid, createdAt, lastSeen, status, task. Newest-first. |
+| `agent.heartbeat` | Update `{status, task}` + lastSeen so the roster stays live. |
+| `agent.status` | Coordination snapshot: who's here, what each is doing, active locks, whether YOU are locked out of a path, recent messages. The "look around before you start" tool. |
+| `agent.post` | Write to the noticeboard. `{to}` = direct message, omit = broadcast. `kind` = note\|question\|request\|handoff\|bug\|hold\|resume. |
+| `agent.messages` | Read messages (filter by to/from/kind, newest-first). |
+| `agent.lock` | Advisory lock on a path; `holdMs` auto-releases even on crash (default 10 min). |
+| `agent.unlock` | Release a lock you hold. Won't steal another's live lock. |
+| `agent.compact` | Record a compaction checkpoint for this agent (summary + nextHint); agent.resume later follows it |
+| `agent.resume` | Follow the most recent compact checkpoint: re-registers the same agentId, returns last summary + nextHint |
+| `agent.peers` | List agents on OTHER workspaces from the global index (~/.nc-tools/agents.jsonl, override NCTOOLS_AGENT_HOME) |
+| `agent.locks` | List active locks + expiry. Call before editing. |
+
+**Identity + continuity (crash/compaction):**
+- A client sends `agentId` in MCP `initialize`'s `clientInfo`; the kernel binds
+  that id so a restart keeps the same identity + history.
+- `agent.register {agentId}` resumes; a known id is honored, not renumbered.
+- No `agentId`: same session (by `sid`) resumes; a new session mints the next
+  chronological `agent-<n>`. Sids are now counter-unique so two servers in one
+  process never collide onto one identity.
+
+**Conflict + awareness:** agents call `agent.status` on entry, `agent.lock`
+before editing a shared file, `agent.locks` before writing, and `agent.post`
+to broadcast bugs/holds/handoffs — so agents that never met can still see and
+coordinate through the shared workspace state.
+
+### 3.3 Inventions wave (code.graph, fs.watch, net.research, net.contradict, sys.replay, proc.diff)
+
+The **81-tool** surface adds six tools no normal developer invented. Each is
+machine-proven (unit tests + live black-box proofs). Surface history:
+75 (side-channel wave) → 77 (net.research + net.contradict) → 78 (sys.replay)
+→ 79 (proc.diff) → 80 (code.graph) → 81 (fs.watch).
+
+| Tool | What it does | Why it's novel |
+|---|---|---|
+| `net.research` | Multi-hop conductor: search → fetch top N → extract query-relevant span → verify → cite in ONE call. Returns answer + grounded sources + confidence. | Chains 5 primitives instead of 5 round-trips. Live: C inventor → 2/3 grounded, conf 0.667. |
+| `net.contradict` | Adversarial evidence: search the claim AND its negation, classify supporting/contradicting, verdict confirmed\|contested\|unsupported\|insufficient. | Engines can't answer "why might this be wrong" — the embedder does. Live: Rust-faster-than-Go → contested (3 vs 3, real counter-evidence). |
+| `sys.replay` | Replay journal entries as tool calls. dryRun=true (default) shows what would run, no side effects; dryRun=false re-executes and diffs fresh vs recorded. | The journal was write-only; now it's a reproducible instruction log. Live: re-ran an fs.write, diverged: 0. |
+| `proc.diff` | Runtime process-tree diff: capture-run-capture around a command, or diff two stored snapshots. Started/stopped/changed by pid. | proc.list is a snapshot; this answers "what did this command spawn". Live: captured 409, run-node surfaced cmd/conhost with 73 changed. |
+| `code.graph` | Cross-file reference graph WITHOUT a language server: who calls whom, callerFile+line+kind. `callees=X` (callers-of) / `callers=X` (calls-from) filters. | Name-resolution within scope (brace/indent spans, word-boundary refs). Live: `callees=my_agent_id` → real call sites in coordination.rs. |
+| `fs.watch` | Semantic file watch: polls a file, embeds content, returns ONLY on meaning-cross-threshold (cos < 0.995) — whitespace/comment edits stay silent. | proc.watch re-runs on bytes; this watches semantics. 10× fewer rebuilds during formatting. |

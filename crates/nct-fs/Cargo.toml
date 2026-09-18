@@ -6,6 +6,7 @@ description = "nc-tools fs/patch/search/snapshot tool families"
 
 [dependencies]
 nct-core = { path = "../nct-core" }
+nct-semantic = { path = "../nct-semantic" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
@@ -14,6 +15,9 @@ regex = { workspace = true }
 fancy-regex = { workspace = true }
 dunce = { workspace = true }
 pathdiff = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [lints]
 workspace = true

@@ -27,8 +27,16 @@ export function spawnServer(root) {
   child.stderr.on('data', () => {}); // startup banner
   let seq = 0;
   const pending = new Map();
+  // Line reassembly: one JSON response is ONE stdout line, but a 500KB+
+  // response (a full web page) spans many 'data' chunks — without a carry
+  // buffer the tail chunks never parse and the call looks like a timeout.
+  let carry = '';
   child.stdout.on('data', (buf) => {
-    for (const line of buf.toString('utf8').split('\n')) {
+    carry += buf.toString('utf8');
+    let idx;
+    while ((idx = carry.indexOf('\n')) >= 0) {
+      const line = carry.slice(0, idx);
+      carry = carry.slice(idx + 1);
       const t = line.trim();
       if (!t) continue;
       let msg;
@@ -39,7 +47,8 @@ export function spawnServer(root) {
   });
   const rpc = (method, params) => new Promise((resolvePromise, rejectPromise) => {
     const id = ++seq;
-    const timer = setTimeout(() => rejectPromise(new Error(`${method} timeout`)), 30_000);
+    // rpc ceiling: 30s covers every kernel op; live-net waves override via env
+    const timer = setTimeout(() => rejectPromise(new Error(`${method} timeout`)), Number(process.env.NCTOOLS_RPC_TIMEOUT_MS) || 30_000);
     pending.set(id, (m) => { clearTimeout(timer); resolvePromise(m); });
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
   });

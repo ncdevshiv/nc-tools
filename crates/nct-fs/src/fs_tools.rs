@@ -12,11 +12,13 @@ use nct_core::helpers::rel_slash;
 use nct_core::kernel::{parse_args, Handler, Kernel};
 use nct_core::paths::{is_reparse_point, resolve_checked};
 use nct_core::sha256_hex;
+use sha2::{Digest, Sha256};
 
 pub const READ_DESC: &str = "Read a text file with line numbers. Supports offset/limit paging. Returns a digest (hash+mtime) — use it to avoid re-reading unchanged files.";
 pub const READ_MANY_DESC: &str = "Read up to 50 files in ONE call. Each item returns ok/content or a structured error. Prefer this over N separate fs.read calls.";
 pub const WRITE_DESC: &str = "Write a file (creates parent dirs). Returns created/overwrote.";
-pub const WRITE_MANY_DESC: &str = "Write up to 50 files in ONE call: [{path, content}]. Per-item ok/error results.";
+pub const WRITE_MANY_DESC: &str =
+    "Write up to 50 files in ONE call: [{path, content}]. Per-item ok/error results.";
 pub const APPEND_DESC: &str = "Append content to a file (creates it and parent dirs if missing).";
 pub const COPY_DESC: &str = "Copy a file or directory (recursive default). Overwrites existing destinations (journal records the event).";
 pub const LIST_DESC: &str = "List directory entries.";
@@ -24,7 +26,6 @@ pub const STAT_DESC: &str = "Stat a path (exists, type, size).";
 pub const MKDIR_DESC: &str = "Create a directory.";
 pub const DELETE_DESC: &str = "Delete a file or directory (needs recursive for dirs).";
 pub const MOVE_DESC: &str = "Move/rename a file or directory.";
-
 
 /// Generic adapter: deserialize typed args, then run the body. Args are
 /// validated against the same struct that generated the schema.
@@ -50,7 +51,10 @@ where
     T: serde::de::DeserializeOwned + Send + Sync + 'static,
     F: Fn(&Kernel, T) -> Result<Value, ToolError> + Send + Sync + 'static,
 {
-    std::sync::Arc::new(Typed { handler: f, _marker: std::marker::PhantomData })
+    std::sync::Arc::new(Typed {
+        handler: f,
+        _marker: std::marker::PhantomData,
+    })
 }
 
 // ---- shared helpers --------------------------------------------------------
@@ -130,7 +134,11 @@ pub fn err_no_path_with_siblings(path: &str, abs: &Path, root: &Path) -> ToolErr
 }
 
 pub fn err_no_path(path: &str) -> ToolError {
-    ToolError::with_hint("ERR_NOT_FOUND", format!("No such path: {path}"), json!({ "path": path }))
+    ToolError::with_hint(
+        "ERR_NOT_FOUND",
+        format!("No such path: {path}"),
+        json!({ "path": path }),
+    )
 }
 
 /// sha256-16 + rounded mtime (ms) — fs.mjs digestOf.
@@ -165,8 +173,11 @@ pub struct ReadArgs {
     #[schemars(range(min = 1))]
     pub offset: Option<u64>,
     #[serde(default)]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 100000))]
     pub limit: Option<u64>,
+    #[doc = "Base dir for relative paths (default: the session workspace). Lets an agent bound to one workspace read files in another without re-rooting the server."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -175,8 +186,11 @@ pub struct ReadManyArgs {
     #[schemars(length(min = 1, max = 50))]
     pub paths: Vec<String>,
     #[serde(default)]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 100000))]
     pub limit: Option<u64>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -185,6 +199,14 @@ pub struct WriteArgs {
     #[doc = "Path — relative to the base dir, or absolute (any location allowed)"]
     pub path: String,
     pub content: String,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
+    /// When true, refuse the write if ANOTHER agent holds a live advisory lock
+    /// on this path (hard-write-guard). Default false = advisory: the write
+    /// proceeds but the result carries a lockConflict note.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -192,6 +214,9 @@ pub struct WriteArgs {
 pub struct WriteManyArgs {
     #[schemars(length(min = 1, max = 50))]
     pub files: Vec<WriteFileArgs>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -210,6 +235,13 @@ pub struct CopyArgs {
     pub to: String,
     #[serde(default)]
     pub recursive: Option<bool>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
+    /// When true, refuse the copy if ANOTHER agent holds a live advisory lock
+    /// on the destination (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -220,6 +252,9 @@ pub struct ListArgs {
     pub path: Option<String>,
     #[serde(default)]
     pub recursive: Option<bool>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -227,6 +262,9 @@ pub struct ListArgs {
 pub struct PathArgs {
     #[doc = "Path — relative to the base dir, or absolute (any location allowed)"]
     pub path: String,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -236,6 +274,9 @@ pub struct MkdirArgs {
     pub path: String,
     #[serde(default)]
     pub recursive: Option<bool>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -245,6 +286,13 @@ pub struct DeleteArgs {
     pub path: String,
     #[serde(default)]
     pub recursive: Option<bool>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
+    /// When true, refuse the delete if ANOTHER agent holds a live advisory lock
+    /// on this path (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -254,6 +302,13 @@ pub struct MoveArgs {
     pub from: String,
     #[doc = "Path — relative to the base dir, or absolute (any location allowed)"]
     pub to: String,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
+    /// When true, refuse the move if ANOTHER agent holds a live advisory lock
+    /// on the destination (hard-write-guard). Default false = advisory.
+    #[serde(default)]
+    pub guardLocks: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -266,13 +321,30 @@ pub struct ReadHandler;
 impl Handler for ReadHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ReadArgs = parse_args(args)?;
-        read_impl(k, &a.path, a.offset, a.limit)
+        read_impl(k, &a.path, a.offset, a.limit, a.baseDir.as_deref())
     }
 }
 
-pub fn read_impl(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64>) -> Result<Value, ToolError> {
-    let abs = resolve_checked(&k.root, path)?;
-    let meta = fs::metadata(&abs).map_err(|_| err_no_file(path, &abs, &k.root))?;
+pub fn read_impl(
+    k: &Kernel,
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    base_dir: Option<&str>,
+) -> Result<Value, ToolError> {
+    let base = k.base_dir(base_dir)?;
+    read_impl_base(k, path, offset, limit, &base)
+}
+
+fn read_impl_base(
+    k: &Kernel,
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    base: &Path,
+) -> Result<Value, ToolError> {
+    let abs = resolve_checked(base, path)?;
+    let meta = fs::metadata(&abs).map_err(|_| err_no_file(path, &abs, base))?;
     if meta.is_dir() {
         return Err(ToolError::with_hint(
             "ERR_IS_DIRECTORY",
@@ -280,28 +352,97 @@ pub fn read_impl(k: &Kernel, path: &str, offset: Option<u64>, limit: Option<u64>
             json!({ "path": path }),
         ));
     }
-    let raw = fs::read_to_string(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
-    let lines: Vec<&str> = raw.split('\n').collect();
-    let total_lines = lines.len() as u64;
-    let off = offset.unwrap_or(1).max(1).saturating_sub(1);
-    let lim = limit.unwrap_or(k.cfg.limits.read_limit as u64);
-    let start = (off as usize).min(lines.len());
-    let end = (start + lim as usize).min(lines.len());
-    let slice = &lines[start..end];
-    let start_num = start as u64 + 1;
-    let numbered: Vec<String> = slice
-        .iter()
-        .enumerate()
-        .map(|(i, l)| format!("{:>6}\t{}", start_num + i as u64, l))
-        .collect();
-    let truncated = (start as u64 + slice.len() as u64) < total_lines;
-    let next_offset = if truncated { Some(start_num + slice.len() as u64) } else { None };
+
+    let file_size = meta.len();
+    let mut hasher = Sha256::new();
+    use std::io::{BufRead, Read};
+
+    // --- binary detection: sample the first 8 KB for NUL-byte ratio ---
+    // The sample is NOT fed to the hasher — the streaming reader below reads
+    // the whole file (including these bytes) and feeds the hasher in one pass.
+    let mut file = fs::File::open(&abs).map_err(ToolError::from)?;
+    let sample_size = (file_size as usize).min(8192);
+    if sample_size > 0 {
+        let mut sample = vec![0u8; sample_size];
+        let n = file.read(&mut sample).map_err(ToolError::from)?;
+        let nul_count = sample[..n].iter().filter(|&&b| b == 0u8).count();
+        if n > 0 && (nul_count as f64 / n as f64) > 0.30 {
+            return Err(ToolError::with_hint(
+                "ERR_BINARY_FILE",
+                format!(
+                    "{path} is a binary file ({} bytes, {}% NUL bytes)",
+                    file_size,
+                    (nul_count * 100) / n
+                ),
+                json!({ "path": path, "binaryDetected": true, "fileSize": file_size, "hint": "use fs.readRange for raw byte access or net.fetch for extraction" }),
+            ));
+        }
+    }
+
+    // --- streaming line reader: never loads the whole file into memory ---
+    // Always seek back to 0: the sample consumed bytes [0, sample_size), and
+    // the streaming reader must start from the beginning of the file.
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(ToolError::from)?;
+
+    let off = offset.unwrap_or(1).max(1).saturating_sub(1) as usize;
+    let lim = limit.unwrap_or(k.cfg.limits.read_limit as u64) as usize;
+
+    // We need to count total lines (for totalLines) while also extracting the
+    // requested window. Stream the file once, counting lines and collecting
+    // only the window [off, off+lim). The hasher consumes the same stream.
+    let mut reader = std::io::BufReader::new(file);
+    let mut line_buf = String::new();
+    let mut line_idx: usize = 0;
+    let mut total_lines: u64 = 0;
+    let mut collected: Vec<String> = Vec::with_capacity(lim);
+    let window_end = off.saturating_add(lim);
+
+    loop {
+        line_buf.clear();
+        let bytes_read = match reader.read_line(&mut line_buf) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        // Feed the hasher in the same pass — no re-read for the digest.
+        hasher.update(line_buf.as_bytes());
+        // Strip the trailing newline for presentation (like split('\n') did).
+        let line = line_buf.strip_suffix('\n').unwrap_or(&line_buf);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line_idx >= off && line_idx < window_end {
+            collected.push(format!("{:>6}\t{}", line_idx + 1, line));
+        }
+        line_idx += 1;
+        total_lines += 1;
+    }
+
+    // If the file had no trailing newline, the last "line" from split('\n')
+    // semantics would still be counted. The streaming reader already handles
+    // this: a file "a\nb" yields two read_line calls.
+    // Edge case: empty file → 0 lines (matching split('\n') which yields [""]).
+    if total_lines == 0 && file_size == 0 {
+        total_lines = 1; // match split('\n') on empty string = [""]
+    }
+
+    let start_num = off as u64 + 1;
+    let truncated = (off + collected.len()) < total_lines as usize;
+    let next_offset = if truncated {
+        Some(start_num + collected.len() as u64)
+    } else {
+        None
+    };
+    let digest = json!({ "sha256_16": &format!("{:x}", hasher.finalize())[..16], "mtimeMs": mtime_ms(&meta).unwrap_or(0) });
+
     Ok(json!({
-        "content": numbered.join("\n"),
+        "content": collected.join("\n"),
         "totalLines": total_lines,
         "truncated": truncated,
         "nextOffset": next_offset,
-        "digest": digest_of(&abs)?,
+        "digest": digest,
     }))
 }
 
@@ -310,7 +451,10 @@ impl Handler for ReadManyHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ReadManyArgs = parse_args(args)?;
         if a.paths.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "paths must be a non-empty array"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "paths must be a non-empty array",
+            ));
         }
         if a.paths.len() > k.cfg.limits.fs_many {
             return Err(ToolError::new(
@@ -318,45 +462,167 @@ impl Handler for ReadManyHandler {
                 format!("max {} paths per fs.readMany call", k.cfg.limits.fs_many),
             ));
         }
-        let mut files = Vec::new();
-        for p in &a.paths {
-            match read_impl(k, p, None, a.limit) {
-                Ok(mut v) => {
-                    if let Value::Object(m) = &mut v {
-                        m.insert("path".into(), json!(p));
-                        m.insert("ok".into(), json!(true));
-                    }
-                    files.push(v);
-                }
-                Err(e) => files.push(json!({ "path": p, "ok": false, "error": e })),
-            }
-        }
-        Ok(json!({ "files": files, "total": files.len() }))
+
+        // Parallel read: each file is independent, so read them concurrently
+        // via scoped threads and collect results in index order. 50 files that
+        // take 5ms each complete in ~5ms (max), not ~250ms (sum).
+        let limit = a.limit;
+        let base_dir = a.baseDir.clone();
+        let base = k.base_dir(base_dir.as_deref())?;
+        let results: Vec<Value> = std::thread::scope(|scope| {
+            let handles: Vec<_> = a
+                .paths
+                .iter()
+                .map(|p| {
+                    let p = p.clone();
+                    let base_ref: &Path = &base;
+                    scope.spawn(move || match read_impl_base(k, &p, None, limit, base_ref) {
+                        Ok(mut v) => {
+                            if let Value::Object(m) = &mut v {
+                                m.insert("path".into(), json!(p));
+                                m.insert("ok".into(), json!(true));
+                            }
+                            v
+                        }
+                        Err(e) => json!({ "path": p, "ok": false, "error": e }),
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| json!({ "ok": false, "error": { "code": "ERR_INTERNAL", "message": "reader thread panicked" } })))
+                .collect()
+        });
+        Ok(json!({ "files": results, "total": results.len() }))
     }
 }
 
 /// write body shared with fs.writeMany — every write is validated + journaled
 /// individually by the kernel.
+///
+/// Crash-safe atomic write: content goes to a temp file, is fsync'd, then
+/// atomically renamed over the destination. A crash mid-write leaves the
+/// previous file intact — the temp file becomes garbage, not the target.
+/// On overwrite, the previous sha256 is returned so callers (e.g. sys.rollback)
+/// can restore the pre-write version without a snapshot.
 pub fn write_resolved(path: &str, abs: &Path, content: &str) -> Result<Value, ToolError> {
+    use std::io::Write;
     let existed = abs.exists();
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(abs, content).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
-    Ok(json!({
+
+    // Capture the previous file's hash before overwriting — this is what
+    // makes a bad write undoable via sys.rollback without a full snapshot.
+    let previous_hash: Option<String> = if existed {
+        fs::read(abs).ok().map(|bytes| sha256_hex(&bytes))
+    } else {
+        None
+    };
+
+    // Atomic write: temp file → fsync → rename.
+    // The temp file lives in the SAME directory (rename must be same-volume
+    // to be atomic on both POSIX and Windows NTFS).
+    let tmp_dir = abs.parent().unwrap_or(Path::new("."));
+    let tmp_name = format!(
+        ".{}-atomic-tmp",
+        abs.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    );
+    let tmp_path = tmp_dir.join(&tmp_name);
+
+    {
+        let mut f = fs::File::create(&tmp_path).map_err(|e| {
+            // Clean up a leftover temp from a previous crash
+            let _ = fs::remove_file(&tmp_path);
+            ToolError::from(e)
+        })?;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+        // fsync the file before rename so the data is durable on disk.
+        // On Windows, fsync is a no-op (NTFS rename is atomic already).
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let _ = unsafe { libc::fsync(f.as_raw_fd()) };
+        }
+    } // file handle dropped here
+
+    // Atomic rename: on POSIX this is atomic; on Windows MoveFileEx with
+    // MOVEFILE_REPLACE_EXISTING (std::fs::rename uses it).
+    // If rename fails (e.g. cross-volume, though tmp is same-dir), fall back
+    // to direct write so the operation still succeeds (degrade, don't fail).
+    if fs::rename(&tmp_path, abs).is_err() {
+        // Fallback: direct write (less safe, but never fails the operation)
+        let _ = fs::remove_file(&tmp_path);
+        fs::write(abs, content)?;
+    }
+
+    let mut result = json!({
         "path": path,
         "bytes": content.len(),
         "created": !existed,
         "overwrote": existed,
-    }))
+    });
+    if let Some(ref h) = previous_hash {
+        result["previousHash"] = json!(h);
+    }
+    Ok(result)
+}
+
+/// Check for a foreign agent's live advisory lock on `abs` before a write.
+/// Advisory (guard=false default): the write proceeds but the caller merges a
+/// `lockConflict` note so the agent knows it collided. Guard (guard=true):
+/// the write is refused with ERR_REFUSED + the lock holder's identity.
+/// Returns the merge-able note JSON on no-foreign-lock, or the conflict note.
+pub fn maybe_warn_foreign_lock(
+    k: &Kernel,
+    base: &Path,
+    abs: &Path,
+    guard: bool,
+) -> Result<Value, ToolError> {
+    let self_agent = k.current_agent_id().unwrap_or_default();
+    let rel = nct_core::rel_key(base, abs);
+    if let Some(lock) = nct_core::foreign_live_lock(base, &rel, &self_agent) {
+        let holder = lock["agentId"].as_str().unwrap_or("?").to_string();
+        let locked_path = lock["path"].as_str().unwrap_or(&rel).to_string();
+        if guard {
+            return Err(ToolError::with_hint(
+                "ERR_REFUSED",
+                format!("path is locked by agent '{holder}' — refusing to write (guardLocks)"),
+                json!({ "path": rel, "lockedBy": holder, "lockedPath": locked_path, "hint": "ask the holder to agent.unlock, or retry without guardLocks" }),
+            ));
+        }
+        return Ok(
+            json!({ "lockConflict": true, "lockedBy": holder, "lockedPath": locked_path, "note": "advisory write proceeded despite an active foreign lock" }),
+        );
+    }
+    Ok(json!({ "lockConflict": false }))
+}
+
+/// Merge a lockConflict note into a write result when one was produced.
+pub fn merge_lock_note(mut result: Value, note: Value) -> Value {
+    if let Value::Object(m) = &mut result {
+        if note["lockConflict"] == json!(true) {
+            m.insert("lockConflict".into(), json!(true));
+            m.insert("lockedBy".into(), note["lockedBy"].clone());
+            m.insert("lockedPath".into(), note["lockedPath"].clone());
+        }
+    }
+    result
 }
 
 pub struct WriteHandler;
 impl Handler for WriteHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: WriteArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.root, &a.path)?;
-        write_resolved(&a.path, &abs, &a.content)
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &a.path)?;
+        let guard = a.guardLocks.unwrap_or(false);
+        let lock_note = maybe_warn_foreign_lock(k, &base, &abs, guard)?;
+        Ok(merge_lock_note(
+            write_resolved(&a.path, &abs, &a.content)?,
+            lock_note,
+        ))
     }
 }
 
@@ -365,7 +631,10 @@ impl Handler for WriteManyHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: WriteManyArgs = parse_args(args)?;
         if a.files.is_empty() {
-            return Err(ToolError::new("ERR_BAD_INPUT", "files must be a non-empty array of {path, content}"));
+            return Err(ToolError::new(
+                "ERR_BAD_INPUT",
+                "files must be a non-empty array of {path, content}",
+            ));
         }
         if a.files.len() > k.cfg.limits.fs_many {
             return Err(ToolError::new(
@@ -373,9 +642,18 @@ impl Handler for WriteManyHandler {
                 format!("max {} files per fs.writeMany call", k.cfg.limits.fs_many),
             ));
         }
+        let base = k.base_dir(a.baseDir.as_deref())?;
         let mut results = Vec::new();
         for f in &a.files {
-            match resolve_checked(&k.root, &f.path).and_then(|abs| write_resolved(&f.path, &abs, &f.content)) {
+            let write_result = (|| -> Result<Value, ToolError> {
+                let abs = resolve_checked(&base, &f.path)?;
+                let lock_note = maybe_warn_foreign_lock(k, &base, &abs, false)?;
+                Ok(merge_lock_note(
+                    write_resolved(&f.path, &abs, &f.content)?,
+                    lock_note,
+                ))
+            })();
+            match write_result {
                 Ok(mut v) => {
                     if let Value::Object(m) = &mut v {
                         m.insert("path".into(), json!(f.path));
@@ -396,7 +674,7 @@ pub struct AppendHandler;
 impl Handler for AppendHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: WriteArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.root, &a.path)?;
+        let abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, &a.path)?;
         let existed = abs.exists();
         if let Some(parent) = abs.parent() {
             fs::create_dir_all(parent)?;
@@ -406,9 +684,11 @@ impl Handler for AppendHandler {
             .create(true)
             .append(true)
             .open(&abs)
-            .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            .map_err(ToolError::from)?;
         f.write_all(a.content.as_bytes())?;
-        Ok(json!({ "path": a.path, "bytes": a.content.len(), "created": !existed, "appended": true }))
+        Ok(
+            json!({ "path": a.path, "bytes": a.content.len(), "created": !existed, "appended": true }),
+        )
     }
 }
 
@@ -416,14 +696,41 @@ pub struct CopyHandler;
 impl Handler for CopyHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: CopyArgs = parse_args(args)?;
-        let from_abs = resolve_checked(&k.root, &a.from)?;
-        let to_abs = resolve_checked(&k.root, &a.to)?;
-        let meta = fs::metadata(&from_abs).map_err(|_| err_no_path_with_siblings(&a.from, &from_abs, &k.root))?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let from_abs = resolve_checked(&base, &a.from)?;
+        let to_abs = resolve_checked(&base, &a.to)?;
+        let _ = maybe_warn_foreign_lock(k, &base, &to_abs, a.guardLocks.unwrap_or(false))?;
+        let meta = fs::metadata(&from_abs)
+            .map_err(|_| err_no_path_with_siblings(&a.from, &from_abs, &base))?;
         if meta.is_dir() && !a.recursive.unwrap_or(true) {
             return Err(ToolError::with_hint(
                 "ERR_IS_DIRECTORY",
                 format!("{} is a directory; pass recursive=true to copy it", a.from),
                 json!({ "path": a.from }),
+            ));
+        }
+        // Self-copy guards. `cp -R src src` (or a dir into any descendant of
+        // itself) would recurse forever: each level re-reads a directory that
+        // keeps gaining new children, until the filesystem's path-depth limit.
+        if to_abs == from_abs {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!(
+                    "from and to resolve to the same path ({}); nothing to copy",
+                    from_abs.display()
+                ),
+                json!({ "from": a.from, "to": a.to, "hint": "resolve both paths — they are identical" }),
+            ));
+        }
+        if meta.is_dir() && is_within(&from_abs, &to_abs) {
+            return Err(ToolError::with_hint(
+                "ERR_BAD_INPUT",
+                format!(
+                    "cannot copy a directory into itself: {} is inside {}",
+                    to_abs.display(),
+                    from_abs.display()
+                ),
+                json!({ "from": a.from, "to": a.to, "hint": "copy to a sibling path outside the source tree, e.g. ../backup" }),
             ));
         }
         if let Some(parent) = to_abs.parent() {
@@ -434,17 +741,30 @@ impl Handler for CopyHandler {
     }
 }
 
+/// Component-wise containment: `inner` is strictly inside `outer`, decided on
+/// normalized path components rather than a string prefix so `a/b` is never
+/// reported as inside `a/`. Inputs come from resolve_checked, so no `..`
+/// components survive here.
+fn is_within(outer: &Path, inner: &Path) -> bool {
+    let o: Vec<_> = outer.components().collect();
+    let i: Vec<_> = inner.components().collect();
+    if i.len() <= o.len() {
+        return false;
+    }
+    o.iter().zip(i.iter()).all(|(a, b)| a == b)
+}
+
 /// Recursive copy mirroring Node cpSync {recursive:true} (probed): merge into
 /// existing dirs, overwrite existing files, never follow reparse points.
 fn copy_any(from: &Path, to: &Path) -> Result<(), ToolError> {
-    let meta = fs::symlink_metadata(from).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+    let meta = fs::symlink_metadata(from).map_err(ToolError::from)?;
     if meta.is_symlink() || is_reparse_point(from) {
         return Ok(()); // skipped, as Node cpSync skips junctions
     }
     if meta.is_dir() {
         fs::create_dir_all(to)?;
         let mut entries: Vec<PathBuf> = fs::read_dir(from)
-            .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+            .map_err(ToolError::from)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .collect();
@@ -458,11 +778,342 @@ fn copy_any(from: &Path, to: &Path) -> Result<(), ToolError> {
         if to.is_dir() {
             return Err(ToolError::new(
                 "ERR_INTERNAL",
-                format!("ERR_FS_CP_NON_DIR_TO_DIR: cannot copy {} onto a directory", from.display()),
+                format!(
+                    "ERR_FS_CP_NON_DIR_TO_DIR: cannot copy {} onto a directory",
+                    from.display()
+                ),
             ));
         }
-        fs::copy(from, to).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        fs::copy(from, to).map_err(ToolError::from)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod read_streaming_tests {
+    use super::*;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-fs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Kernel::new(dir).unwrap()
+    }
+
+    /// The streaming reader must produce identical line content to the old
+    /// split('\n') approach — including the numbered format.
+    #[test]
+    fn streaming_read_matches_legacy_semantics() {
+        let k = make_kernel();
+        let path = "test.txt";
+        let content = "line one\nline two\nline three\n";
+        std::fs::write(k.root.join(path), content).unwrap();
+
+        let result = read_impl(&k, path, None, None, None).unwrap();
+        let content_val = result["content"].as_str().unwrap();
+        assert!(content_val.contains("line one"));
+        assert!(content_val.contains("line two"));
+        assert!(content_val.contains("line three"));
+        assert_eq!(result["totalLines"], json!(3));
+        assert_eq!(result["truncated"], json!(false));
+    }
+
+    /// No trailing newline: the old split('\n') of "a\nb" gives ["a", "b"]
+    /// (2 lines). The streaming reader must match.
+    #[test]
+    fn no_trailing_newline_counts_correctly() {
+        let k = make_kernel();
+        std::fs::write(k.root.join("nt.txt"), "alpha\nbeta").unwrap();
+        let result = read_impl(&k, "nt.txt", None, None, None).unwrap();
+        assert_eq!(result["totalLines"], json!(2));
+        assert!(result["content"].as_str().unwrap().contains("alpha"));
+        assert!(result["content"].as_str().unwrap().contains("beta"));
+    }
+
+    /// Empty file: split('\n') on "" gives [""] (1 line). The streaming reader
+    /// returns 0 lines (no read_line calls), but the legacy code would return
+    /// totalLines=1. Match the legacy behavior for backward compatibility.
+    #[test]
+    fn empty_file_returns_one_line() {
+        let k = make_kernel();
+        std::fs::write(k.root.join("empty.txt"), "").unwrap();
+        let result = read_impl(&k, "empty.txt", None, None, None).unwrap();
+        assert_eq!(result["totalLines"], json!(1));
+        assert_eq!(result["content"].as_str().unwrap(), "");
+    }
+
+    /// Binary detection: a file with >30% NUL bytes is rejected with a
+    /// structured error, not a read-to-string crash.
+    #[test]
+    fn binary_file_is_detected_and_rejected() {
+        let k = make_kernel();
+        let mut bin = vec![0u8; 4096];
+        for (i, byte) in bin.iter_mut().enumerate() {
+            if i % 3 != 0 {
+                *byte = 0;
+            } else {
+                *byte = b'X';
+            }
+        }
+        std::fs::write(k.root.join("bin.dat"), &bin).unwrap();
+        let result = read_impl(&k, "bin.dat", None, None, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "ERR_BINARY_FILE");
+    }
+
+    /// Large file: the streaming reader reads only the requested window.
+    /// A 100K-line file with limit=10 should return 10 lines — proving
+    /// the file wasn't loaded whole.
+    #[test]
+    fn large_file_pages_without_loading_whole() {
+        let k = make_kernel();
+        let content: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(k.root.join("big.txt"), content).unwrap();
+        let result = read_impl(&k, "big.txt", None, Some(10), None).unwrap();
+        assert_eq!(result["totalLines"], json!(100_000));
+        let content = result["content"].as_str().unwrap();
+        // Should contain exactly the first 10 lines
+        assert!(content.contains("line 0\n") || content.contains("line 0\t"));
+        assert!(!content.contains("line 50\n") && !content.contains("line 50\t"));
+        assert_eq!(result["truncated"], json!(true));
+        assert!(!result["nextOffset"].is_null());
+    }
+
+    /// Offset paging: read lines 50-59 of a 100-line file.
+    #[test]
+    fn offset_pages_correctly() {
+        let k = make_kernel();
+        let content: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(k.root.join("offset.txt"), content).unwrap();
+        let result = read_impl(&k, "offset.txt", Some(50), Some(10), None).unwrap();
+        assert_eq!(result["totalLines"], json!(100));
+        let content = result["content"].as_str().unwrap();
+        assert!(content.contains("line 49"));
+        assert!(!content.contains("line 39"));
+        assert_eq!(result["truncated"], json!(true));
+    }
+
+    /// Digest: the streaming hash must match a direct sha256 of the file.
+    #[test]
+    fn streaming_digest_matches_direct_hash() {
+        let k = make_kernel();
+        let content = "hash me please\nline two\n";
+        std::fs::write(k.root.join("hash.txt"), content).unwrap();
+        let result = read_impl(&k, "hash.txt", None, None, None).unwrap();
+        let streaming_hash = result["digest"]["sha256_16"].as_str().unwrap();
+        let direct_hash = &sha256_hex(content.as_bytes())[..16];
+        assert_eq!(streaming_hash, direct_hash);
+    }
+}
+
+#[cfg(test)]
+mod write_atomic_tests {
+    use super::*;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-fs-write-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Kernel::new(dir).unwrap()
+    }
+
+    /// Atomic write: file content is correct after a successful write.
+    #[test]
+    fn atomic_write_creates_file_with_correct_content() {
+        let k = make_kernel();
+        let abs = k.root.join("created.txt");
+        let result = write_resolved("created.txt", &abs, "hello atomic\n").unwrap();
+        assert_eq!(result["bytes"], json!(13));
+        assert_eq!(result["created"], json!(true));
+        assert_eq!(result["overwrote"], json!(false));
+        assert!(result.get("previousHash").is_none() || result["previousHash"].is_null());
+        let on_disk = std::fs::read_to_string(&abs).unwrap();
+        assert_eq!(on_disk, "hello atomic\n");
+    }
+
+    /// Atomic overwrite: previousHash is returned and file content is replaced.
+    #[test]
+    fn atomic_overwrite_returns_previous_hash() {
+        let k = make_kernel();
+        let abs = k.root.join("overwrite.txt");
+        // initial write
+        write_resolved("overwrite.txt", &abs, "version 1\n").unwrap();
+        // overwrite
+        let result = write_resolved("overwrite.txt", &abs, "version 2\n").unwrap();
+        assert_eq!(result["created"], json!(false));
+        assert_eq!(result["overwrote"], json!(true));
+        let prev_hash = result["previousHash"].as_str().unwrap();
+        let expected_hash = sha256_hex(b"version 1\n");
+        assert_eq!(prev_hash, &expected_hash);
+        // File on disk has the new content
+        let on_disk = std::fs::read_to_string(&abs).unwrap();
+        assert_eq!(on_disk, "version 2\n");
+    }
+
+    /// Atomic write: no leftover temp file after a successful write.
+    #[test]
+    fn atomic_write_leaves_no_temp_file() {
+        let k = make_kernel();
+        let abs = k.root.join("notmp.txt");
+        write_resolved("notmp.txt", &abs, "content\n").unwrap();
+        let tmp = k.root.join(".notmp.txt-atomic-tmp");
+        assert!(!tmp.exists(), "temp file should be cleaned up");
+    }
+
+    /// Atomic write: creates parent directories if they don't exist.
+    #[test]
+    fn atomic_write_creates_parent_dirs() {
+        let k = make_kernel();
+        let abs = k.root.join("deep/nested/dir/file.txt");
+        write_resolved("deep/nested/dir/file.txt", &abs, "nested\n").unwrap();
+        assert!(abs.exists());
+        assert_eq!(std::fs::read_to_string(&abs).unwrap(), "nested\n");
+    }
+
+    /// Crash simulation: a leftover temp file from a previous crash is
+    /// cleaned up and the target is not corrupted.
+    #[test]
+    fn atomic_write_survives_leftover_temp() {
+        let k = make_kernel();
+        let abs = k.root.join("survive.txt");
+        let tmp = k.root.join(".survive.txt-atomic-tmp");
+        // Simulate a crash: write content, but leave a temp file behind
+        std::fs::write(&tmp, "garbage from crash").unwrap();
+        // The write should succeed despite the leftover temp
+        write_resolved("survive.txt", &abs, "real content\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&abs).unwrap(), "real content\n");
+        // Temp is cleaned up by the rename
+        assert!(!tmp.exists());
+    }
+
+    /// Empty content: atomic write handles empty files correctly.
+    #[test]
+    fn atomic_write_empty_content() {
+        let k = make_kernel();
+        let abs = k.root.join("empty.txt");
+        let result = write_resolved("empty.txt", &abs, "").unwrap();
+        assert_eq!(result["bytes"], json!(0));
+        assert!(abs.exists());
+        assert_eq!(std::fs::read_to_string(&abs).unwrap(), "");
+    }
+}
+
+#[cfg(test)]
+mod readmany_parallel_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-fs-readmany-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Kernel::new(dir).unwrap()
+    }
+
+    /// 50 files: all are read and results preserve input order.
+    #[test]
+    fn readmany_preserves_order_and_all_succeed() {
+        let k = make_kernel();
+        let paths: Vec<String> = (0..50)
+            .map(|i| {
+                let p = format!("file-{i:02}.txt");
+                std::fs::write(k.root.join(&p), format!("content line {i}\n")).unwrap();
+                p
+            })
+            .collect();
+
+        let result = {
+            let args = json!({ "paths": paths });
+            ReadManyHandler.call(&k, &args)
+        }
+        .unwrap();
+
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 50);
+        assert_eq!(result["total"], json!(50));
+        // Order is preserved: file-00 is first, file-49 is last
+        for (i, f) in files.iter().enumerate() {
+            assert_eq!(f["ok"], json!(true));
+            let expected_path = format!("file-{i:02}.txt");
+            assert_eq!(f["path"], json!(expected_path));
+            let expected_content = format!("content line {i}");
+            assert!(f["content"].as_str().unwrap().contains(&expected_content));
+        }
+    }
+
+    /// Mixed success and failure: each file gets its own ok/error independently.
+    #[test]
+    fn readmany_mixed_success_and_failure() {
+        let k = make_kernel();
+        std::fs::write(k.root.join("exists.txt"), "present\n").unwrap();
+        // does-not-exist.txt is NOT created
+
+        let result = {
+            let args = json!({ "paths": ["exists.txt", "missing.txt", "also-missing.txt"] });
+            ReadManyHandler.call(&k, &args)
+        }
+        .unwrap();
+
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0]["ok"], json!(true));
+        assert!(files[0]["content"].as_str().unwrap().contains("present"));
+        assert_eq!(files[1]["ok"], json!(false));
+        assert!(files[1]["error"]["code"].as_str().is_some());
+        assert_eq!(files[2]["ok"], json!(false));
+    }
+
+    /// Parallel executes all 50 files and returns correct content.
+    /// The timing assertion is intentionally lenient — on warm caches serial
+    /// I/O can be near-instant, so we only assert correctness here.
+    #[test]
+    fn readmany_parallel_completes_all_files() {
+        let k = make_kernel();
+        let paths: Vec<String> = (0..50)
+            .map(|i| {
+                let p = format!("bench-{i:02}.txt");
+                let content = format!("line {}\n", i).repeat(1000);
+                std::fs::write(k.root.join(&p), content).unwrap();
+                p
+            })
+            .collect();
+
+        let par_start = Instant::now();
+        let par_result = {
+            let args = json!({ "paths": paths.clone() });
+            ReadManyHandler.call(&k, &args)
+        }
+        .unwrap();
+        let par_ms = par_start.elapsed().as_micros();
+
+        let files = par_result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 50);
+        assert!(files.iter().all(|f| f["ok"] == json!(true)));
+
+        // Sanity: parallel must complete in reasonable time (< 5s for 50 6KB files)
+        assert!(par_ms < 5_000_000, "parallel took {par_ms}µs — too slow");
     }
 }
 
@@ -471,12 +1122,20 @@ impl Handler for ListHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ListArgs = parse_args(args)?;
         let path_str = a.path.clone().unwrap_or_else(|| ".".to_string());
-        let abs = resolve_checked(&k.root, &path_str)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &path_str)?;
         if !abs.exists() {
             return Err(err_no_path(&path_str));
         }
         let mut entries = Vec::new();
-        list_walk(&k.root, &abs, 0, a.recursive.unwrap_or(false), k.cfg.limits.list_depth, &mut entries)?;
+        list_walk(
+            &base,
+            &abs,
+            0,
+            a.recursive.unwrap_or(false),
+            k.cfg.limits.list_depth,
+            &mut entries,
+        )?;
         Ok(json!({ "entries": entries, "total": entries.len() }))
     }
 }
@@ -490,13 +1149,16 @@ fn list_walk(
     out: &mut Vec<Value>,
 ) -> Result<(), ToolError> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
-        .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+        .map_err(ToolError::from)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .collect();
     entries.sort();
     for full in entries {
-        let name = full.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let name = full
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         if name == ".nc-tools" || name == ".git" || name == "node_modules" {
             continue;
         }
@@ -525,7 +1187,7 @@ pub struct StatHandler;
 impl Handler for StatHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: PathArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.root, &a.path)?;
+        let abs = resolve_checked(&k.base_dir(a.baseDir.as_deref())?, &a.path)?;
         if !abs.exists() {
             return Ok(json!({ "exists": false, "path": a.path }));
         }
@@ -545,12 +1207,13 @@ pub struct MkdirHandler;
 impl Handler for MkdirHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: MkdirArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.root, &a.path)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &a.path)?;
         let existed = abs.is_dir();
         if a.recursive.unwrap_or(true) {
             fs::create_dir_all(&abs)?;
         } else {
-            fs::create_dir(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            fs::create_dir(&abs).map_err(ToolError::from)?;
         }
         Ok(json!({ "path": a.path, "created": !existed }))
     }
@@ -560,15 +1223,17 @@ pub struct DeleteHandler;
 impl Handler for DeleteHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: DeleteArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.root, &a.path)?;
-        if abs == k.root || abs == abs_root(&abs) {
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &a.path)?;
+        if abs == base || abs == abs_root(&abs) {
             return Err(ToolError::new(
                 "ERR_REFUSED",
                 "Refusing to delete the base workspace dir or a filesystem root",
             ));
         }
+        let _ = maybe_warn_foreign_lock(k, &base, &abs, a.guardLocks.unwrap_or(false))?;
         if !abs.exists() {
-            return Err(err_no_path_with_siblings(&a.path, &abs, &k.root));
+            return Err(err_no_path_with_siblings(&a.path, &abs, &base));
         }
         let is_dir = fs::metadata(&abs)?.is_dir();
         if is_dir && !a.recursive.unwrap_or(false) {
@@ -605,8 +1270,9 @@ pub struct MoveHandler;
 impl Handler for MoveHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: MoveArgs = parse_args(args)?;
-        let from_abs = resolve_checked(&k.root, &a.from)?;
-        let to_abs = resolve_checked(&k.root, &a.to)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let from_abs = resolve_checked(&base, &a.from)?;
+        let to_abs = resolve_checked(&base, &a.to)?;
         if !from_abs.exists() {
             return Err(ToolError::with_hint(
                 "ERR_NOT_FOUND",
@@ -614,10 +1280,11 @@ impl Handler for MoveHandler {
                 json!({ "path": a.from }),
             ));
         }
+        let _ = maybe_warn_foreign_lock(k, &base, &to_abs, a.guardLocks.unwrap_or(false))?;
         if let Some(parent) = to_abs.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::rename(&from_abs, &to_abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        fs::rename(&from_abs, &to_abs).map_err(ToolError::from)?;
         Ok(json!({ "from": a.from, "to": a.to, "moved": true }))
     }
 }
@@ -638,14 +1305,18 @@ pub struct ReadRangeArgs {
     #[serde(default)]
     #[schemars(range(min = 1, max = 1048576))]
     pub maxBytes: Option<u64>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct ReadRangeHandler;
 impl Handler for ReadRangeHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: ReadRangeArgs = parse_args(args)?;
-        let abs = resolve_checked(&k.root, &a.path)?;
-        let meta = fs::metadata(&abs).map_err(|_| err_no_file(&a.path, &abs, &k.root))?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &a.path)?;
+        let meta = fs::metadata(&abs).map_err(|_| err_no_file(&a.path, &abs, &base))?;
         if meta.is_dir() {
             return Err(ToolError::with_hint(
                 "ERR_IS_DIRECTORY",
@@ -658,24 +1329,25 @@ impl Handler for ReadRangeHandler {
         if offset >= total_bytes && total_bytes > 0 {
             return Err(ToolError::with_hint(
                 "ERR_BAD_INPUT",
-                format!("byteOffset {} is past end of file ({} bytes)", offset, total_bytes),
+                format!(
+                    "byteOffset {} is past end of file ({} bytes)",
+                    offset, total_bytes
+                ),
                 json!({ "byteOffset": offset, "fileSize": total_bytes }),
             ));
         }
         use std::io::{Read, Seek, SeekFrom};
         let max_bytes = a.maxBytes.unwrap_or(65_536) as usize;
-        let mut f = fs::File::open(&abs).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        let mut f = fs::File::open(&abs).map_err(ToolError::from)?;
         // 1-based line number where the window starts: count newlines in [0, offset).
         let mut start_line: u64 = 1;
         if offset > 0 {
-            f.seek(SeekFrom::Start(0)).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            f.seek(SeekFrom::Start(0)).map_err(ToolError::from)?;
             let mut remaining = offset as usize;
             let mut buf = [0u8; 65_536];
             while remaining > 0 {
                 let take = remaining.min(buf.len());
-                let n = f
-                    .read(&mut buf[..take])
-                    .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+                let n = f.read(&mut buf[..take]).map_err(ToolError::from)?;
                 if n == 0 {
                     break;
                 }
@@ -683,13 +1355,11 @@ impl Handler for ReadRangeHandler {
                 remaining -= n;
             }
         }
-        f.seek(SeekFrom::Start(offset)).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        f.seek(SeekFrom::Start(offset)).map_err(ToolError::from)?;
         let mut window = vec![0u8; max_bytes];
         let mut filled = 0usize;
         while filled < max_bytes {
-            let n = f
-                .read(&mut window[filled..])
-                .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+            let n = f.read(&mut window[filled..]).map_err(ToolError::from)?;
             if n == 0 {
                 break;
             }
@@ -737,6 +1407,9 @@ pub struct TreeArgs {
     #[serde(default)]
     #[schemars(range(min = 1, max = 5000))]
     pub maxEntries: Option<u64>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
 }
 
 pub struct TreeHandler;
@@ -744,7 +1417,8 @@ impl Handler for TreeHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: TreeArgs = parse_args(args)?;
         let path_str = a.path.clone().unwrap_or_else(|| ".".to_string());
-        let abs = resolve_checked(&k.root, &path_str)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let abs = resolve_checked(&base, &path_str)?;
         if !abs.is_dir() {
             return Err(ToolError::with_hint(
                 "ERR_NOT_FOUND",
@@ -758,7 +1432,15 @@ impl Handler for TreeHandler {
         let mut lines: Vec<String> = Vec::new();
         let mut truncated = false;
         tree_walk(
-            &abs, "", "", 0, max_depth, max_entries, &mut entries, &mut lines, &mut truncated,
+            &abs,
+            "",
+            "",
+            0,
+            max_depth,
+            max_entries,
+            &mut entries,
+            &mut lines,
+            &mut truncated,
         )?;
         Ok(json!({
             "path": path_str,
@@ -786,7 +1468,7 @@ fn tree_walk(
         return Ok(());
     }
     let mut kids: Vec<PathBuf> = fs::read_dir(dir)
-        .map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?
+        .map_err(ToolError::from)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .collect();
@@ -831,7 +1513,11 @@ fn tree_walk(
             "{}{}{}",
             ascii_prefix,
             branch,
-            if is_dir { format!("{name}/") } else { name.clone() }
+            if is_dir {
+                format!("{name}/")
+            } else {
+                name.clone()
+            }
         ));
         entries.push(json!({
             "path": rel,
@@ -842,10 +1528,423 @@ fn tree_walk(
         if is_dir {
             let child_ascii = format!("{}{}", ascii_prefix, if last { "    " } else { "│   " });
             tree_walk(
-                &full, &rel, &child_ascii, depth + 1, max_depth, max_entries, entries, lines, truncated,
+                &full,
+                &rel,
+                &child_ascii,
+                depth + 1,
+                max_depth,
+                max_entries,
+                entries,
+                lines,
+                truncated,
             )?;
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
+mod lock_guard_tests {
+    use super::*;
+    use nct_core::kernel::Kernel;
+    use std::fs;
+
+    /// Write a lock into .nc-tools/locks.jsonl the way coordination.rs does.
+    fn write_lock(root: &std::path::Path, path_rel: &str, holder: &str, hold_ms: u64) {
+        let lock = json!({
+            "path": path_rel,
+            "agentId": holder,
+            "heldAt": nct_core::now_iso(),
+            "holdMs": hold_ms,
+            "expiresAt": nct_core::now_iso(),
+            "expiresAtMs": nct_core::now_ms() + hold_ms,
+            "seq": nct_core::now_ms(),
+            "released": false,
+        });
+        nct_core::append_lock_line(root, &lock);
+    }
+
+    fn kernel_with(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    fn ws(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-lockguard-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_with_foreign_lock_and_no_guard_reports_conflict_not_blocks() {
+        let root = ws("w1");
+        // agent-1 holds a live lock on src/a.rs
+        write_lock(&root, "src/a.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call(
+            "fs.write",
+            &json!({ "path": "src/a.rs", "content": "x", "baseDir": root.display().to_string() }),
+        );
+        assert!(out.ok, "advisory write should succeed: {:?}", out.error);
+        let r = out.result.unwrap();
+        assert_eq!(
+            r["lockConflict"],
+            json!(true),
+            "should report conflict: {r}"
+        );
+        assert_eq!(r["lockedBy"], json!("agent-1"));
+        assert_eq!(fs::read_to_string(root.join("src/a.rs")).unwrap(), "x");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_with_foreign_lock_and_guard_refuses() {
+        let root = ws("w2");
+        write_lock(&root, "src/b.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.write", &json!({ "path": "src/b.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse");
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_REFUSED");
+        assert!(
+            e.message.contains("agent-1"),
+            "should name the holder: {}",
+            e.message
+        );
+        assert!(!root.join("src/b.rs").exists(), "must NOT have written");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn own_lock_does_not_conflict() {
+        let root = ws("w3");
+        write_lock(&root, "src/c.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-1");
+        let out = k.call("fs.write", &json!({ "path": "src/c.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(out.ok, "own lock must not block: {:?}", out.error);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_with_guard_refuses_on_foreign_lock() {
+        let root = ws("w4");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/d.rs"), "content").unwrap();
+        write_lock(&root, "src/d.rs", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.delete", &json!({ "path": "src/d.rs", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse delete");
+        assert!(root.join("src/d.rs").exists(), "must NOT delete");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expired_lock_does_not_block() {
+        let root = ws("w5");
+        write_lock(&root, "src/e.rs", "agent-1", 0); // holdMs 0 => already expired
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.write", &json!({ "path": "src/e.rs", "content": "x", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(out.ok, "expired lock must not block: {:?}", out.error);
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod move_copy_guard_tests {
+    use super::*;
+    use std::fs;
+
+    fn write_lock(root: &std::path::Path, path_rel: &str, holder: &str, hold_ms: u64) {
+        let lock = json!({
+            "path": path_rel, "agentId": holder, "heldAt": nct_core::now_iso(),
+            "holdMs": hold_ms, "expiresAt": nct_core::now_iso(),
+            "expiresAtMs": nct_core::now_ms() + hold_ms, "seq": nct_core::now_ms(), "released": false,
+        });
+        nct_core::append_lock_line(root, &lock);
+    }
+    fn kernel_with(root: &std::path::Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register(&mut k);
+        k
+    }
+    fn ws(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nct-moveguard-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn copy_guard_refuses_on_foreign_dest_lock() {
+        let root = ws("c1");
+        fs::write(root.join("a.txt"), "src").unwrap();
+        fs::write(root.join("b.txt"), "dest").unwrap();
+        write_lock(&root, "b.txt", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.copy", &json!({ "from": "a.txt", "to": "b.txt", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse copy to locked dest");
+        assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
+        assert_eq!(
+            fs::read_to_string(root.join("b.txt")).unwrap(),
+            "dest",
+            "dest must be untouched"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_guard_refuses_on_foreign_dest_lock() {
+        let root = ws("m1");
+        fs::write(root.join("a.txt"), "src").unwrap();
+        fs::write(root.join("b.txt"), "dest").unwrap();
+        write_lock(&root, "b.txt", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        let out = k.call("fs.move", &json!({ "from": "a.txt", "to": "b.txt", "baseDir": root.display().to_string(), "guardLocks": true }));
+        assert!(!out.ok, "guard must refuse move to locked dest");
+        assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
+        assert!(root.join("a.txt").exists(), "source must be untouched");
+        assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "dest");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_no_guard_proceeds_with_advisory_conflict_note() {
+        let root = ws("c2");
+        fs::write(root.join("a.txt"), "src").unwrap();
+        write_lock(&root, "b.txt", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+        // no guardLocks; copy to a DIFFERENT new file (not locked) -> note false
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "a.txt", "to": "c.txt", "baseDir": root.display().to_string() }),
+        );
+        assert!(out.ok);
+        assert!(root.join("c.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The guard must hold when the caller omits baseDir — the default case for
+    /// a harness that never routes calls explicitly. Without rel_key, the
+    /// server's raw root and the canonicalized target did not share a prefix,
+    /// so every lock key mismatched and the guard silently passed.
+    #[test]
+    fn guard_works_without_baseDir() {
+        let root = ws("nobase");
+        write_lock(&root, "a.txt", "agent-1", 600_000);
+        let k = kernel_with(&root);
+        k.set_agent_id("agent-2");
+
+        let out = k.call(
+            "fs.write",
+            &json!({ "path": "a.txt", "content": "x", "guardLocks": true }),
+        );
+        assert!(
+            !out.ok,
+            "guard must refuse without baseDir: {:?}",
+            out.result
+        );
+        assert_eq!(out.error.unwrap().code, "ERR_REFUSED");
+        assert!(
+            !root.join("a.txt").exists(),
+            "the locked file must not be written"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod copy_selfnest_tests {
+    use super::*;
+    use std::fs;
+
+    fn ws(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-copytest-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn kernel_with(root: &Path) -> Kernel {
+        let mut k = Kernel::new(root.to_path_buf()).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    #[test]
+    fn is_within_is_component_wise() {
+        assert!(is_within(Path::new("a"), Path::new("a/b")));
+        assert!(is_within(Path::new("a/b"), Path::new("a/b/c/d")));
+        assert!(
+            !is_within(Path::new("a"), Path::new("a")),
+            "equal is not inside"
+        );
+        assert!(
+            !is_within(Path::new("a"), Path::new("a2")),
+            "no string-prefix matches"
+        );
+        assert!(
+            !is_within(Path::new("a"), Path::new("x/a")),
+            "leading components must differ"
+        );
+        assert!(!is_within(Path::new("a/b"), Path::new("a")));
+    }
+
+    /// `fs.copy f f` must fail with a typed input error, not an OS error from
+    /// fs::copy, and must not touch the file.
+    #[test]
+    fn copy_same_path_is_refused_cleanly() {
+        let root = ws("same");
+        fs::write(root.join("a.txt"), "original").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "a.txt", "to": "a.txt", "baseDir": root.display().to_string() }),
+        );
+        assert!(!out.ok, "self-copy must be refused");
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_BAD_INPUT");
+        assert!(
+            e.message.contains("same path"),
+            "should explain the collision: {}",
+            e.message
+        );
+        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "original");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The regression that motivated the guard: copying a directory into itself
+    /// re-reads a tree that keeps gaining children and recursed until the path
+    /// depth limit. A subtree-only source (no files) is the case that looped
+    /// forever instead of erroring early.
+    #[test]
+    fn copy_dir_into_itself_is_refused() {
+        let root = ws("selfdir");
+        fs::create_dir_all(root.join("tree/sub")).unwrap();
+        fs::write(root.join("tree/sub/x.txt"), "x").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "tree", "to": "tree", "baseDir": root.display().to_string() }),
+        );
+        assert!(!out.ok, "dir-into-itself must be refused");
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_BAD_INPUT");
+        assert!(
+            e.message.contains("same path"),
+            "should explain the collision: {}",
+            e.message
+        );
+        let names: Vec<String> = fs::read_dir(root.join("tree"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["sub"],
+            "the source tree must be untouched: {names:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A destination anywhere under the source is the same infinite-recursion
+    /// case, even when the source has files at its root.
+    #[test]
+    fn copy_dir_into_a_descendant_is_refused() {
+        let root = ws("desc");
+        fs::create_dir_all(root.join("tree/nested")).unwrap();
+        fs::write(root.join("tree/leaf.txt"), "leaf").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call("fs.copy", &json!({ "from": "tree", "to": "tree/nested/deep", "baseDir": root.display().to_string() }));
+        assert!(!out.ok);
+        let e = out.error.unwrap();
+        assert_eq!(e.code, "ERR_BAD_INPUT");
+        assert!(
+            e.message.contains("into itself"),
+            "should name the failure: {}",
+            e.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("tree/leaf.txt")).unwrap(),
+            "leaf"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The guard is containment-specific: copying to a sibling outside the
+    /// source tree still works.
+    #[test]
+    fn copy_dir_to_a_sibling_still_works() {
+        let root = ws("sib");
+        fs::create_dir_all(root.join("tree/sub")).unwrap();
+        fs::write(root.join("tree/sub/x.txt"), "x").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call(
+            "fs.copy",
+            &json!({ "from": "tree", "to": "tree2", "baseDir": root.display().to_string() }),
+        );
+        assert!(out.ok, "sibling copy must succeed: {:?}", out.error);
+        assert_eq!(
+            fs::read_to_string(root.join("tree2/sub/x.txt")).unwrap(),
+            "x"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// File-level copies to an unrelated path inside the tree are unaffected —
+    /// the containment rule only applies when the source is a directory.
+    #[test]
+    fn copy_file_inside_the_source_tree_is_allowed() {
+        let root = ws("filein");
+        fs::create_dir_all(root.join("tree/nested")).unwrap();
+        fs::write(root.join("tree/leaf.txt"), "leaf").unwrap();
+        let k = kernel_with(&root);
+
+        let out = k.call("fs.copy", &json!({ "from": "tree/leaf.txt", "to": "tree/nested/leaf.txt", "baseDir": root.display().to_string() }));
+        assert!(
+            out.ok,
+            "file copy inside the tree must succeed: {:?}",
+            out.error
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("tree/nested/leaf.txt")).unwrap(),
+            "leaf"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}

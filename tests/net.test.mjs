@@ -106,6 +106,7 @@ const GOLD_REPORT = { cases: [], allPass: false }; // surfaced by the verifier t
 
 function startServer() {
   const counters = { etagHits: 0, etag304: 0 };
+  const mutableCited = { flipped: false };
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
     const path = url.pathname;
@@ -125,6 +126,17 @@ function startServer() {
     } else if (path === '/md') {
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'x-markdown-tokens': '42', 'content-signal': 'search=yes, ai-input=yes' });
       res.end('# Negotiated\n\nThis page served markdown because the agent asked for it.');
+    } else if (path === '/citable') {
+      // mutable page for the cite lifecycle: /mutate flips its body
+      const body = ctx.mutableCited.flipped
+        ? 'The quarterly deployment cadence changed to weekly releases in Q3 after the incident review.'
+        : 'The quarterly deployment cadence stayed monthly through Q2 with no changes after the incident review.';
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end(`<html><body><article><h1>Deployment Policy</h1><p>${body}</p></article></body></html>`);
+    } else if (path === '/mutate') {
+      ctx.mutableCited.flipped = !ctx.mutableCited.flipped;
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('mutated');
     } else if (path === '/json') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, items: [1, 2, 3] }));
@@ -153,7 +165,7 @@ function startServer() {
     }
   });
   return new Promise((resolvePromise) => {
-    server.listen(0, '127.0.0.1', () => resolvePromise({ server, port: server.address().port, counters }));
+    server.listen(0, '127.0.0.1', () => resolvePromise({ server, port: server.address().port, counters, mutableCited }));
   });
 }
 
@@ -328,5 +340,102 @@ test('extraction verifier summary is self-checking (mutated gold must FAIL)', as
     const score = f1(r.result.markdown, mutated);
     GOLD_REPORT.cases.push({ page: 'article-mutated-control', f1: score, gate: 0.9, pass: score >= 0.9 });
     assert.ok(score < 0.9, `mutated-gold negative control must fail (got F1 ${score.toFixed(3)})`);
+  });
+});
+
+// ---- W-Net-2a: citation ledger + grounding verification -----------------------
+
+test('net.cite lifecycle: create → list → idempotent re-cite → health unchanged → content-changed after mutation', async () => {
+  await withKernel(mkdtempSync(join(tmpdir(), 'nct-net-')), async (k) => {
+    const url = `${base()}/citable`;
+    const c1 = await k.call('net.cite', { url, allowPrivate: true });
+    assert.equal(c1.ok, true, JSON.stringify(c1.error));
+    assert.ok(c1.result.id, 'citation id missing');
+    assert.ok(c1.result.citation.includes('accessed '), 'citation line missing access date');
+    assert.ok(/[a-f0-9]{8}/.test(c1.result.citation), 'citation line missing hash prefix');
+    assert.equal(c1.result.duplicate, false);
+
+    const list = await k.call('net.cite', {});
+    assert.equal(list.result.total, 1);
+    assert.equal(list.result.sources[0].id, c1.result.id);
+
+    // same content again → duplicate:true, same id (idempotent)
+    const c2 = await k.call('net.cite', { url, allowPrivate: true });
+    assert.equal(c2.result.id, c1.result.id);
+    assert.equal(c2.result.duplicate, true);
+
+    // health check: source unchanged
+    const h1 = await k.call('net.cite', { id: c1.result.id, allowPrivate: true });
+    assert.equal(h1.result.health, 'unchanged', JSON.stringify(h1.result));
+
+    // silent site edit → NEW id on re-cite, health flips to changed on old id
+    const flip = await k.call('net.http', { url: `${base()}/mutate` });
+    assert.equal(flip.ok, true);
+    const c3 = await k.call('net.cite', { url, allowPrivate: true });
+    assert.notEqual(c3.result.id, c1.result.id, 'content change must produce a new citation id');
+    const h2 = await k.call('net.cite', { id: c1.result.id, allowPrivate: true });
+    assert.equal(h2.result.health, 'changed', 'old citation must detect the content change');
+
+    const list2 = await k.call('net.cite', {});
+    assert.equal(list2.result.total, 2);
+  });
+});
+
+test('net.cite unknown id → ERR_NOT_FOUND with known ids hint', async () => {
+  await withKernel(mkdtempSync(join(tmpdir(), 'nct-net-')), async (k) => {
+    const r = await k.call('net.cite', { id: 'nope1234' });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.code, 'ERR_NOT_FOUND');
+  });
+});
+
+test('net.verify grounds a true claim and rejects a contradicting one (model available)', async (t) => {
+  await withKernel(mkdtempSync(join(tmpdir(), 'nct-net-')), async (k) => {
+    // the static article fixture (never mutated by other tests)
+    const url = `${base()}/article`;
+    const grounded = await k.call('net.verify', {
+      claim: 'a fetch tool should return clean markdown with isolated main content and a confidence value',
+      url, allowPrivate: true,
+    });
+    if (grounded.error?.code === 'ERR_EMBED_UNAVAILABLE') { t.skip('no local model'); return; }
+    assert.equal(grounded.ok, true, JSON.stringify(grounded.error));
+    assert.equal(grounded.result.verdict, 'grounded', JSON.stringify(grounded.result));
+    assert.ok(grounded.result.score >= 0.5, `grounded score below gate: ${grounded.result.score}`);
+    assert.ok(grounded.result.bestSpan.length > 0, 'grounding span missing');
+    assert.ok(grounded.result.contentHash, 'content hash missing on verify');
+
+    // negative control: an unrelated claim against the same page
+    const contradicted = await k.call('net.verify', {
+      claim: 'best recipe for sourdough bread with starter ratios',
+      url, allowPrivate: true,
+    });
+    assert.equal(contradicted.ok, true);
+    assert.ok(['not-grounded', 'partial'].includes(contradicted.result.verdict),
+      `unrelated claim must not be grounded (got ${contradicted.result.verdict})`);
+
+    // verify by citation id path: grounds against the LEDGER's stored copy
+    const cite = await k.call('net.cite', { url, allowPrivate: true });
+    const byId = await k.call('net.verify', {
+      claim: 'a fetch tool should return clean markdown with isolated main content and a confidence value',
+      id: cite.result.id,
+    });
+    assert.equal(byId.ok, true, JSON.stringify(byId.error));
+    assert.equal(byId.result.verdict, 'grounded');
+  });
+});
+
+test('net.verify validates input (empty claim, missing source, unknown id)', async () => {
+  await withKernel(mkdtempSync(join(tmpdir(), 'nct-net-')), async (k) => {
+    const empty = await k.call('net.verify', { claim: '   ', url: `${base()}/citable`, allowPrivate: true });
+    assert.equal(empty.ok, false);
+    assert.equal(empty.error.code, 'ERR_BAD_INPUT');
+
+    const noSrc = await k.call('net.verify', { claim: 'something true' });
+    assert.equal(noSrc.ok, false);
+    assert.equal(noSrc.error.code, 'ERR_BAD_INPUT');
+
+    const unknown = await k.call('net.verify', { claim: 'x', id: 'ghost000' });
+    assert.equal(unknown.ok, false);
+    assert.equal(unknown.error.code, 'ERR_NOT_FOUND');
   });
 });

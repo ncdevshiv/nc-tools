@@ -169,7 +169,7 @@ test('MCP server with NCTOOLS_MCP_IDLE_MS=0 stays alive across requests', async 
     // wait well past any hypothetical 0ms idle timer, then make a second call
     await new Promise((r) => setTimeout(r, 1500));
     const second = await rpc('tools/list', {});
-    assert.ok(second.result.tools.length >= 60);
+    assert.ok(second.result.tools.length >= 62);
   } finally {
     child.kill();
     rmSync(root0, { recursive: true, force: true });

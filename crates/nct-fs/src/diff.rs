@@ -24,14 +24,39 @@ pub struct DiffArgs {
     #[serde(default)]
     #[schemars(range(min = 0, max = 50))]
     pub context: Option<u64>,
+    /// Word-level diff: when a line pair differs, run a Myers diff on WORD
+    /// tokens instead of showing the whole line as changed. Returns structured
+    /// segments (same/added/removed) for each changed line pair.
+    #[serde(default)]
+    pub wordLevel: Option<bool>,
+    #[doc = "Base dir for relative paths (default: the session workspace)."]
+    #[serde(default)]
+    pub baseDir: Option<String>,
+}
+
+/// One word-level segment of a changed line: text + whether it was added or
+/// removed (or unchanged).
+#[derive(serde::Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum SegKind {
+    Same,
+    Added,
+    Removed,
+}
+
+#[derive(serde::Serialize)]
+struct WordSeg {
+    text: String,
+    kind: SegKind,
 }
 
 pub struct DiffHandler;
 impl Handler for DiffHandler {
     fn call(&self, k: &Kernel, args: &Value) -> Result<Value, ToolError> {
         let a: DiffArgs = parse_args(args)?;
-        let left = resolve_checked(&k.root, &a.path)?;
-        let right = resolve_checked(&k.root, &a.path2)?;
+        let base = k.base_dir(a.baseDir.as_deref())?;
+        let left = resolve_checked(&base, &a.path)?;
+        let right = resolve_checked(&base, &a.path2)?;
         if !left.exists() {
             return Err(err_no_path(&a.path));
         }
@@ -39,18 +64,131 @@ impl Handler for DiffHandler {
             return Err(err_no_path(&a.path2));
         }
         let ctx = (a.context.unwrap_or(3) as usize).min(50);
-        let al = fs::read_to_string(&left).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
-        let bl = fs::read_to_string(&right).map_err(|e| ToolError::new("ERR_INTERNAL", e.to_string()))?;
+        let al = fs::read_to_string(&left).map_err(ToolError::from)?;
+        let bl = fs::read_to_string(&right).map_err(ToolError::from)?;
         let diff = build_diff(&al, &bl, ctx);
         let hunks = diff.matches("\n@@").count() + usize::from(diff.starts_with("@@"));
+        let word_level = if a.wordLevel.unwrap_or(false) {
+            word_diff(&al, &bl)
+        } else {
+            Vec::new()
+        };
         Ok(json!({
-            "left": rel_slash(&k.root, &left),
-            "right": rel_slash(&k.root, &right),
+            "left": rel_slash(&base, &left),
+            "right": rel_slash(&base, &right),
             "equal": al == bl,
             "hunks": hunks as u64,
             "diff": diff,
+            "wordLevel": a.wordLevel.unwrap_or(false),
+            "wordSegments": word_level,
         }))
     }
+}
+
+/// Word-level diff over the whole file: walk the line-level edit script, and
+/// for each line pair that differs (delete+insert paired), split both lines
+/// into word tokens and run a Myers diff, emitting Same/Added/Removed segments.
+/// Returns one entry per changed line pair.
+fn word_diff(a: &str, b: &str) -> Vec<Value> {
+    let al = line_vec(a);
+    let bl = line_vec(b);
+    if al.len() as u128 * bl.len() as u128 > 5_000_000 {
+        return Vec::new(); // too large — the line diff is the signal
+    }
+    let ops = diff_ops(&al, &bl);
+    let mut segs: Vec<Value> = Vec::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut pending_del: Option<&str> = None;
+    for op in &ops {
+        match op {
+            Op::Equal => {
+                // A delete followed by inserts at this point is paired on the
+                // next Insert. Nothing to emit on Equal.
+                i += 1;
+                j += 1;
+            }
+            Op::Delete => {
+                pending_del = Some(al[i]);
+                i += 1;
+            }
+            Op::Insert => {
+                let new_line = bl[j];
+                j += 1;
+                let old_line = pending_del.take().unwrap_or("").trim();
+                let new_trim = new_line.trim();
+                if old_line.is_empty() || new_trim.is_empty() {
+                    // pure insertion/deletion — emit plain markers
+                    if !new_trim.is_empty() {
+                        segs.push(
+                            json!({ "oldLine": old_line, "newLine": new_trim, "segments": [] }),
+                        );
+                    }
+                    continue;
+                }
+                let segs_for = word_segments(old_line, new_trim);
+                segs.push(
+                    json!({ "oldLine": old_line, "newLine": new_trim, "segments": segs_for }),
+                );
+            }
+        }
+    }
+    if let Some(del) = pending_del {
+        // Trailing deletion with no matching insert — the deleted lines are
+        // shown in the line-level diff; nothing to word-segment against.
+        let _ = del;
+    }
+    segs
+}
+
+/// Word-token Myers diff of one changed line pair → list of {text, kind}.
+fn word_segments(old: &str, new: &str) -> Vec<WordSeg> {
+    let ow: Vec<&str> = old.split_whitespace().collect();
+    let nw: Vec<&str> = new.split_whitespace().collect();
+    let ops = diff_ops(&ow, &nw);
+    let mut out: Vec<WordSeg> = Vec::new();
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut pending: Vec<&str> = Vec::new();
+    for op in &ops {
+        match op {
+            Op::Equal => {
+                if !pending.is_empty() {
+                    // flush removed words first, then show the equal word
+                    for w in pending.drain(..) {
+                        out.push(WordSeg {
+                            text: w.to_string(),
+                            kind: SegKind::Removed,
+                        });
+                    }
+                }
+                out.push(WordSeg {
+                    text: ow[i].to_string(),
+                    kind: SegKind::Same,
+                });
+                i += 1;
+                j += 1;
+            }
+            Op::Delete => {
+                pending.push(ow[i]);
+                i += 1;
+            }
+            Op::Insert => {
+                out.push(WordSeg {
+                    text: nw[j].to_string(),
+                    kind: SegKind::Added,
+                });
+                j += 1;
+            }
+        }
+    }
+    for w in pending {
+        out.push(WordSeg {
+            text: w.to_string(),
+            kind: SegKind::Removed,
+        });
+    }
+    out
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -186,8 +324,7 @@ fn build_diff(a: &str, b: &str, ctx: usize) -> String {
         let he = (e + ctx).min(tlen - 1);
         let (os, oc, ns, nc) = hunk_hdr(&tagged, hs, he);
         out.push_str(&format!("@@ -{},{} +{},{} @@\n", os, oc, ns, nc));
-        for k in hs..=he {
-            let (t, l) = tagged[k];
+        for &(t, l) in &tagged[hs..=he] {
             out.push(t);
             out.push_str(l);
             out.push('\n');
@@ -199,8 +336,8 @@ fn build_diff(a: &str, b: &str, ctx: usize) -> String {
 fn hunk_hdr(tagged: &[(char, &str)], hs: usize, he: usize) -> (usize, usize, usize, usize) {
     let mut old_before = 0usize;
     let mut new_before = 0usize;
-    for k in 0..hs {
-        match tagged[k].0 {
+    for &(tag, _) in tagged.iter().take(hs) {
+        match tag {
             ' ' => {
                 old_before += 1;
                 new_before += 1;
@@ -212,8 +349,8 @@ fn hunk_hdr(tagged: &[(char, &str)], hs: usize, he: usize) -> (usize, usize, usi
     }
     let mut old_count = 0usize;
     let mut new_count = 0usize;
-    for k in hs..=he {
-        match tagged[k].0 {
+    for &(tag, _) in &tagged[hs..=he] {
+        match tag {
             ' ' => {
                 old_count += 1;
                 new_count += 1;
@@ -223,8 +360,16 @@ fn hunk_hdr(tagged: &[(char, &str)], hs: usize, he: usize) -> (usize, usize, usi
             _ => {}
         }
     }
-    let os = if old_count == 0 { old_before } else { old_before + 1 };
-    let ns = if new_count == 0 { new_before } else { new_before + 1 };
+    let os = if old_count == 0 {
+        old_before
+    } else {
+        old_before + 1
+    };
+    let ns = if new_count == 0 {
+        new_before
+    } else {
+        new_before + 1
+    };
     (os, old_count, ns, new_count)
 }
 
@@ -245,4 +390,98 @@ fn whole_body(al: &[&str], bl: &[&str], ctx: usize) -> String {
     }
     let _ = ctx;
     out
+}
+
+#[cfg(test)]
+mod diff_word_tests {
+    use super::*;
+    use nct_core::kernel::Kernel;
+    use std::fs;
+
+    fn make_kernel() -> Kernel {
+        let dir = std::env::temp_dir().join(format!(
+            "nct-diff-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut k = Kernel::new(dir).unwrap();
+        crate::register(&mut k);
+        k
+    }
+
+    #[test]
+    fn word_level_isolates_single_word_change() {
+        let k = make_kernel();
+        fs::write(k.root.join("a.txt"), "the quick brown fox\n").unwrap();
+        fs::write(k.root.join("b.txt"), "the quick red fox\n").unwrap();
+        let args = json!({ "path": "a.txt", "path2": "b.txt", "wordLevel": true });
+        let v = DiffHandler.call(&k, &args).unwrap();
+        assert_eq!(v["equal"], json!(false));
+        let recs = v["wordSegments"].as_array().unwrap();
+        assert!(!recs.is_empty());
+        let segments = recs[0]["segments"].as_array().unwrap();
+        // Segments should include the equal words "the", "quick" and the added
+        // "red" (removed "brown" is either removed or omitted based on pairing)
+        let texts: Vec<&str> = segments
+            .iter()
+            .map(|s| s["text"].as_str().unwrap())
+            .collect();
+        assert!(texts.contains(&"the"));
+        assert!(texts.contains(&"quick"));
+        // The changed word appears: either "red" added / "brown" removed
+        assert!(segments
+            .iter()
+            .any(|s| s["text"] == json!("red") || s["text"] == json!("brown")));
+    }
+
+    #[test]
+    fn no_word_segments_when_equal() {
+        let k = make_kernel();
+        fs::write(k.root.join("a.txt"), "same content\n").unwrap();
+        fs::write(k.root.join("b.txt"), "same content\n").unwrap();
+        let args = json!({ "path": "a.txt", "path2": "b.txt", "wordLevel": true });
+        let v = DiffHandler.call(&k, &args).unwrap();
+        assert_eq!(v["equal"], json!(true));
+        assert!(v["wordSegments"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn line_diff_still_works_with_word_level() {
+        let k = make_kernel();
+        fs::write(k.root.join("a.txt"), "line one\nline two\nline three\n").unwrap();
+        fs::write(
+            k.root.join("b.txt"),
+            "line one\nline 2 changed\nline three\n",
+        )
+        .unwrap();
+        let args = json!({ "path": "a.txt", "path2": "b.txt", "wordLevel": true });
+        let v = DiffHandler.call(&k, &args).unwrap();
+        assert_eq!(v["equal"], json!(false));
+        // The line-level diff is still present
+        assert!(v["diff"].as_str().unwrap().contains("@@"));
+        // The word-level records exactly the changed middle line
+        let recs = v["wordSegments"].as_array().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert!(recs[0]["oldLine"].as_str().unwrap().contains("line two"));
+        assert!(recs[0]["newLine"]
+            .as_str()
+            .unwrap()
+            .contains("line 2 changed"));
+    }
+
+    #[test]
+    fn word_level_defaults_off() {
+        let k = make_kernel();
+        fs::write(k.root.join("a.txt"), "hello world\n").unwrap();
+        fs::write(k.root.join("b.txt"), "hello there\n").unwrap();
+        let args = json!({ "path": "a.txt", "path2": "b.txt" });
+        let v = DiffHandler.call(&k, &args).unwrap();
+        assert!(v["wordSegments"].as_array().unwrap().is_empty());
+        assert_eq!(v["wordLevel"], json!(false));
+    }
 }

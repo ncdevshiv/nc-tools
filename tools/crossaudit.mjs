@@ -64,7 +64,7 @@ function connect(root) {
 
     const list = await client.rpc('tools/list', {});
     const tools = list.result.tools;
-    const expected = ['batch.execute','code.symbols','env.get','env.list','env.set','fs.append','fs.copy','fs.delete','fs.list','fs.mkdir','fs.move','fs.read','fs.readMany','fs.readRange','fs.stat','fs.tree','fs.write','fs.writeMany','git.add','git.blame','git.branch','git.checkout','git.commit','git.diff','git.log','git.pull','git.push','git.status','net.fetch','net.http','net.probePort','net.robots','net.search','patch.apply','patch.applyMany','pkg.add','pkg.list','pkg.runScript','pkg.scripts','proc.kill','proc.list','proc.readOutput','proc.runScript','proc.spawn','proc.start','proc.status','proc.stop','proc.watch','search.files','search.grep','search.replace','search.semantic','sys.doctor','sys.journal','sys.listSnapshots','sys.rollback','sys.snapshot','sys.workspace','test.run','text.diff'];
+    const expected = ['agent.compact','agent.heartbeat','agent.list','agent.lock','agent.locks','agent.messages','agent.peers','agent.post','agent.register','agent.resume','agent.status','agent.unlock','batch.execute','code.graph','code.symbols','env.get','env.list','env.set','fs.append','fs.copy','fs.delete','fs.list','fs.mkdir','fs.move','fs.read','fs.readMany','fs.readRange','fs.stat','fs.tree','fs.watch','fs.write','fs.writeMany','git.add','git.blame','git.branch','git.checkout','git.commit','git.diff','git.log','git.pull','git.push','git.status','net.cite','net.contradict','net.fetch','net.http','net.probePort','net.research','net.robots','net.search','net.verify','patch.apply','patch.applyMany','pkg.add','pkg.list','pkg.runScript','pkg.scripts','proc.diff','proc.kill','proc.list','proc.readOutput','proc.runScript','proc.spawn','proc.start','proc.status','proc.stop','proc.watch','search.files','search.grep','search.replace','search.semantic','sys.doctor','sys.journal','sys.listSnapshots','sys.replay','sys.rollback','sys.snapshot','sys.snapshotDiff','sys.workspace','test.run','text.diff','git.stash','git.cherryPick','git.tag'];
     report('tool count matches expected list', tools.length === expected.length ? 'PASS' : 'FAIL', `expected ${expected.length}, got ${tools.length}`);
     const noSchemas = tools.filter((t) => !t.inputSchema || t.inputSchema.type !== 'object' || !t.description);
     report('all tools have schema + description', noSchemas.length === 0 ? 'PASS' : 'FAIL', noSchemas.map((t) => t.name).join(','));
@@ -113,17 +113,31 @@ function connect(root) {
     report('snapshot+rollback removes post-snapshot files', !bGone.isError && bGone.data.exists === false ? 'PASS' : 'FAIL', '');
     const batch = await sc('batch.execute', { calls: [{ tool: 'sys.workspace', args: {} }, { tool: 'fs.read', args: { path: 'nope.txt' } }] });
     report('batch.execute per-item ok/failed', !batch.isError && batch.data.ok === 1 && batch.data.failed === 1 ? 'PASS' : 'FAIL', `ok=${batch.data.ok} failed=${batch.data.failed}`);
+    await sc('env.set', { name: 'GIT_CONFIG_NOSYSTEM', value: '1' });
+    await sc('env.set', {
+      name: 'GIT_CONFIG_GLOBAL',
+      value: join(tmpdir(), `nc-crossaudit-empty-${process.pid}`),
+    });
     // git in sandbox (init + status + commit)
-    const gitInit = spawn('git', ['init'], { cwd: sandbox });
+    const gitInit = spawn('git', ['-c', 'init.templateDir=', 'init'], { cwd: sandbox });
     await new Promise((res) => gitInit.on('close', res));
-    spawn('git', ['config', 'user.email', 'audit@x'], { cwd: sandbox });
-    spawn('git', ['config', 'user.name', 'audit'], { cwd: sandbox });
+    for (const args of [
+      ['config', 'user.email', 'audit@x'],
+      ['config', 'user.name', 'audit'],
+    ]) {
+      const config = spawn('git', args, { cwd: sandbox });
+      await new Promise((res) => config.on('close', res));
+    }
     await sc('fs.write', { path: 'g.txt', content: 'x' });
     const st = await sc('git.status', {});
     report('git.status on real repo', !st.isError && Array.isArray(st.data.files) ? 'PASS' : 'FAIL', `files=${st.data.files?.length}`);
     await sc('git.add', { paths: ['g.txt'] });
     const cm = await sc('git.commit', { message: 'audit commit' });
-    report('git add+commit round-trip', !cm.isError && typeof cm.data.sha === 'string' && cm.data.sha.length >= 7 ? 'PASS' : 'FAIL', `sha=${cm.data.sha?.slice(0, 8)}`);
+    report(
+      'git add+commit round-trip',
+      !cm.isError && typeof cm.data.sha === 'string' && cm.data.sha.length >= 7 ? 'PASS' : 'FAIL',
+      cm.isError ? JSON.stringify(cm.data.error) : `sha=${cm.data.sha?.slice(0, 8)}`,
+    );
 
     // ---- 3. codebase hygiene via the tools themselves (no direct reads) ------
     // cross-check the docs claim against code surfaced through search

@@ -11,7 +11,9 @@ fn main() {
         eprintln!("NCTOOLS_LLM_BASEURL and NCTOOLS_LLM_MODEL are required");
         std::process::exit(1);
     }
-    let api_key = std::env::var("NCTOOLS_LLM_API_KEY").ok().filter(|s| !s.is_empty());
+    let api_key = std::env::var("NCTOOLS_LLM_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
     let mode = std::env::var("NCTOOLS_AGENT_MODE").unwrap_or_else(|_| "kernel".into());
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -44,7 +46,9 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
-    match run_agent(&chat, &kernel, &task, max_steps, &mode, |line| eprintln!("{line}")) {
+    match run_agent(&chat, &kernel, &task, max_steps, &mode, |line| {
+        eprintln!("{line}")
+    }) {
         Ok(report) => {
             println!(
                 "{}",

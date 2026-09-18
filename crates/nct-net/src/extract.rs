@@ -17,10 +17,18 @@ fn sel(pattern: &'static str) -> &'static Selector {
         .get_or_init(|| {
             let mut m = std::collections::HashMap::new();
             for p in [
-                "a", "a[href]", "title", "body", "article", "tr",
-                "meta[property=\"og:title\"]", "meta[property=\"og:site_name\"]",
-                "meta[name=\"author\"]", "meta[property=\"article:author\"]",
-                "meta[name=\"description\"]", "meta[property=\"og:description\"]",
+                "a",
+                "a[href]",
+                "title",
+                "body",
+                "article",
+                "tr",
+                "meta[property=\"og:title\"]",
+                "meta[property=\"og:site_name\"]",
+                "meta[name=\"author\"]",
+                "meta[property=\"article:author\"]",
+                "meta[name=\"description\"]",
+                "meta[property=\"og:description\"]",
                 "meta[property=\"article:published_time\"]",
             ] {
                 if let Ok(s) = Selector::parse(p) {
@@ -48,10 +56,32 @@ const SKIP_TAGS: &[&str] = &[
 
 /// Class/id substrings that mark boilerplate (trafilatura's discard-list spirit).
 const NOISE_WORDS: &[&str] = &[
-    "comment", "promo", "advert", "sponsor", "cookie", "banner", "related", "recommended",
-    "sidebar", "share", "social", "subscribe", "newsletter", "popup", "modal", "footer", "menu",
-    "breadcrumb", "pagination", "widget", "survey", "captcha", "advertisement", "skip-link",
-    "visually-hidden", "sr-only",
+    "comment",
+    "promo",
+    "advert",
+    "sponsor",
+    "cookie",
+    "banner",
+    "related",
+    "recommended",
+    "sidebar",
+    "share",
+    "social",
+    "subscribe",
+    "newsletter",
+    "popup",
+    "modal",
+    "footer",
+    "menu",
+    "breadcrumb",
+    "pagination",
+    "widget",
+    "survey",
+    "captcha",
+    "advertisement",
+    "skip-link",
+    "visually-hidden",
+    "sr-only",
 ];
 
 const MAX_DEPTH: usize = 40;
@@ -92,7 +122,14 @@ pub fn extract(html: &str, base: &url::Url) -> Result<Extracted, ToolError> {
         1 => articles[0],
         _ => match document.select(sel("body")).next() {
             Some(b) => b,
-            None => return Ok(Extracted { markdown: String::new(), title, links, confidence: 0.0 }),
+            None => {
+                return Ok(Extracted {
+                    markdown: String::new(),
+                    title,
+                    links,
+                    confidence: 0.0,
+                })
+            }
         },
     };
 
@@ -128,7 +165,12 @@ pub fn extract(html: &str, base: &url::Url) -> Result<Extracted, ToolError> {
         (overlap * 100.0).round() / 100.0
     };
 
-    Ok(Extracted { markdown, title, links, confidence })
+    Ok(Extracted {
+        markdown,
+        title,
+        links,
+        confidence,
+    })
 }
 
 fn word_set(s: &str) -> std::collections::HashSet<String> {
@@ -141,13 +183,19 @@ fn word_set(s: &str) -> std::collections::HashSet<String> {
 /// True when the element or an ancestor-looking attribute marks it as noise.
 fn is_noise(el: &ElementRef) -> bool {
     let v = el.value();
-    let hay = format!("{} {}", v.attr("class").unwrap_or_default(), v.attr("id").unwrap_or_default()).to_lowercase();
+    let hay = format!(
+        "{} {}",
+        v.attr("class").unwrap_or_default(),
+        v.attr("id").unwrap_or_default()
+    )
+    .to_lowercase();
     if NOISE_WORDS.iter().any(|w| hay.contains(w)) {
         return true;
     }
     if let Some(style) = v.attr("style") {
         let s = style.replace(' ', "").to_lowercase();
-        if s.contains("display:none") || s.contains("visibility:hidden") || s.contains("opacity:0;") {
+        if s.contains("display:none") || s.contains("visibility:hidden") || s.contains("opacity:0;")
+        {
             return true;
         }
     }
@@ -189,11 +237,15 @@ fn best_window(blocks: &[ElementRef]) -> (usize, usize, f64) {
         return (0, 0, 0.0);
     }
     let scores: Vec<f64> = blocks.iter().map(score_block).collect();
-    let mut best = (0usize, n.min(1), scores.first().copied().unwrap_or(0.0).max(0.0));
+    let mut best = (
+        0usize,
+        n.min(1),
+        scores.first().copied().unwrap_or(0.0).max(0.0),
+    );
     for start in 0..n {
         let mut sum = 0.0f64;
-        for end in start..n {
-            sum += scores[end];
+        for (end, score) in scores.iter().enumerate().take(n).skip(start) {
+            sum += *score;
             if sum > best.2 + f64::EPSILON {
                 best = (start, end + 1, sum);
             }
@@ -230,7 +282,11 @@ fn render_element(el: &ElementRef, depth: usize, base: &url::Url) -> String {
         "hr" => "---".to_string(),
         "blockquote" => {
             let inner = inline(el, base).trim().to_string();
-            inner.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
+            inner
+                .lines()
+                .map(|l| format!("> {l}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         }
         "pre" => code_block(el),
         "ul" | "ol" => render_list(el, depth + 1, base),
@@ -239,7 +295,10 @@ fn render_element(el: &ElementRef, depth: usize, base: &url::Url) -> String {
         // inline containers rendered in place of text when standalone
         "a" | "strong" | "b" | "em" | "i" | "code" | "small" | "sup" | "sub" => inline(el, base),
         "img" => img_markdown(el, base),
-        "figure" | "figcaption" | "details" | "summary" | "time" | "abbr" | "address" | "article" | "dt" | "dd" | "td" | "tr" | "th" | "tbody" | "thead" | "caption" => inline(el, base),
+        "figure" | "figcaption" | "details" | "summary" | "time" | "abbr" | "address"
+        | "article" | "dt" | "dd" | "td" | "tr" | "th" | "tbody" | "thead" | "caption" => {
+            inline(el, base)
+        }
         _ => inline(el, base),
     }
 }
@@ -307,11 +366,19 @@ fn inline_child(el: &ElementRef, base: &url::Url) -> String {
         }
         "strong" | "b" => {
             let text = inline(el, base).trim().to_string();
-            if text.is_empty() { String::new() } else { format!("**{text}**") }
+            if text.is_empty() {
+                String::new()
+            } else {
+                format!("**{text}**")
+            }
         }
         "em" | "i" => {
             let text = inline(el, base).trim().to_string();
-            if text.is_empty() { String::new() } else { format!("*{text}*") }
+            if text.is_empty() {
+                String::new()
+            } else {
+                format!("*{text}*")
+            }
         }
         "code" => {
             let text = el.text().collect::<String>();
@@ -324,7 +391,9 @@ fn inline_child(el: &ElementRef, base: &url::Url) -> String {
         "img" => img_markdown(el, base),
         "pre" => code_block(el),
         "ul" | "ol" => format!("\n{}", render_list(el, 1, base)),
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => format!("\n\n{}", render_element(el, MAX_DEPTH, base)),
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+            format!("\n\n{}", render_element(el, MAX_DEPTH, base))
+        }
         "p" | "div" | "section" | "blockquote" | "table" | "figure" | "article" => inline(el, base),
         _ => inline(el, base),
     }
@@ -358,11 +427,12 @@ fn code_block(el: &ElementRef) -> String {
     }
     let lang = class
         .split_whitespace()
-        .find_map(|c| c.strip_prefix("language-").or_else(|| c.strip_prefix("lang-")))
+        .find_map(|c| {
+            c.strip_prefix("language-")
+                .or_else(|| c.strip_prefix("lang-"))
+        })
         .unwrap_or("");
-    if trimmed.contains("```") {
-        format!("```\n{trimmed}\n```")
-    } else if lang.is_empty() {
+    if trimmed.contains("```") || lang.is_empty() {
         format!("```\n{trimmed}\n```")
     } else {
         format!("```{lang}\n{trimmed}\n```")
@@ -379,7 +449,11 @@ fn render_list(list: &ElementRef, depth: usize, base: &url::Url) -> String {
             continue;
         }
         index += 1;
-        let marker = if ordered { format!("{index}.") } else { "-".to_string() };
+        let marker = if ordered {
+            format!("{index}.")
+        } else {
+            "-".to_string()
+        };
         let body = inline(&li, base);
         let mut lines = body.lines();
         let first = lines.next().unwrap_or_default().trim().to_string();
@@ -461,7 +535,9 @@ fn normalize_ws(s: &str) -> String {
 /// Strip the site-name suffix agents don't need: "Page | Site" → "Page".
 /// Only cuts when the trailing segment actually matches the known site name.
 fn strip_site_suffix(title: &str, site_name: Option<&str>) -> String {
-    let Some(site) = site_name else { return title.to_string() };
+    let Some(site) = site_name else {
+        return title.to_string();
+    };
     let site = normalize_ws(site);
     if site.is_empty() {
         return title.to_string();

@@ -18,6 +18,8 @@ pub struct FetchOpts {
     pub max_redirects: usize,
     pub guard_private: bool,
     pub headers: Vec<(String, String)>,
+    /// JSON body for POST engines (Tavily/Serper)
+    pub json_body: Option<Value>,
     /// If-None-Match for cache revalidation
     pub if_none_match: Option<String>,
     pub if_modified_since: Option<String>,
@@ -46,6 +48,7 @@ impl FetchOpts {
             max_redirects: 10,
             guard_private: false,
             headers: Vec::new(),
+            json_body: None,
             if_none_match: None,
             if_modified_since: None,
         }
@@ -67,6 +70,13 @@ impl FetchOpts {
         self.headers.push((k.to_string(), v.to_string()));
         self
     }
+    /// POST with a JSON body (keyed search engines).
+    pub fn post_json(url: url::Url, body: Value) -> FetchOpts {
+        let mut o = FetchOpts::get(url);
+        o.method = "POST".into();
+        o.json_body = Some(body);
+        o
+    }
     pub fn revalidate(mut self, etag: Option<String>, modified: Option<String>) -> FetchOpts {
         self.if_none_match = etag;
         self.if_modified_since = modified;
@@ -78,24 +88,36 @@ impl FetchOpts {
 /// URL and every redirect hop are resolved and checked (fail closed).
 pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
     if opts.guard_private {
-        crate::ssrf::assert_public(opts.url.as_str())?;
+        crate::ssrf::public_socket_addrs(&opts.url)?;
     }
     let started = std::time::Instant::now();
     let mut current = opts.url.clone();
     let mut redirects: Vec<Value> = Vec::new();
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_millis(opts.timeout_ms))
-        .redirects(0)
-        .user_agent("nc-tools/1.0 (+agent; net.fetch)")
-        .build();
-
     let resp = loop {
+        let mut builder = ureq::AgentBuilder::new()
+            .timeout(Duration::from_millis(opts.timeout_ms))
+            .timeout_read(Duration::from_millis(opts.timeout_ms.min(20_000)))
+            .timeout_connect(Duration::from_secs(10))
+            .redirects(0)
+            .user_agent("nc-tools/1.0 (+agent; net.fetch)");
+        if opts.guard_private {
+            let pinned = crate::ssrf::public_socket_addrs(&current)?;
+            builder = builder.resolver(
+                move |_: &str| -> std::io::Result<Vec<std::net::SocketAddr>> { Ok(pinned.clone()) },
+            );
+        }
+        let agent = builder.build();
         let mut req = match opts.method.as_str() {
             "POST" => agent.post(current.as_str()),
             "GET" => agent.get(current.as_str()),
             "HEAD" => agent.head(current.as_str()),
-            m => return Err(ToolError::new("ERR_BAD_INPUT", format!("unsupported method: {m}"))),
+            m => {
+                return Err(ToolError::new(
+                    "ERR_BAD_INPUT",
+                    format!("unsupported method: {m}"),
+                ))
+            }
         };
         for (k, v) in &opts.headers {
             req = req.set(k, v);
@@ -107,7 +129,11 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             req = req.set("If-Modified-Since", modified);
         }
 
-        let result = req.call();
+        let result = if let Some(body) = &opts.json_body {
+            req.send_json(body.clone())
+        } else {
+            req.call()
+        };
         let response = match result {
             Ok(r) => r,
             Err(ureq::Error::Status(_code, r)) => r, // 4xx/5xx are data here
@@ -132,11 +158,17 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             if loc.is_empty() || redirects.len() >= opts.max_redirects {
                 return Err(ToolError::with_hint(
                     "ERR_NET",
-                    if loc.is_empty() { "redirect with no Location header" } else { "too many redirects" },
+                    if loc.is_empty() {
+                        "redirect with no Location header"
+                    } else {
+                        "too many redirects"
+                    },
                     json!({ "url": current.as_str(), "redirects": redirects.len() }),
                 ));
             }
-            let next = current.join(&loc).map_err(|e| ToolError::new("ERR_NET", format!("bad redirect Location: {e}")))?;
+            let next = current
+                .join(&loc)
+                .map_err(|e| ToolError::new("ERR_NET", format!("bad redirect Location: {e}")))?;
             if opts.guard_private {
                 crate::ssrf::assert_public_redirect(next.as_str(), redirects.len() + 1)?;
             }
@@ -154,7 +186,12 @@ pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
             headers.push((name, v.to_string()));
         }
     }
-    let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
 
     let content_type = header("content-type").unwrap_or_default();
     let mut raw: Vec<u8> = Vec::new();
