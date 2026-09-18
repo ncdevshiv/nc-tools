@@ -24,6 +24,8 @@ class Client {
     this.pendingId = 0;
     this.buffer = '';
     this.waiters = []; // { id, resolve, reject, timer }
+    this.rootsHandled = 0;
+    this.rootsWaiters = [];
     this.rootsResponse = null; // set BEFORE initialize to control roots/list
     this.child.stdout.on('data', (buf) => this.#onData(buf));
   }
@@ -43,6 +45,11 @@ class Client {
           ? { jsonrpc: '2.0', id: msg.id, result: this.rootsResponse }
           : { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'roots unsupported' } };
         this.child.stdin.write(JSON.stringify(resp) + '\n');
+        this.rootsHandled += 1;
+        for (const waiter of this.rootsWaiters.splice(0)) {
+          if (this.rootsHandled > waiter.previous) waiter.resolve();
+          else this.rootsWaiters.push(waiter);
+        }
         continue;
       }
       const w = this.waiters.find((x) => x.id === msg.id);
@@ -70,6 +77,11 @@ class Client {
     this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
   }
 
+  awaitRoots(previous = this.rootsHandled) {
+    if (this.rootsHandled > previous) return Promise.resolve();
+    return new Promise((resolve) => this.rootsWaiters.push({ previous, resolve }));
+  }
+
   kill() { this.child.kill(); }
 }
 
@@ -89,17 +101,18 @@ test('roots-capable client: initialize anchors the client workspace; bare calls 
   const { serverWs, clientWs } = wsDirs();
   const c = new Client(serverWs);
   try {
-    // Script the roots/list answer BEFORE initialize.
+    // Script the roots/list answer before initialize.
     c.rootsResponse = { roots: [{ uri: fileUri(clientWs), name: 'work' }] };
     const init = await c.request('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: { roots: { listChanged: true } },
       clientInfo: { name: 'roots-test-client', version: '0' },
     });
+    c.notify('notifications/initialized');
+    await c.awaitRoots();
     assert.equal(init.result.serverInfo.name, 'nc-tools');
     assert.equal(init.result.anchoring.requested, true, 'roots capability seen');
-    assert.equal(init.result.anchoring.anchored, true, 'anchor accepted');
-    assert.ok(init.result.anchoring.base.toLowerCase().includes('nc-anchoring-client'), `anchor base: ${init.result.anchoring.base}`);
+    assert.equal(init.result.anchoring.anchored, false, 'anchoring completes after initialized');
 
     // THE INCIDENT SCENARIO: bare sys.workspace (no baseDir) must now answer
     // the CLIENT workspace, not the server root the binary was spawned on.
@@ -137,6 +150,7 @@ test('non-roots client: no roots/list is sent, behavior identical to before', as
       capabilities: {},
       clientInfo: { name: 'plain-client', version: '0' },
     });
+    c.notify('notifications/initialized');
     assert.equal(init.result.anchoring.requested, false, 'no roots capability → no anchoring');
     assert.ok(init.result.anchoring.anchored === undefined);
 
@@ -163,11 +177,14 @@ test('roots/list_changed re-anchors the session mid-flight', async () => {
       capabilities: { roots: { listChanged: true } },
       clientInfo: { name: 'roots-test-client', version: '0' },
     });
-    assert.equal(init.result.anchoring.anchored, true);
+    c.notify('notifications/initialized');
+    await c.awaitRoots();
 
     // The client "moved": roots/list now returns the second workspace.
     c.rootsResponse = { roots: [{ uri: fileUri(secondWs) }] };
+    const previousRoots = c.rootsHandled;
     c.notify('notifications/roots/list_changed');
+    await c.awaitRoots(previousRoots);
     // The notification is async on the server side; poll until the anchor moved.
     let anchoredOk = false;
     for (let i = 0; i < 40 && !anchoredOk; i++) {
@@ -195,9 +212,9 @@ test('roots/list answering with a nonexistent dir: anchor refused, session stays
       capabilities: { roots: {} },
       clientInfo: { name: 'roots-bad-client', version: '0' },
     });
+    c.notify('notifications/initialized');
+    await c.awaitRoots();
     assert.equal(init.result.anchoring.requested, true);
-    assert.equal(init.result.anchoring.anchored, false, 'nonexistent root refused');
-    assert.ok(init.result.anchoring.reason);
 
     const ws = await c.request('tools/call', { name: 'sys.workspace', arguments: {} });
     const wsVal = JSON.parse(ws.result.content[0].text);

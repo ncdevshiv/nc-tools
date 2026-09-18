@@ -2,7 +2,7 @@
 // targets unless explicitly allowed. net.fetch defaults to guarded (agents
 // must not be able to probe internal networks by URL); net.http keeps raw
 // curl semantics and only guards when blockPrivate is set.
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use serde_json::json;
 
@@ -70,6 +70,27 @@ pub fn resolve_host(host: &str, port: u16) -> Result<Vec<IpAddr>, ToolError> {
         ));
     }
     Ok(addrs)
+}
+
+pub fn public_socket_addrs(url: &url::Url) -> Result<Vec<SocketAddr>, ToolError> {
+    let port = url
+        .port_or_known_default()
+        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+    let ips = match host_ip_literal(url) {
+        Some(ip) => vec![ip],
+        None => resolve_host(url.host_str().unwrap_or_default(), port)?,
+    };
+    if let Some(bad) = ips.iter().find(|ip| is_private_ip(**ip)) {
+        let host = url.host_str().unwrap_or_default();
+        return Err(private_error(
+            url.as_str(),
+            &format!("host {host} resolves to the private address {bad}"),
+        ));
+    }
+    Ok(ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect())
 }
 
 /// Guard a request target: http(s) only, resolve the host, fail closed when

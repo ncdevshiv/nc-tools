@@ -88,26 +88,26 @@ impl FetchOpts {
 /// URL and every redirect hop are resolved and checked (fail closed).
 pub fn fetch(opts: FetchOpts) -> Result<FetchOutcome, ToolError> {
     if opts.guard_private {
-        crate::ssrf::assert_public(opts.url.as_str())?;
+        crate::ssrf::public_socket_addrs(&opts.url)?;
     }
     let started = std::time::Instant::now();
     let mut current = opts.url.clone();
     let mut redirects: Vec<Value> = Vec::new();
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_millis(opts.timeout_ms))
-        // socket-level read timeout: the agent-level timeout does NOT cover
-        // body reads — a response with no content-length/transfer-encoding
-        // ("read until close") blocks read_to_string forever on a keep-alive
-        // socket (observed live: en.wikipedia.org article pages). The read
-        // timeout turns that hang into a structured ERR_TIMEOUT.
-        .timeout_read(Duration::from_millis(opts.timeout_ms.min(20_000)))
-        .timeout_connect(Duration::from_secs(10))
-        .redirects(0)
-        .user_agent("nc-tools/1.0 (+agent; net.fetch)")
-        .build();
-
     let resp = loop {
+        let mut builder = ureq::AgentBuilder::new()
+            .timeout(Duration::from_millis(opts.timeout_ms))
+            .timeout_read(Duration::from_millis(opts.timeout_ms.min(20_000)))
+            .timeout_connect(Duration::from_secs(10))
+            .redirects(0)
+            .user_agent("nc-tools/1.0 (+agent; net.fetch)");
+        if opts.guard_private {
+            let pinned = crate::ssrf::public_socket_addrs(&current)?;
+            builder = builder.resolver(
+                move |_: &str| -> std::io::Result<Vec<std::net::SocketAddr>> { Ok(pinned.clone()) },
+            );
+        }
+        let agent = builder.build();
         let mut req = match opts.method.as_str() {
             "POST" => agent.post(current.as_str()),
             "GET" => agent.get(current.as_str()),

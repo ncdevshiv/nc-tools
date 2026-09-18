@@ -4,6 +4,8 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export const tier3 = [
   // ---------- EASY: single-file, single-step ----------
@@ -93,7 +95,12 @@ export const tier3 = [
         writeFileSync(`${root}/src/app.js`, content, 'utf8');
       };
       const git = (...args) => {
-        const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+        const env = {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: join(tmpdir(), `nc-tier3-empty-${process.pid}`),
+        };
+        const r = spawnSync('git', ['-c', 'init.templateDir=', ...args], { cwd: root, env, encoding: 'utf8' });
         if (r.status !== 0) throw new Error(`git ${args[0]}: ${r.stderr}`);
         return r.stdout;
       };

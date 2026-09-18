@@ -128,6 +128,21 @@ pub fn cancelled_error(tool: &str) -> crate::errors::ToolError {
     )
 }
 
+pub fn configure_child_process(command: &mut std::process::Command) {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 /// Kill a child and its descendant tree, then reap it.
 ///
 /// `Child::kill` alone leaves grandchildren running — a test runner's per-file
@@ -147,6 +162,10 @@ pub fn kill_child_tree(child: &mut std::process::Child) {
             .stderr(std::process::Stdio::null())
             .creation_flags(crate::CREATE_NO_WINDOW)
             .status();
+    }
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
     }
     let _ = child.kill();
     let _ = child.wait();

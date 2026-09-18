@@ -3,6 +3,7 @@
 // (msedge/chrome --headless --dump-dom). Zero new dependencies — the browser
 // is preinstalled on Windows and near-universal elsewhere; if none is found
 // the fetch result degrades honestly (low confidence, no render).
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -61,8 +62,9 @@ pub fn render_dom(url: &str, allow_private: bool, timeout_ms: u64) -> Result<Str
         )
     })?;
 
-    let started = Instant::now();
-    let output = Command::new(browser)
+    let budget = timeout_ms.clamp(1, 30_000);
+    let mut command = Command::new(browser);
+    command
         .args([
             "--headless=new",
             "--disable-gpu",
@@ -74,38 +76,64 @@ pub fn render_dom(url: &str, allow_private: bool, timeout_ms: u64) -> Result<Str
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .output();
-
-    let output = match output {
-        Ok(o) => o,
-        Err(e) => {
-            return Err(ToolError::with_hint(
-                "ERR_RENDER_UNAVAILABLE",
-                format!("headless browser spawn failed: {e}"),
-                serde_json::json!({ "browser": browser.display().to_string() }),
-            ));
+        .stdin(Stdio::null());
+    nct_core::configure_child_process(&mut command);
+    let mut child = command.spawn().map_err(|e| {
+        ToolError::with_hint(
+            "ERR_RENDER_UNAVAILABLE",
+            format!("headless browser spawn failed: {e}"),
+            serde_json::json!({ "browser": browser.display().to_string() }),
+        )
+    })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolError::new("ERR_RENDER", "headless browser did not expose stdout"))?;
+    let output = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    let status = loop {
+        if nct_core::is_cancelled() {
+            nct_core::kill_child_tree(&mut child);
+            let _ = output.join();
+            return Err(nct_core::cancelled_error("net.render"));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < Duration::from_millis(budget) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                nct_core::kill_child_tree(&mut child);
+                let _ = output.join();
+                return Err(ToolError::with_hint(
+                    "ERR_TIMEOUT",
+                    format!("headless render exceeded budget ({}ms)", budget),
+                    serde_json::json!({ "url": url, "timeoutMs": budget }),
+                ));
+            }
+            Err(e) => {
+                nct_core::kill_child_tree(&mut child);
+                let _ = output.join();
+                return Err(ToolError::new(
+                    "ERR_RENDER",
+                    format!("headless browser wait failed: {e}"),
+                ));
+            }
         }
     };
-    let elapsed = started.elapsed();
-    if elapsed > Duration::from_millis(timeout_ms) || elapsed > Duration::from_secs(30) {
-        return Err(ToolError::with_hint(
-            "ERR_TIMEOUT",
-            format!(
-                "headless render exceeded budget ({}ms)",
-                elapsed.as_millis()
-            ),
-            serde_json::json!({ "url": url, "elapsedMs": elapsed.as_millis() as u64 }),
-        ));
-    }
-    if !output.status.success() && output.stdout.is_empty() {
+    let stdout = output.join().unwrap_or_default();
+    if !status.success() && stdout.is_empty() {
         return Err(ToolError::with_hint(
             "ERR_RENDER",
-            format!("headless render exited with {}", output.status),
+            format!("headless render exited with {status}"),
             serde_json::json!({ "browser": browser.display().to_string() }),
         ));
     }
-    let dom = String::from_utf8_lossy(&output.stdout).into_owned();
+    let dom = String::from_utf8_lossy(&stdout).into_owned();
     if dom.trim().is_empty() {
         return Err(ToolError::new(
             "ERR_RENDER",

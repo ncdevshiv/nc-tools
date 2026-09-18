@@ -292,6 +292,8 @@ fn main() {
     // Negotiated revision feature gate: set once at initialize, read by tool
     // workers to decide whether to emit structuredContent.
     let structured_output = Arc::new(AtomicBool::new(false));
+    let mut client_supports_roots = false;
+    let mut roots_pending = false;
 
     let stdin = std::io::stdin();
     let mut stdin_lock = stdin.lock();
@@ -321,6 +323,16 @@ fn main() {
             .unwrap_or_default()
             .to_string();
         let params = msg.get("params").cloned().unwrap_or(json!({}));
+
+        if method.is_empty() && id == json!(ROOTS_REQUEST_ID) {
+            roots_pending = false;
+            if let Some(result) = msg.get("result") {
+                if let Some(target) = roots::first_root_from_result(result) {
+                    kernel.set_default_base(&target);
+                }
+            }
+            continue;
+        }
 
         let resp = match method.as_str() {
             "initialize" => {
@@ -354,31 +366,16 @@ fn main() {
                 // Any failure here is reported in the handshake result
                 // (anchoring.requested/anchored) and NEVER fatal.
                 let client_caps = params.get("capabilities").cloned().unwrap_or(json!({}));
-                let mut anchoring = json!({ "requested": false });
-                if roots::client_supports_roots(&client_caps) {
-                    anchoring["requested"] = json!(true);
-                    match server_roots_list(&mut stdin_lock, &conn) {
-                        Some(result) => {
-                            if let Some(target) = roots::first_root_from_result(&result) {
-                                let accepted = kernel.set_default_base(&target);
-                                anchoring["anchored"] = json!(accepted);
-                                anchoring["base"] = json!(target.display().to_string());
-                                if !accepted {
-                                    anchoring["reason"] =
-                                        json!("first root is not an existing directory");
-                                }
-                            } else {
-                                anchoring["anchored"] = json!(false);
-                                anchoring["reason"] =
-                                    json!("no filesystem directory in roots/list");
-                            }
-                        }
-                        None => {
-                            anchoring["anchored"] = json!(false);
-                            anchoring["reason"] = json!("client did not answer roots/list");
-                        }
-                    }
-                }
+                client_supports_roots = roots::client_supports_roots(&client_caps);
+                let anchoring = if client_supports_roots {
+                    json!({
+                        "requested": true,
+                        "anchored": false,
+                        "reason": "waiting for notifications/initialized before roots/list",
+                    })
+                } else {
+                    json!({ "requested": false })
+                };
                 let mut result = json!({
                     "protocolVersion": negotiated,
                     "capabilities": {
@@ -389,13 +386,19 @@ fn main() {
                 result["anchoring"] = anchoring;
                 rpc_result(id, result)
             }
+            "notifications/initialized" => {
+                if client_supports_roots && !roots_pending {
+                    send_roots_list(&conn);
+                    roots_pending = true;
+                }
+                continue; // notification: no response
+            }
             "notifications/roots/list_changed" => {
                 // The client moved/changed workspaces mid-session: re-ask for
                 // roots and re-anchor the session default base.
-                if let Some(result) = server_roots_list(&mut stdin_lock, &conn) {
-                    if let Some(target) = roots::first_root_from_result(&result) {
-                        kernel.set_default_base(&target);
-                    }
+                if client_supports_roots && !roots_pending {
+                    send_roots_list(&conn);
+                    roots_pending = true;
                 }
                 continue; // notification: no response
             }
@@ -476,62 +479,14 @@ fn main() {
     kernel.run_shutdown_hooks();
 }
 
-/// Server → client request over stdio: send `roots/list`, then read lines
-/// until the response with our id arrives. Client REQUESTS interleaved before
-/// the response are answered inline (only ping/tools are safe to auto-serve
-/// during a handshake; anything else gets a deferred-method error rather than
-/// being dropped); notifications are ignored. Returns the result object, or
-/// None on EOF/garbage (never panics, never hangs forever — the caller treats
-/// None as "client does not support roots").
-fn server_roots_list(stdin: &mut std::io::StdinLock<'static>, conn: &Conn) -> Option<Value> {
-    const SERVER_REQ_ID: i64 = -1_000_001; // negative: cannot collide with client ids
+const ROOTS_REQUEST_ID: i64 = -1_000_001;
+
+fn send_roots_list(conn: &Conn) {
     let req = json!({
         "jsonrpc": "2.0",
-        "id": SERVER_REQ_ID,
+        "id": ROOTS_REQUEST_ID,
         "method": "roots/list",
         "params": {},
     });
     conn.send_value(&req);
-    for _ in 0..64 {
-        // bounded: a client that floods 64 non-response lines is broken
-        let mut line = String::new();
-        match stdin.read_line(&mut line) {
-            Ok(0) => return None, // EOF
-            Ok(_) => {}
-            Err(_) => return None,
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
-            continue; // garbage line — skip
-        };
-        let msg_id = msg.get("id").cloned().unwrap_or(Value::Null);
-        if msg.get("method").is_some() {
-            // interleaved client message while our request is in flight
-            let method = msg["method"].as_str().unwrap_or_default();
-            let resp = if method == "ping" {
-                rpc_result(msg_id, json!({}))
-            } else if method.starts_with("notifications/") {
-                continue;
-            } else {
-                rpc_error(
-                    msg_id,
-                    -32601,
-                    "server busy with roots/list; resend after handshake",
-                )
-            };
-            conn.send(&resp);
-            continue;
-        }
-        if msg_id == json!(SERVER_REQ_ID) {
-            if msg.get("error").is_some() {
-                return None; // client explicitly refused (capability lied)
-            }
-            return Some(msg.get("result").cloned().unwrap_or(Value::Null));
-        }
-        // unrelated response — ignore
-    }
-    None
 }

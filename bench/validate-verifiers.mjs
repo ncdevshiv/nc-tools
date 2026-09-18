@@ -21,9 +21,14 @@ function setupWorkspace(root, task) {
   }
 }
 function gitInit(root) {
-  spawnSync('git', ['init'], { cwd: root });
-  spawnSync('git', ['config', 'user.email', 'bench@nc-tools.local'], { cwd: root });
-  spawnSync('git', ['config', 'user.name', 'nc-tools bench']);
+  const env = {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: join(tmpdir(), `nc-validator-empty-${process.pid}`),
+  };
+  spawnSync('git', ['-c', 'init.templateDir=', 'init'], { cwd: root, env });
+  spawnSync('git', ['config', 'user.email', 'bench@nc-tools.local'], { cwd: root, env });
+  spawnSync('git', ['config', 'user.name', 'nc-tools bench'], { cwd: root, env });
 }
 
 const results = [];

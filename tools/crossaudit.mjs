@@ -113,17 +113,31 @@ function connect(root) {
     report('snapshot+rollback removes post-snapshot files', !bGone.isError && bGone.data.exists === false ? 'PASS' : 'FAIL', '');
     const batch = await sc('batch.execute', { calls: [{ tool: 'sys.workspace', args: {} }, { tool: 'fs.read', args: { path: 'nope.txt' } }] });
     report('batch.execute per-item ok/failed', !batch.isError && batch.data.ok === 1 && batch.data.failed === 1 ? 'PASS' : 'FAIL', `ok=${batch.data.ok} failed=${batch.data.failed}`);
+    await sc('env.set', { name: 'GIT_CONFIG_NOSYSTEM', value: '1' });
+    await sc('env.set', {
+      name: 'GIT_CONFIG_GLOBAL',
+      value: join(tmpdir(), `nc-crossaudit-empty-${process.pid}`),
+    });
     // git in sandbox (init + status + commit)
-    const gitInit = spawn('git', ['init'], { cwd: sandbox });
+    const gitInit = spawn('git', ['-c', 'init.templateDir=', 'init'], { cwd: sandbox });
     await new Promise((res) => gitInit.on('close', res));
-    spawn('git', ['config', 'user.email', 'audit@x'], { cwd: sandbox });
-    spawn('git', ['config', 'user.name', 'audit'], { cwd: sandbox });
+    for (const args of [
+      ['config', 'user.email', 'audit@x'],
+      ['config', 'user.name', 'audit'],
+    ]) {
+      const config = spawn('git', args, { cwd: sandbox });
+      await new Promise((res) => config.on('close', res));
+    }
     await sc('fs.write', { path: 'g.txt', content: 'x' });
     const st = await sc('git.status', {});
     report('git.status on real repo', !st.isError && Array.isArray(st.data.files) ? 'PASS' : 'FAIL', `files=${st.data.files?.length}`);
     await sc('git.add', { paths: ['g.txt'] });
     const cm = await sc('git.commit', { message: 'audit commit' });
-    report('git add+commit round-trip', !cm.isError && typeof cm.data.sha === 'string' && cm.data.sha.length >= 7 ? 'PASS' : 'FAIL', `sha=${cm.data.sha?.slice(0, 8)}`);
+    report(
+      'git add+commit round-trip',
+      !cm.isError && typeof cm.data.sha === 'string' && cm.data.sha.length >= 7 ? 'PASS' : 'FAIL',
+      cm.isError ? JSON.stringify(cm.data.error) : `sha=${cm.data.sha?.slice(0, 8)}`,
+    );
 
     // ---- 3. codebase hygiene via the tools themselves (no direct reads) ------
     // cross-check the docs claim against code surfaced through search

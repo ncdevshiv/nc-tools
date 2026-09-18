@@ -20,6 +20,7 @@
 // (roster/lock/message read-modify-append) — two places that previously each
 // hand-rolled the same create-new + sleep loop.
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::errors::{codes, ToolError};
 
@@ -35,7 +36,10 @@ const POLL_MS: u64 = 5;
 #[derive(Debug)]
 pub struct FileLock {
     path: PathBuf,
+    owner: String,
 }
+
+static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 impl FileLock {
     /// Acquire the exclusive lock at `path`, waiting up to `timeout_ms`.
@@ -53,11 +57,20 @@ impl FileLock {
                 .open(path)
             {
                 Ok(mut f) => {
-                    // The lock is already held by the create; a marker failure
-                    // only costs the diagnostic, never the critical section.
-                    let _ = write_owner(&mut f, path);
+                    let owner = write_owner(&mut f, path).map_err(|e| {
+                        let _ = std::fs::remove_file(path);
+                        ToolError::with_hint(
+                            codes::TIMEOUT,
+                            format!("could not record lock owner {}: {e}", path.display()),
+                            serde_json::json!({
+                                "lock": path.display().to_string(),
+                                "hint": "the lock was not returned because its ownership marker could not be written"
+                            }),
+                        )
+                    })?;
                     return Ok(FileLock {
                         path: path.to_path_buf(),
+                        owner,
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -97,9 +110,20 @@ impl FileLock {
             .open(path)
         {
             Ok(mut f) => {
-                let _ = write_owner(&mut f, path);
+                let owner = write_owner(&mut f, path).map_err(|e| {
+                    let _ = std::fs::remove_file(path);
+                    ToolError::with_hint(
+                        codes::TIMEOUT,
+                        format!("could not record lock owner {}: {e}", path.display()),
+                        serde_json::json!({
+                            "lock": path.display().to_string(),
+                            "hint": "the lock was not returned because its ownership marker could not be written"
+                        }),
+                    )
+                })?;
                 Ok(Some(FileLock {
                     path: path.to_path_buf(),
+                    owner,
                 }))
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
@@ -129,7 +153,12 @@ impl FileLock {
         if self.path.as_os_str().is_empty() {
             return;
         }
-        let _ = std::fs::remove_file(&self.path);
+        if std::fs::read_to_string(&self.path)
+            .map(|contents| contents == self.owner)
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
         self.path = PathBuf::new();
     }
 }
@@ -181,16 +210,18 @@ fn lock_timeout(path: &Path, timeout_ms: u64) -> ToolError {
 
 /// Write the owner marker after winning `create_new`. The lock is already held
 /// at that point, so a failure here only loses the diagnostic.
-fn write_owner(f: &mut std::fs::File, path: &Path) -> std::io::Result<()> {
+fn write_owner(f: &mut std::fs::File, path: &Path) -> std::io::Result<String> {
     use std::io::Write;
     let body = format!(
-        "pid={} acquiredAt={} guards={}\n",
+        "pid={} owner={} acquiredAt={} guards={}\n",
         std::process::id(),
+        NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
         crate::helpers::now_iso(),
         path.display()
     );
     f.write_all(body.as_bytes())?;
-    f.flush()
+    f.flush()?;
+    Ok(body)
 }
 
 #[cfg(test)]
@@ -330,6 +361,23 @@ mod tests {
             // still acquirable right after
             assert!(FileLock::try_acquire(&p).unwrap().is_some());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_owner_cannot_remove_replacement_lock() {
+        let dir = temp_dir("ownership");
+        let p = dir.join("f.jsonl");
+        let first = FileLock::acquire(&p, 1000).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        let second = FileLock::acquire(&p, 1000).unwrap();
+        drop(first);
+        assert!(
+            p.exists(),
+            "the replacement lock must survive old-owner drop"
+        );
+        drop(second);
+        assert!(!p.exists(), "the current owner must release its lock");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

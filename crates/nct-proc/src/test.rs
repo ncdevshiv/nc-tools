@@ -133,6 +133,7 @@ fn run_suite(
         use std::os::windows::process::CommandExt;
         c.creation_flags(nct_core::CREATE_NO_WINDOW);
     }
+    nct_core::configure_child_process(&mut c);
     let mut child = c
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -439,6 +440,7 @@ fn run_cargo(
         .stderr(Stdio::piped())
         .env_clear()
         .envs(child_env(&k.session_env.snapshot()));
+    nct_core::configure_child_process(&mut c);
     let started = std::time::Instant::now();
     let mut child = match c.spawn() {
         Ok(ch) => ch,

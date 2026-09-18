@@ -399,6 +399,7 @@ fn build_command(k: &Kernel, cmd: &str, args: &[String], cwd_abs: &std::path::Pa
         use std::os::windows::process::CommandExt;
         c.creation_flags(CREATE_NO_WINDOW);
     }
+    nct_core::configure_child_process(&mut c);
     c
 }
 
@@ -804,6 +805,7 @@ fn build_command_env(
         use std::os::windows::process::CommandExt;
         c.creation_flags(nct_core::CREATE_NO_WINDOW);
     }
+    nct_core::configure_child_process(&mut c);
     c
 }
 
@@ -1405,6 +1407,7 @@ fn spawn_child(
         use std::os::windows::process::CommandExt;
         c.creation_flags(CREATE_NO_WINDOW);
     }
+    nct_core::configure_child_process(&mut c);
     c.spawn()
 }
 
@@ -1568,6 +1571,7 @@ pub(crate) fn run_sync(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    nct_core::configure_child_process(&mut cmd);
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

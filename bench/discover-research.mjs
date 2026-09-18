@@ -7,7 +7,7 @@
 // context. Output: every candidate with evidence — unbiased by construction.
 //
 // Usage: node bench/discover-research.mjs "<topic>" [maxBrands]
-import { withKernel } from 'file:///F:/nc-tools/tools/kernel-client.mjs';
+import { withKernel } from '../tools/kernel-client.mjs';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';

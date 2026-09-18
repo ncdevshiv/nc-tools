@@ -15,9 +15,9 @@ pub mod schema;
 pub mod session;
 
 pub use cancel::{
-    cancelled_error, clear_shutdown, current_cancel_flag, current_progress_ctx, is_cancelled,
-    kill_child_tree, report_progress, request_shutdown, set_cancel_flag, set_progress_ctx,
-    shutdown_requested, ProgressCtx, ProgressSink,
+    cancelled_error, clear_shutdown, configure_child_process, current_cancel_flag,
+    current_progress_ctx, is_cancelled, kill_child_tree, report_progress, request_shutdown,
+    set_cancel_flag, set_progress_ctx, shutdown_requested, ProgressCtx, ProgressSink,
 };
 pub use errors::ToolError;
 pub use filock::{lock_path_for, FileLock};
